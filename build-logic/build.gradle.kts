@@ -9,9 +9,9 @@ repositories {
 }
 
 dependencies {
-    compileOnly(files(libs.javaClass.superclass.protectionDomain.codeSource.location))
-    compileOnly(libs.android.gradlePlugin)
-    compileOnly(libs.kotlin.gradlePlugin)
+    compileOnly("com.android.tools.build:gradle:8.13.0")
+    compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.21")
+    compileOnly("org.jetbrains.kotlin.plugin.compose:org.jetbrains.kotlin.plugin.compose.gradle.plugin:2.0.21")
 }
 
 gradlePlugin {
