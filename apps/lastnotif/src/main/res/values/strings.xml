@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Last Notif</string>
+    <string name="notif_channel_alerts">Song Alerts</string>
+    <string name="notif_channel_keepalive">Last Notif Active</string>
+    <string name="notif_channel_alerts_desc">Now-playing track and lyric updates</string>
+    <string name="notif_channel_keepalive_desc">Background service indicator</string>
+    <string name="notif_keepalive_title">Last Notif is running</string>
+    <string name="notif_keepalive_text">Watching for Last.fm updates</string>
+</resources>

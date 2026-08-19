@@ -1,0 +1,14 @@
+node_modules/
+android/.gradle/
+android/.idea/
+android/app/build/
+android/capacitor-cordova-android-plugins/build/
+android/tvapp/build/
+android/local.properties
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+
+# Secrets (if accidentally committed here)
+google-services.json
+*firebase-adminsdk*.json

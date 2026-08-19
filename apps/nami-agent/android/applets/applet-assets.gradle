@@ -1,0 +1,28 @@
+def prepareAppletCapacitorAssets = tasks.register("prepareAppletCapacitorAssets", Copy) {
+    from("${project.projectDir}/src/main/assets/assets") {
+        into("public/assets")
+    }
+    from("${rootDir}/app/src/main/assets/capacitor.config.json")
+    from("${rootDir}/app/src/main/assets/capacitor.plugins.json")
+    from("${rootDir}/app/src/main/assets/public/cordova.js") {
+        into("public")
+    }
+    from("${rootDir}/app/src/main/assets/public/cordova_plugins.js") {
+        into("public")
+    }
+    into("${buildDir}/generated/appletCapacitorAssets")
+}
+
+android {
+    sourceSets {
+        main {
+            assets.srcDirs += "${buildDir}/generated/appletCapacitorAssets"
+        }
+    }
+}
+
+tasks.matching { task ->
+    task.name.startsWith("merge") && task.name.endsWith("Assets")
+}.configureEach {
+    dependsOn(prepareAppletCapacitorAssets)
+}

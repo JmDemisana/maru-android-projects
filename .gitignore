@@ -1,0 +1,25 @@
+# Build output
+*.apk
+*.aab
+build/
+.gradle/
+.kotlin/
+local.properties
+.idea/
+*.iml
+
+# Keystores & Secrets (NEVER COMMIT)
+apps/*/keystore/*.jks
+apps/*/keystore/*.keystore
+apps/*/keystore.properties
+*.keystore-password.txt
+*.keystore
+release.keystore
+
+# Node & Web
+node_modules/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db

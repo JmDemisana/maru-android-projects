@@ -1,0 +1,33 @@
+{
+  "name": "maru-mobile",
+  "version": "1.5.49",
+  "description": "Maru Android app",
+  "author": "Maru",
+  "license": "GPL-3.0",
+  "scripts": {
+    "build:web": "vite build",
+    "build:nami": "vite build --config vite.nami.config.ts",
+    "build:all": "npm run build:nami && npm run build:web",
+    "android:sync": "npm run build:all && npx cap sync android",
+    "android:app:debug": "./android/gradlew :app:assembleDebug",
+    "android:tv:debug": "./android/gradlew :tvapp:assembleDebug",
+    "android:release": "./android/gradlew :app:assembleRelease",
+    "android:photoserve:debug": "./android/gradlew :photoserve:assembleDebug",
+    "android:cupcuppercuppers:debug": "./android/gradlew :cupcuppercuppers:assembleDebug",
+    "android:daelornodael:debug": "./android/gradlew :daelornodael:assembleDebug",
+    "android:tupgradesolver:debug": "./android/gradlew :tupgradesolver:assembleDebug",
+    "android:schededit:debug": "./android/gradlew :schededit:assembleDebug",
+    "android:schededit:release": "./android/gradlew :schededit:assembleRelease"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.3.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.2.4"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.3.1",
+    "@capacitor/app": "^8.1.0",
+    "@capacitor/core": "^8.3.1",
+    "@capacitor/push-notifications": "^8.0.3"
+  }
+}

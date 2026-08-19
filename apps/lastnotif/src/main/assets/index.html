@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Last Notif</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ─── Header ─────────────────────────────────── -->
+  <header class="app-header">
+    <div class="header-icon">♥</div>
+    <div class="header-text">
+      <h1 class="header-title">Last Notif</h1>
+      <span class="header-sub">Last.fm notification watcher</span>
+    </div>
+    <button id="btn-toggle-service" class="service-btn" aria-label="Toggle service">
+      <span id="service-btn-label">Start</span>
+    </button>
+  </header>
+
+  <!-- ─── Now-playing preview ────────────────────── -->
+  <div id="now-playing-bar" class="now-playing-bar hidden">
+    <span class="np-icon">▶</span>
+    <span id="np-text" class="np-text">Nothing playing</span>
+  </div>
+
+  <main class="settings-list">
+
+    <!-- ── Notification Source ─────────────────────────── -->
+    <section class="card" id="card-source">
+      <div class="card-label">Notification Source</div>
+      <div class="segment-control">
+        <label class="segment-item">
+          <input type="radio" name="trackSource" value="device" id="source-device" />
+          <span>Device Media</span>
+        </label>
+        <label class="segment-item">
+          <input type="radio" name="trackSource" value="lastfm" id="source-lastfm" />
+          <span>Last.fm</span>
+        </label>
+        <label class="segment-item">
+          <input type="radio" name="trackSource" value="mixed" id="source-mixed" />
+          <span>Mixed</span>
+        </label>
+      </div>
+      <p class="card-hint" id="source-hint">Shows notifications for local device media if active, otherwise falls back to Last.fm polling.</p>
+      
+      <!-- Permission warning block, hidden by default -->
+      <div id="permission-warning" class="warning-card hidden" style="margin-top: 12px;">
+        <span class="warn-icon">⚠️</span>
+        <div class="warn-text">
+          <span>Device Media requires Notification Access.</span>
+          <button type="button" id="btn-grant-permission" class="text-link-btn">Grant Permission</button>
+        </div>
+      </div>
+
+      <!-- Notification permission warning, hidden by default -->
+      <div id="notif-permission-warning" class="warning-card hidden" style="margin-top: 12px;">
+        <span class="warn-icon">🔔</span>
+        <div class="warn-text">
+          <span>Notifications are blocked. Allow them to see track and lyric alerts.</span>
+          <button type="button" id="btn-grant-notif-permission" class="text-link-btn">Allow Notifications</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Username ─────────────────────────────── -->
+    <section class="card" id="card-username">
+      <div class="card-label">Last.fm Username</div>
+      <input
+        id="input-username"
+        class="text-input"
+        type="text"
+        placeholder="e.g. maru_chan"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+      />
+      <p class="card-hint">Your public Last.fm username — no password needed.</p>
+    </section>
+
+    <!-- ── Notify on song update ─────────────────── -->
+    <section class="card">
+      <div class="card-row">
+        <div class="card-row-text">
+          <div class="card-label">Notify on song update</div>
+          <div class="card-desc">Fires a notification each time the track changes.</div>
+        </div>
+        <label class="toggle" for="toggle-song-update">
+          <input type="checkbox" id="toggle-song-update" />
+          <span class="slider"></span>
+        </label>
+      </div>
+    </section>
+
+    <!-- ── Notify every X minutes ─────────────────── -->
+    <section class="card">
+      <div class="card-row">
+        <div class="card-row-text">
+          <div class="card-label">Notify every X minutes</div>
+          <div class="card-desc">Periodic reminder while something is playing.</div>
+        </div>
+        <label class="toggle" for="toggle-interval">
+          <input type="checkbox" id="toggle-interval" />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div id="interval-config" class="sub-config hidden">
+        <label class="sub-label" for="input-interval">Every</label>
+        <input
+          id="input-interval"
+          type="number"
+          class="number-input"
+          min="1"
+          max="1440"
+          value="5"
+        />
+        <span class="sub-label">minutes</span>
+      </div>
+    </section>
+
+    <!-- ── Notification format ─────────────────────── -->
+    <section class="card">
+      <div class="card-label">Notification Format</div>
+      <p class="card-hint">Use <code>{song_name}</code>, <code>{artist}</code>, <code>{album}</code>, <code>{polling_method}</code></p>
+      <div class="format-row">
+        <label class="format-label" for="input-main-fmt">Title</label>
+        <input
+          id="input-main-fmt"
+          class="text-input"
+          type="text"
+          placeholder="{song_name}"
+        />
+      </div>
+      <div class="format-row">
+        <label class="format-label" for="input-sub-fmt">Body</label>
+        <input
+          id="input-sub-fmt"
+          class="text-input"
+          type="text"
+          placeholder="{artist}"
+        />
+      </div>
+    </section>
+
+    <!-- ── Lyrics (experimental) ──────────────────── -->
+    <section class="card card-experimental">
+      <div class="card-row">
+        <div class="card-row-text">
+          <div class="card-label">
+            Lyrics sync
+            <span class="badge-experimental">Experimental</span>
+          </div>
+          <div class="card-desc">Shows the current lyric line as the notification.</div>
+        </div>
+        <label class="toggle" for="toggle-lyrics">
+          <input type="checkbox" id="toggle-lyrics" />
+          <span class="slider slider-pink"></span>
+        </label>
+      </div>
+
+      <div id="lyrics-warning" class="warning-card hidden">
+        <span class="warn-icon">⚠️</span>
+        <p class="warn-text">
+          Lyrics sync checks the site every second while a track is playing and
+          fires a new notification every time the lyric line changes
+          (roughly every few seconds). This will spam your notification shade
+          pretty hard. It also replaces the title format while active.
+          Turn it off for quieter notifications.
+        </p>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ─── Footer ─────────────────────────────────── -->
+  <footer class="app-footer">
+    <span>Powered by <strong>lrclib</strong> via <strong>Maru</strong></span>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
