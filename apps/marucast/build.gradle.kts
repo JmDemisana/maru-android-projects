@@ -3,6 +3,8 @@ plugins {
     id("maru.android.compose")
 }
 
+import java.util.Properties
+
 android {
     namespace = "com.maru.marucast"
 
@@ -12,6 +14,23 @@ android {
         versionName = "1.0.0"
     }
 
+    val keystorePropsFile = rootProject.file("apps/marucast/keystore.properties")
+    val keystoreProps = Properties().apply {
+        if (keystorePropsFile.exists()) load(keystorePropsFile.inputStream())
+    }
+
+    signingConfigs {
+        create("release") {
+            if (keystorePropsFile.exists()) {
+                val storeFilePath = keystoreProps.getProperty("storeFile") ?: "keystore/release.keystore"
+                storeFile = rootProject.file("apps/marucast/$storeFilePath")
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -19,6 +38,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (keystorePropsFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 }

@@ -2,6 +2,8 @@ plugins {
     id("maru.android.application")
 }
 
+import java.util.Properties
+
 android {
     namespace = "io.maru.lastnotif"
 
@@ -12,7 +14,7 @@ android {
     }
 
     val keystorePropsFile = rootProject.file("apps/lastnotif/keystore.properties")
-    val keystoreProps = java.util.Properties().apply {
+    val keystoreProps = Properties().apply {
         if (keystorePropsFile.exists()) load(keystorePropsFile.inputStream())
     }
 

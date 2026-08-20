@@ -47,7 +47,7 @@ import io.maru.marucast.service.MarucastForegroundService
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.TextStyle
-import io.maru.marucast.R
+import com.maru.marucast.R
 
 // Color palette matching the website default theme
 val DeepBackground = Color(0xFF050D18)
