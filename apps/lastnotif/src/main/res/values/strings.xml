@@ -7,4 +7,18 @@
     <string name="notif_channel_keepalive_desc">Background service indicator</string>
     <string name="notif_keepalive_title">Last Notif is running</string>
     <string name="notif_keepalive_text">Watching for Last.fm updates</string>
+
+    <string name="settings_title">Settings</string>
+    <string name="settings_username">Last.fm Username</string>
+    <string name="settings_track_source">Track Source</string>
+    <string name="settings_lyrics">Lyrics Toggle</string>
+    <string name="settings_scrobbling">Last.fm Scrobbling</string>
+    <string name="settings_notif_format">Notification Formats</string>
+    <string name="settings_main_format">Main Format</string>
+    <string name="settings_sub_format">Sub Format</string>
+    <string name="settings_interval">Interval Alert (min)</string>
+
+    <string name="btn_login_lastfm">Login to Last.fm</string>
+    <string name="btn_logout_lastfm">Logout from Last.fm</string>
+    <string name="logged_in_as">Logged in as %s</string>
 </resources>

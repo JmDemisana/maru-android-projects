@@ -1,5 +1,6 @@
 plugins {
     id("maru.android.application")
+    id("maru.android.compose")
 }
 
 import java.util.Properties
@@ -9,8 +10,8 @@ android {
 
     defaultConfig {
         applicationId = "io.maru.lastnotif"
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0"
     }
 
     val keystorePropsFile = rootProject.file("apps/lastnotif/keystore.properties")
@@ -45,13 +46,32 @@ android {
 }
 
 dependencies {
-    implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.appcompat)
-    implementation(libs.material.mdc)
-    implementation(libs.androidx.webkit)
-    implementation(libs.androidx.media)
-    implementation(project(":libs:shared-utils"))
+    val composeBom = platform(libs.compose.bom)
+    implementation(composeBom)
+    androidTestImplementation(composeBom)
 
+    implementation(libs.bundles.compose.core)
+    implementation(libs.compose.icons.extended)
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.lifecycle.viewmodel)
+    implementation(libs.androidx.lifecycle.service)
+    implementation(libs.coil.compose)
+
+    // Network & serialization
+    implementation(libs.bundles.network)
+
+    // DataStore
+    implementation(libs.androidx.datastore.prefs)
+
+    // Media
+    implementation(libs.androidx.media)
+
+    implementation(project(":libs:shared-utils"))
+    implementation(project(":libs:shared-ui"))
+
+    debugImplementation(libs.compose.ui.tooling)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

@@ -1,7 +1,7 @@
 [versions]
-agp                         = "8.13.0"
-kotlin                      = "2.0.21"
-ksp                         = "2.0.21-1.0.28"
+agp                         = "9.3.1"
+kotlin                      = "2.2.10"
+ksp                         = "2.3.6"
 
 androidx-core-ktx           = "1.17.0"
 androidx-appcompat          = "1.7.1"
@@ -23,6 +23,7 @@ okhttp                      = "4.12.0"
 gson                        = "2.10.1"
 jsoup                       = "1.18.1"
 coroutines                  = "1.8.1"
+coil                        = "2.7.0"
 
 mlkit-barcode               = "17.3.0"
 tensorflow-lite             = "2.16.1"
@@ -34,6 +35,7 @@ androidx-junit              = "1.2.1"
 androidx-espresso           = "3.6.1"
 
 [libraries]
+coil-compose                = { group = "io.coil-kt",          name = "coil-compose",          version.ref = "coil" }
 androidx-core-ktx           = { group = "androidx.core",       name = "core-ktx",              version.ref = "androidx-core-ktx" }
 androidx-appcompat          = { group = "androidx.appcompat",  name = "appcompat",              version.ref = "androidx-appcompat" }
 androidx-activity-compose   = { group = "androidx.activity",   name = "activity-compose",       version.ref = "androidx-activity-compose" }
