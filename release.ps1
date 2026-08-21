@@ -24,6 +24,10 @@ param(
 
     [string]$Version = "",
 
+    [string]$Notes = "",
+
+    [string]$NotesFile = "",
+
     [switch]$Draft
 )
 
@@ -96,9 +100,16 @@ Write-Host "==> Publishing GitHub Release" -ForegroundColor Yellow
 $releaseArgs = @(
     "release", "create", $tag,
     $apkPath,
-    "--title", "$App $Version",
-    "--notes", "Release $Version of $App."
+    "--title", "$App $Version"
 )
+
+if ($NotesFile -and (Test-Path $NotesFile)) {
+    $releaseArgs += @("--notes-file", $NotesFile)
+} elseif ($Notes) {
+    $releaseArgs += @("--notes", $Notes)
+} else {
+    $releaseArgs += @("--notes", "Release $Version of $App.")
+}
 
 if ($Draft) {
     $releaseArgs += "--draft"
