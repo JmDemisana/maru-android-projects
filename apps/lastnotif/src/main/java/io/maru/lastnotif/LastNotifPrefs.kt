@@ -18,7 +18,6 @@ class LastNotifPrefs(private val context: Context) {
         val KEY_INTERVAL_MINUTES = intPreferencesKey("notify_interval_minutes")
         val KEY_NOTIF_MAIN_FORMAT = stringPreferencesKey("notif_main_format")
         val KEY_NOTIF_SUB_FORMAT = stringPreferencesKey("notif_sub_format")
-        val KEY_LYRICS_ENABLED = booleanPreferencesKey("lyrics_enabled")
         val KEY_TRACK_SOURCE = stringPreferencesKey("track_source")
         val KEY_SERVICE_RUNNING = booleanPreferencesKey("service_running")
         val KEY_LAST_TRACK_KEY = stringPreferencesKey("last_track_key")
@@ -52,7 +51,6 @@ class LastNotifPrefs(private val context: Context) {
     val intervalMinutes: Flow<Int> = context.dataStore.data.map { it[KEY_INTERVAL_MINUTES] ?: 5 }
     val notifMainFormat: Flow<String> = context.dataStore.data.map { it[KEY_NOTIF_MAIN_FORMAT] ?: "{song_name}" }
     val notifSubFormat: Flow<String> = context.dataStore.data.map { it[KEY_NOTIF_SUB_FORMAT] ?: "{artist}" }
-    val lyricsEnabled: Flow<Boolean> = context.dataStore.data.map { it[KEY_LYRICS_ENABLED] ?: false }
     val trackSource: Flow<String> = context.dataStore.data.map { it[KEY_TRACK_SOURCE] ?: "mixed" }
     val serviceRunning: Flow<Boolean> = context.dataStore.data.map { it[KEY_SERVICE_RUNNING] ?: false }
     
@@ -78,7 +76,6 @@ class LastNotifPrefs(private val context: Context) {
     suspend fun setIntervalMinutes(value: Int) { context.dataStore.edit { it[KEY_INTERVAL_MINUTES] = value } }
     suspend fun setNotifMainFormat(value: String) { context.dataStore.edit { it[KEY_NOTIF_MAIN_FORMAT] = value } }
     suspend fun setNotifSubFormat(value: String) { context.dataStore.edit { it[KEY_NOTIF_SUB_FORMAT] = value } }
-    suspend fun setLyricsEnabled(value: Boolean) { context.dataStore.edit { it[KEY_LYRICS_ENABLED] = value } }
     suspend fun setTrackSource(value: String) { context.dataStore.edit { it[KEY_TRACK_SOURCE] = value } }
     suspend fun setServiceRunning(value: Boolean) { context.dataStore.edit { it[KEY_SERVICE_RUNNING] = value } }
     

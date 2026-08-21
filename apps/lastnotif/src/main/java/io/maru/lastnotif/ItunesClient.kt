@@ -1,10 +1,13 @@
 package io.maru.lastnotif
 
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.util.Log
+import android.widget.Toast
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
@@ -236,6 +239,59 @@ object ItunesClient {
         }
     }
 
+    suspend fun searchInstant(
+        query: String,
+        country: String = "PH",
+        lang: String = "en_us",
+        limit: Int = 15
+    ): List<ItunesSongMatch> = withContext(Dispatchers.IO) {
+        if (query.isBlank()) return@withContext emptyList()
+        try {
+            rateLimitLock.withLock {
+                val now = System.currentTimeMillis()
+                val elapsed = now - lastRequestTime
+                if (elapsed < MIN_REQUEST_INTERVAL_MS) {
+                    delay(MIN_REQUEST_INTERVAL_MS - elapsed)
+                }
+                lastRequestTime = System.currentTimeMillis()
+            }
+            val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
+            val url = "https://itunes.apple.com/search?term=$encodedQuery&media=music&limit=$limit&country=$country&lang=$lang"
+
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", "LastNotif/1.0 (Android)")
+                .get()
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext emptyList()
+                val body = response.body?.string() ?: return@withContext emptyList()
+                val searchRes = gson.fromJson(body, ItunesSearchResponse::class.java)
+                val results = searchRes.results ?: return@withContext emptyList()
+
+                results.map { entry ->
+                    val highResArt = entry.artworkUrl100?.let { art ->
+                        art.replace("100x100bb.jpg", "600x600bb.jpg")
+                            .replace("100x100bb.png", "600x600bb.png")
+                    }
+                    ItunesSongMatch(
+                        trackId = entry.trackId ?: 0L,
+                        trackName = entry.trackName ?: query,
+                        artistName = entry.artistName ?: "",
+                        collectionName = entry.collectionName ?: "",
+                        artworkUrl = highResArt,
+                        appleMusicUrl = entry.trackViewUrl,
+                        previewUrl = entry.previewUrl
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed searchInstant for query: $query", e)
+            emptyList()
+        }
+    }
+
     fun openInPreferredPlayer(
         context: Context,
         platform: String,
@@ -243,6 +299,26 @@ object ItunesClient {
         artistName: String,
         appleMusicUrl: String?
     ) {
+        // If direct track link is missing, copy search query to clipboard and notify user
+        if (appleMusicUrl.isNullOrBlank()) {
+            try {
+                val queryText = if (artistName.isNotEmpty() && trackName.isNotEmpty()) {
+                    "$artistName - $trackName"
+                } else {
+                    trackName.ifEmpty { artistName }
+                }
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                val clip = ClipData.newPlainText("Track", queryText)
+                clipboard?.setPrimaryClip(clip)
+
+                Toast.makeText(
+                    context,
+                    "We can't find the track link, but it is copied in case you want to search for it",
+                    Toast.LENGTH_LONG
+                ).show()
+            } catch (_: Exception) {}
+        }
+
         try {
             val intent = when (platform) {
                 "Spotify" -> {

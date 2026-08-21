@@ -23,7 +23,6 @@ class LastNotifPollerService : LifecycleService() {
         val artist: String = "",
         val album: String = "",
         val isPlaying: Boolean = false,
-        val lyricLine: String = "",
         val pollingMethod: String = "Idle",
         val timestamp: Long = System.currentTimeMillis()
     )
@@ -64,12 +63,6 @@ class LastNotifPollerService : LifecycleService() {
     private lateinit var prefs: LastNotifPrefs
     private lateinit var notifMgr: LastNotifNotificationManager
     private var pollJob: Job? = null
-
-    // Shared lyrics state
-    private var cachedLyricsForTrackKey = ""
-    private var cachedLyricLines: List<LastNotifApiClient.LyricLine>? = null
-    private var cachedSyncStartedAtMs = 0L
-    private var lastLyricIndex = -1
 
     // Scrobble state
     private var currentScrobbleTrack: LastNotifMediaMonitor.TrackInfo? = null
@@ -136,8 +129,7 @@ class LastNotifPollerService : LifecycleService() {
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in poll tick", e)
                 }
-                val lyricsEnabled = prefs.lyricsEnabled.first()
-                delay(if (lyricsEnabled) 1000L else 4000L)
+                delay(3000L)
             }
         }
     }
@@ -153,13 +145,15 @@ class LastNotifPollerService : LifecycleService() {
         val sessionKey = prefs.lastfmSessionKey.first()
         val scrobblePercent = prefs.scrobblePercentage.first()
 
-        val localTrack = LastNotifMediaMonitor.getActiveTrack(this)
-        val isLocalAllowed = localTrack != null && (localApps.isEmpty() || localApps.contains(localTrack.packageName))
+        val localTrack = LastNotifMediaMonitor.getActiveTrack(this, localApps)
+        val scrobbleTrack = if (scrobbleEnabled && sessionKey.isNotEmpty()) {
+            LastNotifMediaMonitor.getActiveTrack(this, scrobbleApps)
+        } else null
 
         var displayTrack: PolledTrack? = null
 
         // 1. LOCAL PILLAR
-        if (localEnabled && isLocalAllowed) {
+        if (localEnabled && localTrack != null) {
             if (localTrack.isPlaying) {
                 displayTrack = PolledTrack(localTrack.title, localTrack.artist, localTrack.album, isPlaying = true, "Local")
             }
@@ -174,15 +168,13 @@ class LastNotifPollerService : LifecycleService() {
         }
 
         // Fallback: If no playing track was found, but local track exists (paused), show it
-        if (displayTrack == null && localEnabled && isLocalAllowed) {
+        if (displayTrack == null && localEnabled && localTrack != null) {
             displayTrack = PolledTrack(localTrack.title, localTrack.artist, localTrack.album, isPlaying = false, "Local")
         }
 
         // 3. SCROBBLE PILLAR (Runs in background if enabled and active)
-        if (scrobbleEnabled && sessionKey.isNotEmpty() && localTrack != null && localTrack.isPlaying) {
-            if (scrobbleApps.isEmpty() || scrobbleApps.contains(localTrack.packageName)) {
-                handleScrobbling(localTrack, sessionKey, scrobblePercent)
-            }
+        if (scrobbleEnabled && sessionKey.isNotEmpty() && scrobbleTrack != null && scrobbleTrack.isPlaying) {
+            handleScrobbling(scrobbleTrack, sessionKey, scrobblePercent)
         }
 
         // --- Handle Notifications & Live Track for Display Track ---
@@ -191,20 +183,12 @@ class LastNotifPollerService : LifecycleService() {
             handleTrackChange(displayTrack, trackKey)
             handleIntervalAlert(displayTrack)
 
-            var currentLyric = ""
-            if (prefs.lyricsEnabled.first() && displayTrack.isPlaying) {
-                val lyricsUser = if (displayTrack.pollingMethod == "Receiver") receiverUser else receiverUser.ifEmpty { prefs.lastfmUsername.first().trim() }
-                if (lyricsUser.isNotEmpty()) {
-                    currentLyric = handleLyrics(displayTrack, trackKey, lyricsUser) ?: ""
-                }
-            }
-
             writeActiveTrack(
                 displayTrack.title, displayTrack.artist, displayTrack.album,
-                displayTrack.isPlaying, currentLyric, displayTrack.pollingMethod
+                displayTrack.isPlaying, displayTrack.pollingMethod
             )
         } else {
-            writeActiveTrack("", "", "", false, "", "Idle")
+            writeActiveTrack("", "", "", false, "Idle")
         }
     }
 
@@ -223,9 +207,6 @@ class LastNotifPollerService : LifecycleService() {
         val notifyOnChange = prefs.notifySongUpdate.first()
         if (pt.isPlaying && trackKey != lastKey) {
             prefs.setLastTrackKey(trackKey)
-            cachedLyricsForTrackKey = ""
-            cachedLyricLines = null
-            lastLyricIndex = -1
 
             if (notifyOnChange) {
                 notifMgr.postSongAlert(
@@ -254,51 +235,6 @@ class LastNotifPollerService : LifecycleService() {
                 )
             }
         }
-    }
-
-    private fun handleLyrics(pt: PolledTrack, trackKey: String, username: String): String? {
-        if (trackKey != cachedLyricsForTrackKey) {
-            cachedLyricsForTrackKey = trackKey
-            val lr = LastNotifApiClient.getLyrics(username)
-            if (lr != null) {
-                cachedLyricLines = lr.lines
-                cachedSyncStartedAtMs = lr.syncStartedAtMs
-                lastLyricIndex = -1
-            } else {
-                cachedLyricLines = null
-                return null
-            }
-        }
-
-        val lines = cachedLyricLines ?: return null
-        val posMs = System.currentTimeMillis() - cachedSyncStartedAtMs
-        val activeIndex = findLyricIndex(lines, posMs)
-
-        if (activeIndex >= 0 && activeIndex != lastLyricIndex) {
-            lastLyricIndex = activeIndex
-            val text = lines[activeIndex].text
-            if (text.isNotEmpty()) {
-                notifMgr.postLyricAlert(text, pt.title, pt.artist)
-            }
-            return text
-        }
-        return if (lastLyricIndex >= 0) lines[lastLyricIndex].text else ""
-    }
-
-    private fun findLyricIndex(lines: List<LastNotifApiClient.LyricLine>, posMs: Long): Int {
-        var low = 0
-        var high = lines.size - 1
-        var bestIdx = -1
-        while (low <= high) {
-            val mid = (low + high) ushr 1
-            if (lines[mid].timestampMs <= posMs) {
-                bestIdx = mid
-                low = mid + 1
-            } else {
-                high = mid - 1
-            }
-        }
-        return bestIdx
     }
 
     private fun handleScrobbling(pt: LastNotifMediaMonitor.TrackInfo, sessionKey: String, percentage: Int) {
@@ -332,10 +268,10 @@ class LastNotifPollerService : LifecycleService() {
         }
     }
 
-    private fun writeActiveTrack(title: String, artist: String, album: String, isPlaying: Boolean, lyricLine: String, pollingMethod: String) {
+    private fun writeActiveTrack(title: String, artist: String, album: String, isPlaying: Boolean, pollingMethod: String) {
         val now = System.currentTimeMillis()
         _liveTrack.value = if (title.isNotEmpty() || artist.isNotEmpty()) {
-            ActiveTrackState(title, artist, album, isPlaying, lyricLine, pollingMethod, now)
+            ActiveTrackState(title, artist, album, isPlaying, pollingMethod, now)
         } else null
 
         val state = JSONObject().apply {
@@ -343,7 +279,6 @@ class LastNotifPollerService : LifecycleService() {
             put("artist", artist)
             put("album", album)
             put("isPlaying", isPlaying)
-            put("lyricLine", lyricLine)
             put("pollingMethod", pollingMethod)
             put("timestamp", now)
         }

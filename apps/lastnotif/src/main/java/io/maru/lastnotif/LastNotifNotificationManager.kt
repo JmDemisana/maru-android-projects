@@ -110,14 +110,8 @@ class LastNotifNotificationManager(private val context: Context) {
         post(mainText, subText, pollingMethod)
     }
 
-    fun postLyricAlert(lyricLine: String, title: String, artist: String) {
-        val subText = if (title.isEmpty()) artist else "$title - $artist"
-        Log.d(TAG, "Posting lyric alert: $lyricLine")
-        post(lyricLine.ifEmpty { "Music" }, subText, "Lyrics")
-    }
-
     fun postTestAlert() {
-        post("Last Notif Connected", "Smart band notification sync is working!", "Test")
+        post("LastNotif Connected", "Smart band notification sync is working!", "Test")
     }
 
     private fun post(main: String, sub: String, source: String = "Alert") {

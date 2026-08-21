@@ -36,7 +36,7 @@ object LastNotifMediaMonitor {
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
     }
 
-    fun getActiveTrack(context: Context): TrackInfo? {
+    fun getActiveTrack(context: Context, allowedPackages: Set<String> = emptySet()): TrackInfo? {
         val manager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
             ?: return null
         if (!isNotificationAccessGranted(context)) return null
@@ -46,8 +46,15 @@ object LastNotifMediaMonitor {
             val controllers = manager.getActiveSessions(cn)
             if (controllers.isNullOrEmpty()) return null
 
+            val targetControllers = if (allowedPackages.isNotEmpty()) {
+                controllers.filter { allowedPackages.contains(it.packageName) }
+            } else {
+                controllers
+            }
+            if (targetControllers.isEmpty()) return null
+
             // 1. First look for an actively PLAYING controller with valid track metadata
-            for (controller in controllers) {
+            for (controller in targetControllers) {
                 if (controller.playbackState?.state == PlaybackState.STATE_PLAYING) {
                     val info = getTrackInfoFromController(controller)
                     if (info != null) return info
@@ -55,7 +62,7 @@ object LastNotifMediaMonitor {
             }
 
             // 2. Fallback to any controller with valid metadata (e.g. paused)
-            for (controller in controllers) {
+            for (controller in targetControllers) {
                 val info = getTrackInfoFromController(controller)
                 if (info != null) return info
             }

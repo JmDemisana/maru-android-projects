@@ -33,6 +33,23 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Auto-detect valid JAVA_HOME if missing or invalid
+if (-not $env:JAVA_HOME -or -not (Test-Path "$env:JAVA_HOME\bin\java.exe")) {
+    $candidateJdks = @(
+        "C:\Program Files\Android\Android Studio\jbr",
+        "C:\Program Files\Java\jdk*",
+        "C:\Program Files\Eclipse Adoptium\jdk*"
+    )
+    foreach ($cand in $candidateJdks) {
+        $resolved = Get-Item $cand -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($resolved -and (Test-Path "$($resolved.FullName)\bin\java.exe")) {
+            $env:JAVA_HOME = $resolved.FullName
+            $env:Path = "$($resolved.FullName)\bin;$env:Path"
+            break
+        }
+    }
+}
+
 # Resolve version from build.gradle.kts if not provided
 if (-not $Version) {
     $gradleFile = "apps/$App/build.gradle.kts"
