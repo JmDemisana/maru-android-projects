@@ -10,8 +10,8 @@ android {
 
     defaultConfig {
         applicationId = "io.maru.lastnotif"
-        versionCode = 5
-        versionName = "2.1.0"
+        versionCode = 6
+        versionName = "2.2.0"
     }
 
     val keystorePropsFile = rootProject.file("apps/lastnotif/keystore.properties")

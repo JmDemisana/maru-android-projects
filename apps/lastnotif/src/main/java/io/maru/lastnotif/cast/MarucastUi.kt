@@ -303,9 +303,9 @@ fun CastPairingSection(
             }
         }
 
-        GlassSectionHeader("WHERE TO USE MARUCAST", Icons.Default.Devices)
+        GlassSectionHeader("WAYS TO USE MARUCAST", Icons.Default.Devices)
 
-        // Web Receiver Card with Direct Link button
+        // 1. On the Web
         GlassCard {
             Column(
                 modifier = Modifier
@@ -316,65 +316,116 @@ fun CastPairingSection(
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .background(MaruAccentPink.copy(alpha = 0.15f), CircleShape),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(38.dp)
-                                .background(MaruAccentPink.copy(alpha = 0.15f), CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(Icons.Default.Language, null, tint = MaruAccentPink, modifier = Modifier.size(20.dp))
-                        }
-                        Column {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text("Marucast on the Web", color = MaruTextStrong, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
-                                Box(
-                                    modifier = Modifier
-                                        .background(MaruAccentGreen.copy(alpha = 0.2f), MaruPillShape)
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                ) {
-                                    Text("READY", color = MaruAccentGreen, fontSize = 8.5.sp, fontWeight = FontWeight.Bold)
-                                }
+                        Icon(Icons.Default.Language, null, tint = MaruAccentPink, modifier = Modifier.size(20.dp))
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("On the Web", color = MaruTextStrong, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
+                            Box(
+                                modifier = Modifier
+                                    .background(MaruAccentGreen.copy(alpha = 0.2f), MaruPillShape)
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text("READY", color = MaruAccentGreen, fontSize = 8.5.sp, fontWeight = FontWeight.Bold)
                             }
-                            Text("Open in browser on PC, Mac, or Tablet", color = MaruTextMuted, fontSize = 11.sp)
                         }
+                        Text("Open maruchansquigle.vercel.app/marucast on your PC, laptop, or tablet to get a 6-digit PIN.", color = MaruTextMuted, fontSize = 11.sp)
                     }
                 }
 
-                Text(
-                    "Launch the web receiver on any browser to get a 6-digit PIN, then enter it above to start streaming instantly.",
-                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.5.sp),
-                    color = MaruTextMuted
-                )
-
-                GlassButton(
-                    onClick = {
-                        try {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://maruchansquigle.vercel.app/marucast"))
-                            context.startActivity(intent)
-                        } catch (_: Exception) {}
-                    },
-                    borderColor = MaruAccentPink,
-                    background = MaruAccentPink.copy(alpha = 0.15f)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Row(
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
+                    GlassButton(
+                        onClick = {
+                            try {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                val clip = android.content.ClipData.newPlainText("Marucast Web URL", "https://maruchansquigle.vercel.app/marucast")
+                                clipboard.setPrimaryClip(clip)
+                                android.widget.Toast.makeText(context, "Copied Marucast web receiver URL!", android.widget.Toast.LENGTH_SHORT).show()
+                            } catch (_: Exception) {}
+                        },
+                        borderColor = MaruGlassBorderSoft,
+                        background = MaruGlassSubtleBg,
+                        modifier = Modifier.weight(1f)
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.OpenInNew, null, tint = MaruAccentPink, modifier = Modifier.size(15.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("OPEN WEB RECEIVER", color = MaruAccentPink, fontWeight = FontWeight.Bold, fontSize = 11.5.sp)
+                        Row(
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.ContentCopy, null, tint = MaruTextStrong, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("COPY LINK", color = MaruTextStrong, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        }
+                    }
+
+                    GlassButton(
+                        onClick = {
+                            try {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://maruchansquigle.vercel.app/marucast"))
+                                context.startActivity(intent)
+                            } catch (_: Exception) {}
+                        },
+                        borderColor = MaruAccentPink,
+                        background = MaruAccentPink.copy(alpha = 0.15f),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.OpenInNew, null, tint = MaruAccentPink, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("OPEN WEB", color = MaruAccentPink, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        }
                     }
                 }
             }
         }
 
-        // Android TV Card (Coming Soon)
+        // 2. On Maru Audio Suite
+        GlassCard {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .background(MaruAccentGreen.copy(alpha = 0.15f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.PhoneAndroid, null, tint = MaruAccentGreen, modifier = Modifier.size(20.dp))
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("On Maru Audio Suite", color = MaruTextStrong, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
+                        Box(
+                            modifier = Modifier
+                                .background(MaruAccentGreen.copy(alpha = 0.2f), MaruPillShape)
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text("THIS DEVICE", color = MaruAccentGreen, fontSize = 8.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    Text("Broadcast lossless audio, track metadata, and live synced lyrics over Wi-Fi.", color = MaruTextMuted, fontSize = 11.sp)
+                }
+            }
+        }
+
+        // 3. On Marucast for Android TV
         GlassCard {
             Row(
                 modifier = Modifier
@@ -393,7 +444,7 @@ fun CastPairingSection(
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Marucast for Android TV", color = MaruTextStrong, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
+                        Text("On Marucast for Android TV", color = MaruTextStrong, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
                         Box(
                             modifier = Modifier
                                 .background(MaruAccentBlue.copy(alpha = 0.2f), MaruPillShape)
@@ -407,7 +458,7 @@ fun CastPairingSection(
             }
         }
 
-        // Windows Tauri Card (Coming Soon)
+        // 4. On Marucast for Windows
         GlassCard {
             Row(
                 modifier = Modifier
@@ -426,7 +477,7 @@ fun CastPairingSection(
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Marucast for Windows (Tauri)", color = MaruTextStrong, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
+                        Text("On Marucast for Windows (Tauri)", color = MaruTextStrong, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
                         Box(
                             modifier = Modifier
                                 .background(Color(0xFFC88CFF).copy(alpha = 0.2f), MaruPillShape)
