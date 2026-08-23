@@ -238,13 +238,45 @@ fun MainScreen(prefs: LastNotifPrefs) {
     var viewedProfileUsername by remember { mutableStateOf<String?>(null) }
     var selectedSongDetail by remember { mutableStateOf<SongDetailState?>(null) }
 
-    // Screen audio capture projection data for Marucast (only requested on-demand when starting Marucast)
+    // Screen audio capture projection data for Marucast (requested when starting system audio broadcast)
     var projectionIntentData by remember { mutableStateOf<Intent?>(null) }
+    var pendingCastToken by remember { mutableStateOf<String?>(null) }
+    var pendingCastCallback by remember { mutableStateOf<((Boolean, String?) -> Unit)?>(null) }
+
+    fun launchCastService(token: String, projData: Intent?, onResult: (Boolean, String?) -> Unit) {
+        val serviceIntent = Intent(context, MarucastForegroundService::class.java).apply {
+            action = MarucastForegroundService.ACTION_START
+            putExtra(MarucastForegroundService.EXTRA_TOKEN, token)
+            if (projData != null) {
+                putExtra(MarucastForegroundService.EXTRA_PROJECTION_DATA, projData)
+            }
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent)
+            } else {
+                context.startService(serviceIntent)
+            }
+            onResult(true, null)
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to start Marucast service", e)
+            onResult(false, e.localizedMessage ?: "Failed to start broadcast service")
+        }
+    }
+
     val screenCaptureLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            projectionIntentData = result.data
+        val data = if (result.resultCode == Activity.RESULT_OK) result.data else null
+        if (data != null) {
+            projectionIntentData = data
+        }
+        val token = pendingCastToken
+        val cb = pendingCastCallback
+        pendingCastToken = null
+        pendingCastCallback = null
+        if (token != null && cb != null) {
+            launchCastService(token, data, cb)
         }
     }
 
@@ -589,29 +621,29 @@ fun MainScreen(prefs: LastNotifPrefs) {
                                         withContext(Dispatchers.IO) {
                                             MarucastApiClient.lookupPin(pin, object : MarucastApiClient.Callback<String> {
                                                 override fun onSuccess(token: String) {
-                                                    val serviceIntent = Intent(context, MarucastForegroundService::class.java).apply {
-                                                        action = MarucastForegroundService.ACTION_START
-                                                        putExtra(MarucastForegroundService.EXTRA_TOKEN, token)
-                                                        if (projectionIntentData != null) {
-                                                            putExtra(MarucastForegroundService.EXTRA_PROJECTION_DATA, projectionIntentData)
+                                                    scope.launch(Dispatchers.Main) {
+                                                        if (!MarucastForegroundService.isMicMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && projectionIntentData == null) {
+                                                            pendingCastToken = token
+                                                            pendingCastCallback = onResult
+                                                            val mediaProjectionManager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                                                            screenCaptureLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
+                                                        } else {
+                                                            launchCastService(token, projectionIntentData, onResult)
                                                         }
                                                     }
-                                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                                        context.startForegroundService(serviceIntent)
-                                                    } else {
-                                                        context.startService(serviceIntent)
-                                                    }
-                                                    onResult(true, null)
                                                 }
 
                                                 override fun onError(error: String) {
-                                                    onResult(false, error)
+                                                    scope.launch(Dispatchers.Main) {
+                                                        onResult(false, error)
+                                                    }
                                                 }
                                             })
                                         }
                                     }
                                 },
                                 onStopStream = {
+                                    projectionIntentData = null
                                     val stopIntent = Intent(context, MarucastForegroundService::class.java).apply {
                                         action = MarucastForegroundService.ACTION_STOP
                                     }

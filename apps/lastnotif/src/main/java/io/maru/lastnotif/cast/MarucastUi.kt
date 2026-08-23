@@ -668,6 +668,33 @@ fun CastNowPlayingSection(onDisconnect: () -> Unit) {
 
                 HorizontalDivider(color = MaruGlassBorderSoft)
 
+                var isKaraoke by remember { mutableStateOf(MarucastForegroundService.isKaraokeMode) }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Karaoke Vocal Reducer", color = MaruTextStrong, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text(if (isKaraoke) "Center-channel vocal suppression active" else "Full stereo mix", color = MaruTextMuted, fontSize = 11.sp)
+                    }
+                    Switch(
+                        checked = isKaraoke,
+                        onCheckedChange = {
+                            isKaraoke = it
+                            MarucastForegroundService.isKaraokeMode = it
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = MaruAccentPink,
+                            uncheckedThumbColor = MaruTextMuted,
+                            uncheckedTrackColor = MaruGlassSubtleBg
+                        )
+                    )
+                }
+
+                HorizontalDivider(color = MaruGlassBorderSoft)
+
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
