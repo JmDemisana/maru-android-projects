@@ -622,13 +622,13 @@ fun MainScreen(prefs: LastNotifPrefs) {
                                             MarucastApiClient.lookupPin(pin, object : MarucastApiClient.Callback<String> {
                                                 override fun onSuccess(token: String) {
                                                     scope.launch(Dispatchers.Main) {
-                                                        if (!MarucastForegroundService.isMicMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && projectionIntentData == null) {
+                                                        if (!MarucastForegroundService.isMicMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                                                             pendingCastToken = token
                                                             pendingCastCallback = onResult
                                                             val mediaProjectionManager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                                                             screenCaptureLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
                                                         } else {
-                                                            launchCastService(token, projectionIntentData, onResult)
+                                                            launchCastService(token, null, onResult)
                                                         }
                                                     }
                                                 }

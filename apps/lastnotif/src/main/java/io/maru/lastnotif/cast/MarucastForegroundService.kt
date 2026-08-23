@@ -125,7 +125,7 @@ class MarucastForegroundService : Service() {
         this.projectionIntentData = projectionData
         
         ipAddress = getLocalIpAddress(this) ?: "127.0.0.1"
-        val streamUrl = "http://$ipAddress:48543/stream"
+        val streamUrl = "http://$ipAddress:48543/live.pcm"
         
         Log.i(TAG, "Starting stream relay on: $streamUrl")
         

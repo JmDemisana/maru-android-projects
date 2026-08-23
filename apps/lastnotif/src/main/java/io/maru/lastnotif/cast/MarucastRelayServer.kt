@@ -84,8 +84,8 @@ class MarucastRelayServer(private val port: Int = 48543) {
                 return
             }
 
-            if (path == "/stream") {
-                handleStreamRequest(output)
+            if (path == "/live.pcm" || path == "/stream") {
+                handleLiveStreamRequest(output, path == "/stream")
             } else if (path == "/artwork.jpg") {
                 handleArtworkRequest(output)
             } else if (path == "/status") {
@@ -128,7 +128,7 @@ class MarucastRelayServer(private val port: Int = 48543) {
             "karaokeEnabled" to MarucastForegroundService.isKaraokeMode,
             "karaokeDelayMs" to 0,
             "lastError" to null,
-            "liveStreamUrl" to "http://$ip:48543/stream",
+            "liveStreamUrl" to "http://$ip:48543/live.pcm",
             "mediaAccessEnabled" to true,
             "mediaAppLabel" to (CastMediaState.appLabel ?: "Android Player"),
             "mediaArtist" to (CastMediaState.artist ?: "Unknown Artist"),
@@ -195,23 +195,28 @@ class MarucastRelayServer(private val port: Int = 48543) {
         }
     }
 
-    private fun handleStreamRequest(out: OutputStream) {
+    private fun handleLiveStreamRequest(out: OutputStream, includeWavHeader: Boolean) {
         val sampleRate = 44100
         val channels = 2
         val bitsPerSample = 16
 
         val response = "HTTP/1.1 200 OK\r\n" +
-                "Content-Type: audio/x-wav\r\n" +
+                "Content-Type: ${if (includeWavHeader) "audio/x-wav" else "application/octet-stream"}\r\n" +
+                "X-Maru-Sample-Rate: $sampleRate\r\n" +
+                "X-Maru-Channel-Count: $channels\r\n" +
                 "Connection: close\r\n" +
                 "Access-Control-Allow-Origin: *\r\n" +
+                "Access-Control-Expose-Headers: X-Maru-Sample-Rate, X-Maru-Channel-Count\r\n" +
                 "Cache-Control: no-cache, no-store, must-revalidate\r\n" +
                 "Pragma: no-cache\r\n" +
                 "Expires: 0\r\n\r\n"
         
         try {
             out.write(response.toByteArray())
-            val header = getWavHeader(sampleRate, channels, bitsPerSample)
-            out.write(header)
+            if (includeWavHeader) {
+                val header = getWavHeader(sampleRate, channels, bitsPerSample)
+                out.write(header)
+            }
             out.flush()
             streamingClients.add(out)
         } catch (e: Exception) {
