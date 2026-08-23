@@ -6,58 +6,71 @@ import android.content.Intent
 import android.provider.Settings
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowForward
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.rounded.Pause
-import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.SkipNext
-import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.draw.scale
+import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import io.maru.marucast.media.MediaSessionState
-import io.maru.marucast.media.MarucastNotificationListener
-import io.maru.marucast.service.MarucastForegroundService
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.maru.marucast.R
+import io.maru.marucast.media.MarucastNotificationListener
+import io.maru.marucast.media.MediaSessionState
+import io.maru.marucast.service.MarucastForegroundService
 
-// Color palette matching the website default theme
-val DeepBackground = Color(0xFF050D18)
-val DarkNavyAlt = Color(0xFF0A1931)
-val AccentBlue = Color(0xFF5EB0FF)
-val AccentPurple = Color(0xFFA78BFA)
-val TextLight = Color(0xFFF5F8FF)
-val TextMuted = Color(0xFF8C95A5)
+// -------------------------------------------------------------------------------------------------
+// 🎨 MARUCAST FLAT-GLASS COLOR PALETTE & SHAPES
+// -------------------------------------------------------------------------------------------------
+val MaruDarkBg = Color(0xFF07090E)
+val MaruGlassCardBg = Color(0xFF101420).copy(alpha = 0.72f)
+val MaruGlassSubtleBg = Color(0xFF161B2E).copy(alpha = 0.50f)
+val MaruGlassBorder = Color(0xFF3B4866).copy(alpha = 0.45f)
+val MaruGlassBorderSoft = Color(0xFF283147).copy(alpha = 0.35f)
+val MaruAccentPink = Color(0xFFFF5C93)
+val MaruAccentBlue = Color(0xFF38BDF8)
+val MaruAccentPurple = Color(0xFFA78BFA)
+val MaruAccentGreen = Color(0xFF34D399)
+val MaruAccentAmber = Color(0xFFFBBF24)
+val MaruTextStrong = Color(0xFFF1F5F9)
+val MaruTextMuted = Color(0xFF94A3B8)
 
-// Space Grotesk Font Family
+val MaruCardShape = RoundedCornerShape(20.dp)
+val MaruPillShape = RoundedCornerShape(999.dp)
+
+// Space Grotesk Typography
 val SpaceGrotesk = FontFamily(
     Font(R.font.space_grotesk_regular, FontWeight.Normal),
     Font(R.font.space_grotesk_medium, FontWeight.Medium),
@@ -67,7 +80,6 @@ val SpaceGrotesk = FontFamily(
     Font(R.font.space_grotesk_bold, FontWeight.Black)
 )
 
-// Custom Material 3 Typography matching the website
 val MaruTypography = Typography(
     displayLarge = TextStyle(fontFamily = SpaceGrotesk),
     displayMedium = TextStyle(fontFamily = SpaceGrotesk),
@@ -86,7 +98,58 @@ val MaruTypography = Typography(
     labelSmall = TextStyle(fontFamily = SpaceGrotesk)
 )
 
-@OptIn(ExperimentalAnimationApi::class)
+// -------------------------------------------------------------------------------------------------
+// 💎 REUSABLE GLASS COMPONENTS
+// -------------------------------------------------------------------------------------------------
+@Composable
+fun MaruGlassCard(
+    modifier: Modifier = Modifier,
+    border: Color = MaruGlassBorderSoft,
+    glowColor: Color = Color.Transparent,
+    shape: Shape = MaruCardShape,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .then(
+                if (glowColor != Color.Transparent) {
+                    Modifier.border(1.dp, glowColor, shape)
+                } else Modifier
+            ),
+        shape = shape,
+        color = MaruGlassCardBg,
+        border = BorderStroke(1.dp, border)
+    ) {
+        Column(content = content)
+    }
+}
+
+@Composable
+fun MaruGlassSectionHeader(title: String, icon: ImageVector, accentColor: Color = MaruAccentBlue) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, null, tint = accentColor, modifier = Modifier.size(15.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(
+            title,
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.8.sp,
+                fontSize = 11.sp
+            ),
+            color = accentColor
+        )
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// 📱 MAIN MARUCAST APP CONTENT
+// -------------------------------------------------------------------------------------------------
 @Composable
 fun MarucastAppContent(
     modifier: Modifier = Modifier,
@@ -97,7 +160,6 @@ fun MarucastAppContent(
     var hasNotificationAccess by remember { mutableStateOf(isNotificationServiceEnabled(context)) }
     var currentToken by remember { mutableStateOf(MarucastForegroundService.currentToken) }
 
-    // Periodically check if permission was granted
     LaunchedEffect(Unit) {
         while (true) {
             hasNotificationAccess = isNotificationServiceEnabled(context)
@@ -106,35 +168,27 @@ fun MarucastAppContent(
         }
     }
 
-    MaterialTheme(
-        typography = MaruTypography
-    ) {
-        CompositionLocalProvider(
-            LocalTextStyle provides LocalTextStyle.current.copy(fontFamily = SpaceGrotesk)
-        ) {
+    MaterialTheme(typography = MaruTypography) {
+        CompositionLocalProvider(LocalTextStyle provides LocalTextStyle.current.copy(fontFamily = SpaceGrotesk)) {
             Box(
                 modifier = modifier
                     .fillMaxSize()
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(DeepBackground, DarkNavyAlt)
-                        )
-                    )
+                    .background(MaruDarkBg)
             ) {
-                // Decorative background glowing spots
+                // Ambient decorative glow spots
                 Box(
                     modifier = Modifier
-                        .size(300.dp)
+                        .size(320.dp)
                         .align(Alignment.TopEnd)
-                        .offset(x = 100.dp, y = (-100).dp)
-                        .background(Brush.radialGradient(listOf(AccentBlue.copy(alpha = 0.15f), Color.Transparent)))
+                        .offset(x = 100.dp, y = (-80).dp)
+                        .background(Brush.radialGradient(listOf(MaruAccentBlue.copy(alpha = 0.14f), Color.Transparent)))
                 )
                 Box(
                     modifier = Modifier
-                        .size(300.dp)
+                        .size(340.dp)
                         .align(Alignment.BottomStart)
                         .offset(x = (-100).dp, y = 100.dp)
-                        .background(Brush.radialGradient(listOf(AccentPurple.copy(alpha = 0.15f), Color.Transparent)))
+                        .background(Brush.radialGradient(listOf(MaruAccentPink.copy(alpha = 0.12f), Color.Transparent)))
                 )
 
                 Column(
@@ -142,53 +196,91 @@ fun MarucastAppContent(
                         .fillMaxSize()
                         .statusBarsPadding()
                         .navigationBarsPadding()
-                        .padding(24.dp),
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    // Header
+                    // Header Bar
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 16.dp),
+                            .padding(vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(
-                            text = "MARUCAST",
-                            color = AccentBlue,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = 2.sp
-                        )
-                        
-                        // Status badge
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                painter = painterResource(id = R.drawable.ic_maru_heart),
+                                contentDescription = null,
+                                tint = Color.Unspecified,
+                                modifier = Modifier.size(28.dp)
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "MARUCAST",
+                                    color = MaruAccentBlue,
+                                    fontSize = 17.sp,
+                                    fontWeight = FontWeight.Black,
+                                    letterSpacing = 1.5.sp
+                                )
+                                Text(
+                                    text = "AUDIO BROADCASTER",
+                                    color = MaruTextMuted,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 0.8.sp
+                                )
+                            }
+                        }
+
+                        // Live Status Badge
+                        val isCasting = currentToken != null
                         Box(
                             modifier = Modifier
-                                .clip(RoundedCornerShape(999.dp))
-                                .background(if (currentToken != null) Color(0x334CAF50) else Color(0x33FF9800))
+                                .background(
+                                    if (isCasting) MaruAccentGreen.copy(alpha = 0.16f) else MaruGlassSubtleBg,
+                                    MaruPillShape
+                                )
                                 .border(
                                     1.dp,
-                                    if (currentToken != null) Color(0xFF4CAF50) else Color(0xFFFF9800),
-                                    RoundedCornerShape(999.dp)
+                                    if (isCasting) MaruAccentGreen.copy(alpha = 0.5f) else MaruGlassBorderSoft,
+                                    MaruPillShape
                                 )
                                 .padding(horizontal = 12.dp, vertical = 6.dp)
                         ) {
-                            Text(
-                                text = if (currentToken != null) "Casting" else "Not Paired",
-                                color = TextLight,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(7.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isCasting) MaruAccentGreen else MaruTextMuted)
+                                )
+                                Text(
+                                    text = if (isCasting) "CASTING" else "READY TO PAIR",
+                                    color = if (isCasting) MaruAccentGreen else MaruTextMuted,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 0.5.sp
+                                )
+                            }
                         }
                     }
 
                     if (!hasNotificationAccess) {
-                        // Prompt to enable Notification listener
                         PermissionPromptCard {
                             context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                         }
                     } else {
-                        AnimatedContent(targetState = currentToken) { token ->
+                        AnimatedContent(
+                            targetState = currentToken,
+                            transitionSpec = {
+                                fadeIn(tween(300)) togetherWith fadeOut(tween(300))
+                            },
+                            label = "screen_transition"
+                        ) { token ->
                             if (token == null) {
                                 PairingScreen(
                                     onPairCodeEntered = { pin, onResult ->
@@ -211,47 +303,79 @@ fun MarucastAppContent(
     }
 }
 
+// -------------------------------------------------------------------------------------------------
+// ⚠️ NOTIFICATION PERMISSION PROMPT CARD
+// -------------------------------------------------------------------------------------------------
 @Composable
 fun PermissionPromptCard(onGrantClick: () -> Unit) {
-    Card(
+    MaruGlassCard(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 40.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkNavyAlt.copy(alpha = 0.8f)),
-        shape = RoundedCornerShape(24.dp),
-        border = BorderStroke(1.dp, Color(0x1FFFFFFF))
+            .padding(top = 30.dp),
+        border = MaruAccentAmber.copy(alpha = 0.45f),
+        glowColor = MaruAccentAmber.copy(alpha = 0.15f)
     ) {
         Column(
-            modifier = Modifier.padding(24.dp),
+            modifier = Modifier.padding(22.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(CircleShape)
+                    .background(MaruAccentAmber.copy(alpha = 0.15f))
+                    .border(1.dp, MaruAccentAmber.copy(alpha = 0.4f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.NotificationsActive,
+                    contentDescription = null,
+                    tint = MaruAccentAmber,
+                    modifier = Modifier.size(26.dp)
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+
             Text(
                 text = "Notification Access Required",
-                color = TextLight,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                color = MaruTextStrong,
                 textAlign = TextAlign.Center
             )
-            Spacer(modifier = Modifier.height(12.dp))
+
+            Spacer(Modifier.height(8.dp))
+
             Text(
-                text = "Marucast needs Notification Access permission to sync your current playing music title, artist, and album artwork with the browser receiver.",
-                color = TextMuted,
-                fontSize = 14.sp,
+                text = "Marucast needs Notification Listener access to detect active media playback, sync track titles & artist names, and transmit cover artwork to your receiver.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaruTextMuted,
                 textAlign = TextAlign.Center,
-                lineHeight = 20.sp
+                lineHeight = 18.sp
             )
-            Spacer(modifier = Modifier.height(24.dp))
+
+            Spacer(Modifier.height(20.dp))
+
             Button(
                 onClick = onGrantClick,
-                colors = ButtonDefaults.buttonColors(containerColor = AccentBlue),
-                shape = RoundedCornerShape(12.dp)
+                colors = ButtonDefaults.buttonColors(containerColor = MaruAccentAmber),
+                shape = MaruPillShape,
+                modifier = Modifier.fillMaxWidth().height(46.dp)
             ) {
-                Text("Grant Permission", color = DeepBackground, fontWeight = FontWeight.Bold)
+                Text(
+                    "Grant Permission",
+                    color = MaruDarkBg,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.5.sp
+                )
             }
         }
     }
 }
 
+// -------------------------------------------------------------------------------------------------
+// 🔢 PAIRING SCREEN (PIN INPUT & NUMPAD)
+// -------------------------------------------------------------------------------------------------
 @Composable
 fun PairingScreen(onPairCodeEntered: (String, onResult: (Boolean, String?) -> Unit) -> Unit) {
     var pinText by remember { mutableStateOf("") }
@@ -270,128 +394,154 @@ fun PairingScreen(onPairCodeEntered: (String, onResult: (Boolean, String?) -> Un
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Spacer(modifier = Modifier.height(30.dp))
+            Spacer(modifier = Modifier.height(14.dp))
+
             Text(
-                text = "Enter Pairing PIN",
-                color = TextLight,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold
+                text = "Pair with Web Receiver",
+                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                color = MaruTextStrong
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
             Text(
-                text = "Look at the Marucast applet on the website and enter the 6-digit code shown there.",
-                color = TextMuted,
-                fontSize = 14.sp,
+                text = "Open the Marucast applet on your PC/TV and enter the 6-digit PIN.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaruTextMuted,
                 textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 16.dp)
+                modifier = Modifier.padding(horizontal = 12.dp)
             )
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // Audio Source Selector
+            // Audio Source Selector (System Music vs Microphone)
             Row(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(DarkNavyAlt)
+                    .background(MaruGlassSubtleBg, MaruPillShape)
+                    .border(1.dp, MaruGlassBorderSoft, MaruPillShape)
                     .padding(4.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 val modes = listOf(
-                    false to "System Music",
-                    true to "Microphone"
+                    false to ("System Music" to Icons.Default.MusicNote),
+                    true to ("Microphone" to Icons.Default.Mic)
                 )
-                modes.forEach { (isMic, label) ->
+                modes.forEach { (isMic, info) ->
+                    val (label, icon) = info
                     val selected = audioSourceIsMic == isMic
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (selected) AccentBlue else Color.Transparent)
+                            .clip(MaruPillShape)
+                            .background(if (selected) MaruAccentBlue.copy(alpha = 0.22f) else Color.Transparent)
+                            .border(
+                                1.dp,
+                                if (selected) MaruAccentBlue else Color.Transparent,
+                                MaruPillShape
+                            )
                             .clickable {
                                 audioSourceIsMic = isMic
                                 MarucastForegroundService.isMicMode = isMic
                             }
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                            .padding(horizontal = 16.dp, vertical = 7.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = label,
-                            color = if (selected) DeepBackground else TextLight,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                icon,
+                                contentDescription = null,
+                                tint = if (selected) MaruAccentBlue else MaruTextMuted,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Text(
+                                text = label,
+                                color = if (selected) MaruAccentBlue else MaruTextMuted,
+                                fontSize = 11.5.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                            )
+                        }
                     }
                 }
             }
-            
-            Spacer(modifier = Modifier.height(24.dp))
 
-            // Pin view (Responsive and equal sizing for all 6 boxes)
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // 6-digit PIN Input Boxes
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    .padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 for (i in 0 until 6) {
                     val char = pinText.getOrNull(i)
+                    val isCurrentSlot = pinText.length == i
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .aspectRatio(1f)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(DarkNavyAlt)
+                            .aspectRatio(0.9f)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (char != null) MaruAccentBlue.copy(alpha = 0.12f) else MaruGlassSubtleBg)
                             .border(
-                                1.dp,
-                                if (char != null) AccentBlue else Color(0x2AFFFFFF),
-                                RoundedCornerShape(12.dp)
+                                BorderStroke(
+                                    if (char != null || isCurrentSlot) 1.5.dp else 1.dp,
+                                    if (char != null) MaruAccentBlue else if (isCurrentSlot) MaruAccentPink else MaruGlassBorderSoft
+                                ),
+                                RoundedCornerShape(14.dp)
                             ),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
                             text = char?.toString() ?: "",
-                            color = AccentBlue,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold
+                            color = MaruAccentBlue,
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.Black
                         )
                     }
                 }
             }
 
             if (pinText.isNotEmpty() || isLoading) {
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(12.dp))
                 Text(
                     text = if (isLoading) "Cancel" else "Clear All",
-                    color = if (isLoading) Color(0xFFE57373) else AccentBlue,
-                    fontSize = 14.sp,
+                    color = if (isLoading) MaruAccentPink else MaruTextMuted,
+                    fontSize = 12.5.sp,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
+                        .clip(MaruPillShape)
                         .clickable {
                             isLoading = false
                             pinText = ""
                             errorMessage = null
                         }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .padding(horizontal = 14.dp, vertical = 6.dp)
                 )
             }
 
             errorMessage?.let { error ->
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(text = error, color = Color(0xFFE57373), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = error,
+                    color = MaruAccentPink,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center
+                )
             }
 
             if (isLoading) {
-                Spacer(modifier = Modifier.height(24.dp))
-                CircularProgressIndicator(color = AccentBlue, modifier = Modifier.size(24.dp))
+                Spacer(modifier = Modifier.height(16.dp))
+                CircularProgressIndicator(color = MaruAccentBlue, modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp)
             }
         }
 
-        // Custom numerical keyboard
+        // Custom Tactile Number Pad
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 16.dp)
+                .padding(bottom = 12.dp)
         ) {
             val keys = listOf(
                 listOf("1", "2", "3"),
@@ -403,80 +553,98 @@ fun PairingScreen(onPairCodeEntered: (String, onResult: (Boolean, String?) -> Un
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     row.forEach { key ->
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(56.dp)
-                                .padding(horizontal = 6.dp)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(Color(0x0AFFFFFF))
-                                .clickable {
-                                    if (isLoading) return@clickable
-                                    errorMessage = null
-                                    when (key) {
-                                        "CLR" -> {
-                                            if (pinText.isNotEmpty()) {
-                                                pinText = pinText.dropLast(1)
+                        val isAction = key == "OK" || key == "CLR"
+                        Surface(
+                            onClick = {
+                                if (isLoading) return@Surface
+                                errorMessage = null
+                                when (key) {
+                                    "CLR" -> {
+                                        if (pinText.isNotEmpty()) pinText = pinText.dropLast(1)
+                                    }
+                                    "OK" -> {
+                                        if (pinText.length == 6) {
+                                            isLoading = true
+                                            errorMessage = null
+                                            onPairCodeEntered(pinText) { success, error ->
+                                                isLoading = false
+                                                if (!success) errorMessage = error ?: "Failed to pair"
                                             }
-                                        }
-                                        "OK" -> {
-                                            if (pinText.length == 6) {
-                                                isLoading = true
-                                                errorMessage = null
-                                                onPairCodeEntered(pinText) { success, error ->
-                                                    isLoading = false
-                                                    if (!success) {
-                                                        errorMessage = error ?: "Failed to pair"
-                                                    }
-                                                }
-                                            } else {
-                                                errorMessage = "Enter exactly 6 digits."
-                                            }
-                                        }
-                                        else -> {
-                                            if (pinText.length < 6) {
-                                                pinText += key
-                                            }
+                                        } else {
+                                            errorMessage = "Enter exactly 6 digits."
                                         }
                                     }
-                                },
-                            contentAlignment = Alignment.Center
+                                    else -> {
+                                        if (pinText.length < 6) pinText += key
+                                    }
+                                }
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            color = if (key == "OK") MaruAccentBlue.copy(alpha = 0.22f) else MaruGlassSubtleBg,
+                            border = BorderStroke(
+                                1.dp,
+                                if (key == "OK") MaruAccentBlue else MaruGlassBorderSoft
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(50.dp)
                         ) {
-                            Text(
-                                text = key,
-                                color = if (key == "OK") AccentBlue else TextLight,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = key,
+                                    color = when (key) {
+                                        "OK" -> MaruAccentBlue
+                                        "CLR" -> MaruAccentPink
+                                        else -> MaruTextStrong
+                                    },
+                                    fontSize = if (isAction) 15.sp else 19.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
             }
+
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "with <3, Maru & Nanami",
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = 9.5.sp,
+                    letterSpacing = 0.5.sp,
+                    color = MaruTextMuted.copy(alpha = 0.5f)
+                ),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
     }
 }
 
+// -------------------------------------------------------------------------------------------------
+// 🎵 REALTIME AUDIO EQUALIZER VISUALIZER
+// -------------------------------------------------------------------------------------------------
 @Composable
 fun AudioVisualizer(isPlaying: Boolean) {
     Row(
         modifier = Modifier
-            .height(24.dp)
+            .height(26.dp)
             .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.Bottom
     ) {
-        val barCount = 7
+        val barCount = 9
         val infiniteTransition = rememberInfiniteTransition(label = "audio_visualizer")
-        
+
         for (i in 0 until barCount) {
-            val duration = remember { (450..850).random() }
+            val duration = remember { (400..900).random() }
             val heightFactor by if (isPlaying) {
                 infiniteTransition.animateFloat(
-                    initialValue = 0.2f,
+                    initialValue = 0.15f,
                     targetValue = 1.0f,
                     animationSpec = infiniteRepeatable(
                         animation = tween(duration, easing = FastOutSlowInEasing),
@@ -485,17 +653,17 @@ fun AudioVisualizer(isPlaying: Boolean) {
                     label = "bar_height_$i"
                 )
             } else {
-                remember { mutableStateOf(0.15f) }
+                remember { mutableStateOf(0.12f) }
             }
-            
+
             Box(
                 modifier = Modifier
-                    .width(4.dp)
+                    .width(4.5.dp)
                     .fillMaxHeight(heightFactor)
-                    .clip(RoundedCornerShape(2.dp))
+                    .clip(MaruPillShape)
                     .background(
                         Brush.verticalGradient(
-                            colors = listOf(AccentPurple, AccentBlue)
+                            colors = listOf(MaruAccentPink, MaruAccentPurple, MaruAccentBlue)
                         )
                     )
             )
@@ -503,21 +671,22 @@ fun AudioVisualizer(isPlaying: Boolean) {
     }
 }
 
-@OptIn(ExperimentalAnimationApi::class)
+// -------------------------------------------------------------------------------------------------
+// 📻 NOW PLAYING SCREEN
+// -------------------------------------------------------------------------------------------------
 @Composable
 fun NowPlayingScreen(onDisconnect: () -> Unit) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("marucast_prefs", Context.MODE_PRIVATE) }
     var delayMode by remember { mutableStateOf(prefs.getString("delay_mode", "lossless") ?: "lossless") }
     var lyricsDelayOffset by remember { mutableStateOf(prefs.getLong("lyrics_delay_offset", 0L)) }
-    var metadataState by remember { mutableStateOf(MediaSessionState) }
     var title by remember { mutableStateOf(MediaSessionState.title) }
     var artist by remember { mutableStateOf(MediaSessionState.artist) }
     var appLabel by remember { mutableStateOf(MediaSessionState.appLabel) }
     var isPlaying by remember { mutableStateOf(MediaSessionState.isPlaying) }
     var artworkBitmap by remember { mutableStateOf(MediaSessionState.artworkBitmap) }
     var karaokeEnabled by remember { mutableStateOf(MarucastForegroundService.isKaraokeMode) }
-    
+
     LaunchedEffect(lyricsDelayOffset) {
         MarucastForegroundService.lyricsDelayOffsetMs = lyricsDelayOffset
     }
@@ -532,24 +701,23 @@ fun NowPlayingScreen(onDisconnect: () -> Unit) {
         }
     }
 
-    // Infinite transitions for rotating glowing ring and pulsing effects
     val infiniteTransition = rememberInfiniteTransition(label = "now_playing_animations")
-    
+
     val glowScale by infiniteTransition.animateFloat(
-        initialValue = 0.96f,
-        targetValue = 1.04f,
+        initialValue = 0.95f,
+        targetValue = 1.05f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1800, easing = FastOutSlowInEasing),
+            animation = tween(2000, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "aurora_pulse"
     )
-    
+
     val rotationAngle by infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(12000, easing = LinearEasing),
+            animation = tween(14000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "aurora_rotate"
@@ -565,47 +733,44 @@ fun NowPlayingScreen(onDisconnect: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Top
     ) {
-        // Frosted Now Playing card
-        Card(
+        // Main Now Playing Card
+        MaruGlassCard(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 12.dp),
-            colors = CardDefaults.cardColors(containerColor = DarkNavyAlt.copy(alpha = 0.85f)),
-            shape = RoundedCornerShape(32.dp),
-            border = BorderStroke(1.dp, Color(0x1CFFFFFF))
+                .padding(vertical = 10.dp),
+            border = if (isPlaying) MaruAccentBlue.copy(alpha = 0.35f) else MaruGlassBorderSoft
         ) {
             Column(
-                modifier = Modifier.padding(24.dp),
+                modifier = Modifier.padding(22.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Animated Glowing Backdrop under Album Art
+                // Album Art Frame with Neon Aura
                 Box(
-                    modifier = Modifier
-                        .size(210.dp),
+                    modifier = Modifier.size(200.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     // Pulsing Neon Aura behind the art
                     Box(
                         modifier = Modifier
-                            .size(190.dp)
+                            .size(185.dp)
                             .scale(currentGlowScale)
                             .rotate(currentRotation)
-                            .blur(20.dp)
+                            .blur(22.dp)
                             .clip(CircleShape)
                             .background(
                                 Brush.sweepGradient(
-                                    colors = listOf(AccentBlue, AccentPurple, AccentBlue)
+                                    colors = listOf(MaruAccentBlue, MaruAccentPink, MaruAccentPurple, MaruAccentBlue)
                                 )
                             )
                     )
-                    
+
                     // Album Art Box
                     Box(
                         modifier = Modifier
-                            .size(185.dp)
-                            .clip(RoundedCornerShape(24.dp))
-                            .background(DeepBackground)
-                            .border(1.5.dp, Color(0x33FFFFFF), RoundedCornerShape(24.dp)),
+                            .size(180.dp)
+                            .clip(RoundedCornerShape(22.dp))
+                            .background(MaruDarkBg)
+                            .border(1.5.dp, MaruGlassBorder, RoundedCornerShape(22.dp)),
                         contentAlignment = Alignment.Center
                     ) {
                         if (artworkBitmap != null) {
@@ -616,46 +781,32 @@ fun NowPlayingScreen(onDisconnect: () -> Unit) {
                                 contentScale = ContentScale.Crop
                             )
                         } else {
-                            // Spinning vinyl record visual
+                            // Spinning vinyl record with Maru Heart sticker
                             Box(
                                 modifier = Modifier
-                                    .size(120.dp)
+                                    .size(130.dp)
                                     .rotate(currentRotation)
                                     .clip(CircleShape)
-                                    .background(Color(0xFF0F111A))
-                                    .border(3.dp, Color(0x1CFFFFFF), CircleShape),
+                                    .background(Color(0xFF0C101A))
+                                    .border(2.dp, MaruGlassBorderSoft, CircleShape),
                                 contentAlignment = Alignment.Center
                             ) {
-                                // Groove rings
                                 Box(
                                     modifier = Modifier
-                                        .size(90.dp)
-                                        .border(1.dp, Color(0x0DFFFFFF), CircleShape)
+                                        .size(95.dp)
+                                        .border(1.dp, Color(0x14FFFFFF), CircleShape)
                                 )
                                 Box(
                                     modifier = Modifier
-                                        .size(60.dp)
-                                        .border(1.dp, Color(0x12FFFFFF), CircleShape)
+                                        .size(65.dp)
+                                        .border(1.dp, Color(0x1AFFFFFF), CircleShape)
                                 )
-                                // Center sticker label
-                                Box(
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .clip(CircleShape)
-                                        .background(
-                                            Brush.linearGradient(
-                                                colors = listOf(AccentBlue, AccentPurple)
-                                            )
-                                        ),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(8.dp)
-                                            .clip(CircleShape)
-                                            .background(DeepBackground)
-                                    )
-                                }
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_maru_heart),
+                                    contentDescription = null,
+                                    tint = Color.Unspecified,
+                                    modifier = Modifier.size(32.dp)
+                                )
                             }
                         }
                     }
@@ -663,12 +814,12 @@ fun NowPlayingScreen(onDisconnect: () -> Unit) {
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Realtime Audio Equalizer Visualizer
+                // Realtime Audio Equalizer
                 AudioVisualizer(isPlaying = isPlaying)
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                // Track title & artist with Slide/Fade Transition on Track Changes
+                // Track Title & Artist
                 AnimatedContent(
                     targetState = title to artist,
                     transitionSpec = {
@@ -683,74 +834,74 @@ fun NowPlayingScreen(onDisconnect: () -> Unit) {
                     ) {
                         Text(
                             text = currentTitle ?: "Waiting for music...",
-                            color = TextLight,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Black,
+                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                            color = MaruTextStrong,
                             textAlign = TextAlign.Center,
                             maxLines = 1,
-                            modifier = Modifier.padding(horizontal = 12.dp)
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 8.dp)
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = currentArtist ?: "Play a song on your phone",
-                            color = TextMuted,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Medium,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaruTextMuted,
                             textAlign = TextAlign.Center,
                             maxLines = 1,
-                            modifier = Modifier.padding(horizontal = 12.dp)
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 8.dp)
                         )
                     }
                 }
 
-                // Player Source Label
+                // Media Player Source Badge
                 appLabel?.let { label ->
-                    Spacer(modifier = Modifier.height(14.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0x14A78BFA))
-                            .border(1.dp, AccentPurple.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                            .background(MaruAccentPurple.copy(alpha = 0.15f), MaruPillShape)
+                            .border(1.dp, MaruAccentPurple.copy(alpha = 0.4f), MaruPillShape)
+                            .padding(horizontal = 10.dp, vertical = 3.dp)
                     ) {
                         Text(
-                            text = label,
-                            color = AccentPurple,
-                            fontSize = 11.sp,
+                            text = label.uppercase(),
+                            color = MaruAccentPurple,
+                            fontSize = 9.5.sp,
                             fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp
+                            letterSpacing = 0.8.sp
                         )
                     }
                 }
 
                 Spacer(modifier = Modifier.height(20.dp))
 
-                // Interactive Media Player Controls row
+                // Interactive Media Player Transport Controls
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(20.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Previous Button
-                    IconButton(
+                    Surface(
                         onClick = {
                             MediaSessionState.activeController?.transportControls?.skipToPrevious()
                         },
-                        modifier = Modifier
-                            .size(50.dp)
-                            .clip(CircleShape)
-                            .background(Color(0x0AFFFFFF))
-                            .border(1.dp, Color(0x14FFFFFF), CircleShape)
+                        shape = CircleShape,
+                        color = MaruGlassSubtleBg,
+                        border = BorderStroke(1.dp, MaruGlassBorderSoft),
+                        modifier = Modifier.size(48.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.SkipPrevious,
-                            contentDescription = "Previous",
-                            tint = TextLight,
-                            modifier = Modifier.size(24.dp)
-                        )
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Rounded.SkipPrevious,
+                                contentDescription = "Previous",
+                                tint = MaruTextStrong,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
                     }
 
-                    // Play/Pause button
-                    IconButton(
+                    // Play/Pause Button
+                    Surface(
                         onClick = {
                             val controller = MediaSessionState.activeController
                             if (isPlaying) {
@@ -759,67 +910,59 @@ fun NowPlayingScreen(onDisconnect: () -> Unit) {
                                 controller?.transportControls?.play()
                             }
                         },
-                        modifier = Modifier
-                            .size(68.dp)
-                            .clip(CircleShape)
-                            .background(
-                                Brush.linearGradient(
-                                    colors = listOf(AccentBlue, AccentPurple)
-                                )
-                            )
-                            .border(1.dp, Color(0x3DFFFFFF), CircleShape)
+                        shape = CircleShape,
+                        color = MaruAccentBlue.copy(alpha = 0.25f),
+                        border = BorderStroke(1.5.dp, MaruAccentBlue),
+                        modifier = Modifier.size(62.dp)
                     ) {
-                        Icon(
-                            imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                            contentDescription = if (isPlaying) "Pause" else "Play",
-                            tint = DeepBackground,
-                            modifier = Modifier
-                                .size(32.dp)
-                                .offset(x = if (isPlaying) 0.dp else 2.dp)
-                        )
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                contentDescription = if (isPlaying) "Pause" else "Play",
+                                tint = MaruAccentBlue,
+                                modifier = Modifier.size(30.dp)
+                            )
+                        }
                     }
 
                     // Next Button
-                    IconButton(
+                    Surface(
                         onClick = {
                             MediaSessionState.activeController?.transportControls?.skipToNext()
                         },
-                        modifier = Modifier
-                            .size(50.dp)
-                            .clip(CircleShape)
-                            .background(Color(0x0AFFFFFF))
-                            .border(1.dp, Color(0x14FFFFFF), CircleShape)
+                        shape = CircleShape,
+                        color = MaruGlassSubtleBg,
+                        border = BorderStroke(1.dp, MaruGlassBorderSoft),
+                        modifier = Modifier.size(48.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.SkipNext,
-                            contentDescription = "Next",
-                            tint = TextLight,
-                            modifier = Modifier.size(24.dp)
-                        )
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Rounded.SkipNext,
+                                contentDescription = "Next",
+                                tint = MaruTextStrong,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // Karaoke Mode Card
-        Card(
+        // Karaoke Mode Glass Card
+        MaruGlassSectionHeader("VOCAL PROCESSING", Icons.Default.GraphicEq, MaruAccentPurple)
+        MaruGlassCard(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 8.dp)
                 .clickable {
                     karaokeEnabled = !karaokeEnabled
                     MarucastForegroundService.isKaraokeMode = karaokeEnabled
                 },
-            colors = CardDefaults.cardColors(
-                containerColor = if (karaokeEnabled) Color(0x29A78BFA) else DarkNavyAlt.copy(alpha = 0.5f)
-            ),
-            shape = RoundedCornerShape(24.dp),
-            border = BorderStroke(1.dp, if (karaokeEnabled) AccentPurple.copy(alpha = 0.5f) else Color(0x14FFFFFF))
+            border = if (karaokeEnabled) MaruAccentPurple.copy(alpha = 0.45f) else MaruGlassBorderSoft
         ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 14.dp),
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -829,24 +972,23 @@ fun NowPlayingScreen(onDisconnect: () -> Unit) {
                 ) {
                     Text(
                         text = "🎤",
-                        fontSize = 24.sp,
+                        fontSize = 22.sp,
                         modifier = Modifier.padding(end = 12.dp)
                     )
                     Column {
                         Text(
                             text = "Karaoke Mode",
-                            color = TextLight,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaruTextStrong
                         )
                         Text(
-                            text = "Real-time vocal cancellation filter",
-                            color = TextMuted,
-                            fontSize = 11.sp
+                            text = "Real-time center-channel vocal cancellation filter",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaruTextMuted
                         )
                     }
                 }
-                
+
                 Switch(
                     checked = karaokeEnabled,
                     onCheckedChange = { checked ->
@@ -854,30 +996,24 @@ fun NowPlayingScreen(onDisconnect: () -> Unit) {
                         MarucastForegroundService.isKaraokeMode = checked
                     },
                     colors = SwitchDefaults.colors(
-                        checkedThumbColor = DeepBackground,
-                        checkedTrackColor = AccentPurple,
-                        uncheckedThumbColor = TextMuted,
-                        uncheckedTrackColor = Color(0x1AFFFFFF)
+                        checkedThumbColor = MaruDarkBg,
+                        checkedTrackColor = MaruAccentPurple,
+                        uncheckedThumbColor = MaruTextMuted,
+                        uncheckedTrackColor = MaruGlassSubtleBg
                     )
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
         // Lyrics Sync Card
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp),
-            colors = CardDefaults.cardColors(containerColor = DarkNavyAlt.copy(alpha = 0.5f)),
-            shape = RoundedCornerShape(24.dp),
-            border = BorderStroke(1.dp, Color(0x14FFFFFF))
-        ) {
+        MaruGlassSectionHeader("TIMING & SYNC", Icons.Default.Sync, MaruAccentPink)
+        MaruGlassCard(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 18.dp)
+                    .padding(horizontal = 18.dp, vertical = 16.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -885,49 +1021,47 @@ fun NowPlayingScreen(onDisconnect: () -> Unit) {
                 ) {
                     Text(
                         text = "⏱️",
-                        fontSize = 22.sp,
+                        fontSize = 20.sp,
                         modifier = Modifier.padding(end = 12.dp)
                     )
                     Column {
                         Text(
-                            text = "Lyrics Sync",
-                            color = TextLight,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold
+                            text = "Lyrics Sync Nudge",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaruTextStrong
                         )
                         Text(
                             text = "Nudge lyrics backward or forward in real-time",
-                            color = TextMuted,
-                            fontSize = 11.sp
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaruTextMuted
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(18.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                // Adjustment Row
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Minus Button
-                    Button(
+                    Surface(
                         onClick = {
                             lyricsDelayOffset = (lyricsDelayOffset - 250).coerceIn(-10000L, 10000L)
                             prefs.edit().putLong("lyrics_delay_offset", lyricsDelayOffset).apply()
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0x14FFFFFF)),
                         shape = RoundedCornerShape(12.dp),
+                        color = MaruGlassSubtleBg,
+                        border = BorderStroke(1.dp, MaruGlassBorderSoft),
                         modifier = Modifier
                             .weight(1f)
-                            .height(48.dp)
-                            .border(1.dp, Color(0x14FFFFFF), RoundedCornerShape(12.dp))
+                            .height(44.dp)
                     ) {
-                        Text("-0.25s", color = TextLight, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("-0.25s", color = MaruTextStrong, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
 
-                    // Display Value
                     Box(
                         modifier = Modifier
                             .weight(1.2f)
@@ -938,74 +1072,42 @@ fun NowPlayingScreen(onDisconnect: () -> Unit) {
                         val text = if (lyricsDelayOffset == 0L) "Synced" else "${if (offsetSecs > 0) "+" else ""}${String.format("%.2fs", offsetSecs)}"
                         Text(
                             text = text,
-                            color = if (lyricsDelayOffset == 0L) AccentBlue else AccentPurple,
+                            color = if (lyricsDelayOffset == 0L) MaruAccentBlue else MaruAccentPink,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Black
                         )
                     }
 
-                    // Plus Button
-                    Button(
+                    Surface(
                         onClick = {
                             lyricsDelayOffset = (lyricsDelayOffset + 250).coerceIn(-10000L, 10000L)
                             prefs.edit().putLong("lyrics_delay_offset", lyricsDelayOffset).apply()
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0x14FFFFFF)),
                         shape = RoundedCornerShape(12.dp),
+                        color = MaruGlassSubtleBg,
+                        border = BorderStroke(1.dp, MaruGlassBorderSoft),
                         modifier = Modifier
                             .weight(1f)
-                            .height(48.dp)
-                            .border(1.dp, Color(0x14FFFFFF), RoundedCornerShape(12.dp))
+                            .height(44.dp)
                     ) {
-                        Text("+0.25s", color = TextLight, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("+0.25s", color = MaruTextStrong, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        // Delay Management Card (Segmented Control Refactoring)
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp),
-            colors = CardDefaults.cardColors(containerColor = DarkNavyAlt.copy(alpha = 0.5f)),
-            shape = RoundedCornerShape(24.dp),
-            border = BorderStroke(1.dp, Color(0x14FFFFFF))
-        ) {
+        // Delay Management Card
+        MaruGlassSectionHeader("STREAM QUALITY & BUFFER", Icons.Default.Speed, MaruAccentBlue)
+        MaruGlassCard(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 18.dp)
+                    .padding(horizontal = 18.dp, vertical = 16.dp)
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "⚡",
-                        fontSize = 22.sp,
-                        modifier = Modifier.padding(end = 12.dp)
-                    )
-                    Column {
-                        Text(
-                            text = "Delay Management",
-                            color = TextLight,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "Optimize streaming quality dynamically",
-                            color = TextMuted,
-                            fontSize = 11.sp
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(18.dp))
-
-                // Premium Segmented Pill Selector Row
                 val delayOptions = listOf(
                     "lossless" to "Lossless",
                     "automatic" to "Automatic",
@@ -1015,111 +1117,103 @@ fun NowPlayingScreen(onDisconnect: () -> Unit) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color(0x0AFFFFFF))
-                        .border(1.dp, Color(0x0DFFFFFF), RoundedCornerShape(16.dp))
+                        .background(MaruGlassSubtleBg, RoundedCornerShape(14.dp))
+                        .border(1.dp, MaruGlassBorderSoft, RoundedCornerShape(14.dp))
                         .padding(4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     delayOptions.forEach { (mode, label) ->
                         val selected = delayMode == mode
-                        val backgroundAlpha by animateFloatAsState(
-                            targetValue = if (selected) 1f else 0f,
-                            animationSpec = tween(250, easing = LinearOutSlowInEasing),
-                            label = "segmented_tab_bg_$mode"
-                        )
-
-                        Box(
+                        Surface(
+                            onClick = {
+                                delayMode = mode
+                                MarucastForegroundService.delayManagementMode = mode
+                                prefs.edit().putString("delay_mode", mode).apply()
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (selected) MaruAccentBlue.copy(alpha = 0.22f) else Color.Transparent,
+                            border = BorderStroke(
+                                1.dp,
+                                if (selected) MaruAccentBlue else Color.Transparent
+                            ),
                             modifier = Modifier
                                 .weight(1f)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(
-                                    Brush.horizontalGradient(
-                                        colors = listOf(
-                                            AccentBlue.copy(alpha = backgroundAlpha * 0.15f),
-                                            AccentPurple.copy(alpha = backgroundAlpha * 0.15f)
-                                        )
-                                    )
-                                )
-                                .border(
-                                    1.dp,
-                                    if (selected) AccentBlue.copy(alpha = 0.25f) else Color.Transparent,
-                                    RoundedCornerShape(12.dp)
-                                )
-                                .clickable {
-                                    delayMode = mode
-                                    MarucastForegroundService.delayManagementMode = mode
-                                    prefs.edit().putString("delay_mode", mode).apply()
-                                }
-                                .padding(vertical = 12.dp),
-                            contentAlignment = Alignment.Center
+                                .height(38.dp)
                         ) {
-                            Text(
-                                text = label,
-                                color = if (selected) AccentBlue else TextMuted,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = label,
+                                    color = if (selected) MaruAccentBlue else MaruTextMuted,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
-                // Dynamic detailed description with subtle typography
                 Text(
                     text = when (delayMode) {
-                        "lossless" -> "• Lossless: Prioritizes best sound fidelity. Stream remains uncompressed."
-                        "automatic" -> "• Automatic: Monitors network delay and reduces sample rate dynamically."
-                        else -> "• Less Delay: Optimizes for lowest latency. Compresses stream for speed."
+                        "lossless" -> "• Lossless: Prioritizes uncompressed, bit-perfect sound fidelity."
+                        "automatic" -> "• Automatic: Monitors network jitter and adapts buffer dynamically."
+                        else -> "• Less Delay: Low-latency streaming optimized for responsive playback."
                     },
-                    color = TextMuted,
-                    fontSize = 11.sp,
-                    lineHeight = 16.sp,
-                    modifier = Modifier.padding(horizontal = 4.dp)
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaruTextMuted,
+                    lineHeight = 16.sp
                 )
             }
         }
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // Professional Gradient Outline Disconnect Button
-        Button(
+        // Disconnect Button
+        Surface(
             onClick = onDisconnect,
-            colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
-            contentPadding = PaddingValues(),
-            shape = RoundedCornerShape(16.dp),
+            shape = MaruPillShape,
+            color = MaruAccentPink.copy(alpha = 0.15f),
+            border = BorderStroke(1.dp, MaruAccentPink.copy(alpha = 0.6f)),
             modifier = Modifier
-                .fillMaxWidth(0.75f)
-                .height(54.dp)
-                .border(
-                    BorderStroke(1.dp, Color(0x33FF5252)),
-                    RoundedCornerShape(16.dp)
-                )
-                .background(
-                    Brush.horizontalGradient(
-                        colors = listOf(
-                            Color(0xFFE53935).copy(alpha = 0.15f),
-                            Color(0xFFD81B60).copy(alpha = 0.15f)
-                        )
-                    )
-                )
+                .fillMaxWidth(0.85f)
+                .height(48.dp)
         ) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "Stop Broadcast",
-                    color = Color(0xFFFF5252),
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp,
-                    letterSpacing = 1.sp
-                )
+            Box(contentAlignment = Alignment.Center) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Stop,
+                        contentDescription = null,
+                        tint = MaruAccentPink,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = "Stop Broadcast",
+                        color = MaruAccentPink,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                }
             }
         }
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(20.dp))
+
+        Text(
+            "with <3, Maru & Nanami",
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontSize = 9.5.sp,
+                letterSpacing = 0.5.sp,
+                color = MaruTextMuted.copy(alpha = 0.5f)
+            ),
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.height(20.dp))
     }
 }
 

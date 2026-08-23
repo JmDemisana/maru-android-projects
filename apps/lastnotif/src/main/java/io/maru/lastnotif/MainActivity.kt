@@ -1,46 +1,45 @@
 package io.maru.lastnotif
 
 import android.Manifest
+import android.app.Activity
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.graphics.Bitmap
+import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
-import android.view.ViewGroup
-import android.view.WindowManager
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.content.ContentValues
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Base64
 import android.util.Log
+import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
-import androidx.core.app.NotificationManagerCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -48,10 +47,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.LastPage
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
-import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
@@ -60,7 +59,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -68,13 +67,17 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import coil.compose.AsyncImage
+import io.maru.lastnotif.cast.MarucastApiClient
+import io.maru.lastnotif.cast.MarucastForegroundService
+import io.maru.lastnotif.cast.MarucastScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -82,7 +85,7 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 
-// --- Maru Cosmic Glassmorphic Design Tokens ---
+// --- MAudio Cosmic Glassmorphic Design Tokens ---
 val MaruCosmicTop = Color(0xFF211734)
 val MaruCosmicMid = Color(0xFF100C19)
 val MaruCosmicBot = Color(0xFF050507)
@@ -118,17 +121,19 @@ enum class NavigationScreen(
     val icon: ImageVector,
     val group: NavigationGroup
 ) {
-    // Recommendation Engine Group (Discovery, exploration, stats, recap)
-    DISCOVERY("Music Discovery", "Personalized Recommendations", Icons.Default.AutoAwesome, NavigationGroup.RECOMMENDATION_ENGINE),
-    SEARCH("Search", "Tracks, Artists & Albums", Icons.Default.Search, NavigationGroup.RECOMMENDATION_ENGINE),
-    PROFILE("Profile", "Scrobble Stats & Top Charts", Icons.Default.Person, NavigationGroup.RECOMMENDATION_ENGINE),
+    // Recommendation Engine Group
+    DISCOVERY("Discovery", "Personalized Track Feed", Icons.Default.AutoAwesome, NavigationGroup.RECOMMENDATION_ENGINE),
+    SEARCH("Search", "Tracks, Artists & Profiles", Icons.Default.Search, NavigationGroup.RECOMMENDATION_ENGINE),
+    PROFILE("Profile", "Scrobble Stats & Charts", Icons.Default.Person, NavigationGroup.RECOMMENDATION_ENGINE),
     NAMIREC("NamiRec", "Monthly Musical Recap", Icons.Default.Stars, NavigationGroup.RECOMMENDATION_ENGINE),
+    ARTIST_DETAIL("Artist Feature", "Discography & Highlights", Icons.Default.MicExternalOn, NavigationGroup.RECOMMENDATION_ENGINE),
 
-    // Core Functionality Group (Scrobbler & system listeners)
-    SCROBBLING("Last.fm Scrobbler", "Accounts & Filters", Icons.Default.CloudUpload, NavigationGroup.CORE_FUNCTIONALITY),
+    // Core Functionality Group
+    MARUCAST("Marucast", "Lossless Wi-Fi Broadcaster", Icons.Default.Podcasts, NavigationGroup.CORE_FUNCTIONALITY),
+    SCROBBLING("Scrobbler", "Accounts & Filters", Icons.Default.CloudUpload, NavigationGroup.CORE_FUNCTIONALITY),
     LOCAL("Local Monitor", "Media Controller", Icons.Default.GraphicEq, NavigationGroup.CORE_FUNCTIONALITY),
-    RECEIVER("Remote Receiver", "Cross-device Sync", Icons.Default.Sensors, NavigationGroup.CORE_FUNCTIONALITY),
-    COMMON("Common Settings", "Layout & Sync Alerts", Icons.Default.Settings, NavigationGroup.CORE_FUNCTIONALITY)
+    RECEIVER("Receiver", "Cross-device Sync", Icons.Default.Sensors, NavigationGroup.CORE_FUNCTIONALITY),
+    COMMON("Settings", "Layout & Player Options", Icons.Default.Settings, NavigationGroup.CORE_FUNCTIONALITY)
 }
 
 data class SongDetailState(
@@ -156,7 +161,7 @@ class MainActivity : ComponentActivity() {
 
         handleIntent(intent)
         setContent {
-            LastNotifTheme {
+            MaterialTheme {
                 MainScreen(prefs)
             }
         }
@@ -169,16 +174,18 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIntent(intent: Intent?) {
         val data: Uri? = intent?.data
-        if (data != null && data.scheme == "lastnotif" && data.host == "auth") {
-            val token = data.getQueryParameter("token")
-            if (token != null) {
-                lifecycleScope.launch {
-                    val session = withContext(Dispatchers.IO) {
-                        LastFmScrobbler.getMobileSession(token)
-                    }
-                    if (session != null) {
-                        prefs.setLastfmSessionKey(session.key)
-                        prefs.setLastfmUsername(session.username)
+        if (data != null) {
+            if (data.scheme == "lastnotif" && data.host == "auth") {
+                val token = data.getQueryParameter("token")
+                if (token != null) {
+                    lifecycleScope.launch {
+                        val session = withContext(Dispatchers.IO) {
+                            LastFmScrobbler.getMobileSession(token)
+                        }
+                        if (session != null) {
+                            prefs.setLastfmSessionKey(session.key)
+                            prefs.setLastfmUsername(session.username)
+                        }
                     }
                 }
             }
@@ -186,6 +193,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(prefs: LastNotifPrefs) {
     val context = LocalContext.current
@@ -209,6 +217,7 @@ fun MainScreen(prefs: LastNotifPrefs) {
     val intervalMinutes by prefs.intervalMinutes.collectAsStateWithLifecycle(initialValue = 5)
 
     val preferredPlatform by prefs.preferredPlatform.collectAsStateWithLifecycle(initialValue = "Apple Music")
+    val directSongLaunch by prefs.directSongLaunch.collectAsStateWithLifecycle(initialValue = false)
 
     val lastAlertTitle by prefs.lastAlertTitle.collectAsStateWithLifecycle(initialValue = "")
     val lastAlertSub by prefs.lastAlertSub.collectAsStateWithLifecycle(initialValue = "")
@@ -218,200 +227,129 @@ fun MainScreen(prefs: LastNotifPrefs) {
     val liveTrack by LastNotifPollerService.liveTrack.collectAsStateWithLifecycle()
 
     val scope = rememberCoroutineScope()
+    var allApps by remember { mutableStateOf<List<AppInfo>>(emptyList()) }
 
-    MainScreenContent(
-        scrobbleEnabled = scrobbleEnabled,
-        receiverEnabled = receiverEnabled,
-        localEnabled = localEnabled,
-        lastfmUsername = lastfmUsername,
-        sessionKey = sessionKey,
-        scrobbleApps = scrobbleApps,
-        scrobblePercentage = scrobblePercentage,
-        receiverUsername = receiverUsername,
-        localApps = localApps,
-        notifySongUpdate = notifySongUpdate,
-        mainFmt = mainFmt,
-        subFmt = subFmt,
-        intervalEnabled = intervalEnabled,
-        intervalMinutes = intervalMinutes,
-        preferredPlatform = preferredPlatform,
-        lastAlertTitle = lastAlertTitle,
-        lastAlertSub = lastAlertSub,
-        lastAlertSource = lastAlertSource,
-        serviceRunning = serviceRunning,
-        liveTrack = liveTrack,
-        onToggleScrobble = { scope.launch { prefs.setScrobbleEnabled(it) } },
-        onToggleReceiver = { scope.launch { prefs.setReceiverEnabled(it) } },
-        onToggleLocal = { scope.launch { prefs.setLocalEnabled(it) } },
-        onUsernameChange = { scope.launch { prefs.setLastfmUsername(it) } },
-        onSessionKeyChange = { scope.launch { prefs.setLastfmSessionKey(it) } },
-        onScrobbleAppsChange = { scope.launch { prefs.setScrobbleApps(it) } },
-        onScrobblePercentageChange = { scope.launch { prefs.setScrobblePercentage(it) } },
-        onReceiverUsernameChange = { scope.launch { prefs.setReceiverUsername(it) } },
-        onLocalAppsChange = { scope.launch { prefs.setLocalApps(it) } },
-        onToggleSongUpdate = { scope.launch { prefs.setNotifySongUpdate(it) } },
-        onMainFmtChange = { scope.launch { prefs.setNotifMainFormat(it) } },
-        onSubFmtChange = { scope.launch { prefs.setNotifSubFormat(it) } },
-        onIntervalToggle = { scope.launch { prefs.setIntervalEnabled(it) } },
-        onIntervalMinutesChange = { scope.launch { prefs.setIntervalMinutes(it) } },
-        onPreferredPlatformChange = { scope.launch { prefs.setPreferredPlatform(it) } },
-        onRestartService = {
-            LastNotifPollerService.stop(context)
-            LastNotifPollerService.start(context)
-        },
-        onSendTestNotification = {
-            LastNotifNotificationManager(context).postTestAlert()
-        }
-    )
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun MainScreenContent(
-    scrobbleEnabled: Boolean,
-    receiverEnabled: Boolean,
-    localEnabled: Boolean,
-    lastfmUsername: String,
-    sessionKey: String,
-    scrobbleApps: Set<String>,
-    scrobblePercentage: Int,
-    receiverUsername: String,
-    localApps: Set<String>,
-    notifySongUpdate: Boolean,
-    mainFmt: String,
-    subFmt: String,
-    intervalEnabled: Boolean,
-    intervalMinutes: Int,
-    preferredPlatform: String,
-    lastAlertTitle: String,
-    lastAlertSub: String,
-    lastAlertSource: String,
-    serviceRunning: Boolean,
-    liveTrack: LastNotifPollerService.ActiveTrackState?,
-    onToggleScrobble: (Boolean) -> Unit,
-    onToggleReceiver: (Boolean) -> Unit,
-    onToggleLocal: (Boolean) -> Unit,
-    onUsernameChange: (String) -> Unit,
-    onSessionKeyChange: (String) -> Unit,
-    onScrobbleAppsChange: (Set<String>) -> Unit,
-    onScrobblePercentageChange: (Int) -> Unit,
-    onReceiverUsernameChange: (String) -> Unit,
-    onLocalAppsChange: (Set<String>) -> Unit,
-    onToggleSongUpdate: (Boolean) -> Unit,
-    onMainFmtChange: (String) -> Unit,
-    onSubFmtChange: (String) -> Unit,
-    onIntervalToggle: (Boolean) -> Unit,
-    onIntervalMinutesChange: (Int) -> Unit,
-    onPreferredPlatformChange: (String) -> Unit,
-    onRestartService: () -> Unit,
-    onSendTestNotification: () -> Unit
-) {
-    val context = LocalContext.current
+    var selectedScreen by remember { mutableStateOf(NavigationScreen.DISCOVERY) }
+    var previousScreen by remember { mutableStateOf(NavigationScreen.DISCOVERY) }
+    var selectedArtistDetail by remember { mutableStateOf<String?>(null) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
-    var selectedScreen by remember(sessionKey.isNotEmpty()) {
-        mutableStateOf(if (sessionKey.isNotEmpty()) NavigationScreen.DISCOVERY else NavigationScreen.SCROBBLING)
-    }
-    var viewedProfileUsername by remember { mutableStateOf<String?>(null) }
-    val allApps = rememberAppList(context)
-    var showManualCredsDialog by remember { mutableStateOf(false) }
 
-    // Song Details Bottom Sheet State
+    var showManualCredsDialog by remember { mutableStateOf(false) }
+    var viewedProfileUsername by remember { mutableStateOf<String?>(null) }
     var selectedSongDetail by remember { mutableStateOf<SongDetailState?>(null) }
 
-    // Discovery State
-    var selectedCategory by remember { mutableStateOf(LastFmRecommendationsEngine.RecCategory.ALL) }
-    var isGridView by remember { mutableStateOf(true) }
-    var recPage by remember { mutableStateOf(1) }
+    // Screen audio capture projection data for Marucast (only requested on-demand when starting Marucast)
+    var projectionIntentData by remember { mutableStateOf<Intent?>(null) }
+    val screenCaptureLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            projectionIntentData = result.data
+        }
+    }
+
+    // Intercept hardware Back Button
+    BackHandler(enabled = true) {
+        if (drawerState.isOpen) {
+            scope.launch { drawerState.close() }
+        } else if (selectedSongDetail != null) {
+            selectedSongDetail = null
+        } else if (selectedScreen == NavigationScreen.ARTIST_DETAIL) {
+            selectedScreen = previousScreen
+        } else if (selectedScreen != NavigationScreen.DISCOVERY) {
+            selectedScreen = NavigationScreen.DISCOVERY
+        } else {
+            Toast.makeText(
+                context,
+                "MAudio continues to scrobble and broadcast in the background.",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            allApps = AppUtils.getInstalledMediaApps(context)
+        }
+    }
+
+    // Recommendation Engine state
     var recommendations by remember { mutableStateOf<List<LastFmRecommendationsEngine.RecommendedTrackItem>>(emptyList()) }
     var isRecommendationsLoading by remember { mutableStateOf(false) }
     var isLoadingMore by remember { mutableStateOf(false) }
+    var recPage by remember { mutableStateOf(1) }
+    var selectedCategory by remember { mutableStateOf(LastFmRecommendationsEngine.RecCategory.ALL) }
 
-    fun refreshRecommendations(category: LastFmRecommendationsEngine.RecCategory = selectedCategory, reset: Boolean = true) {
-        val user = lastfmUsername.ifEmpty { "JmDemisana" }
+    val refreshRecommendations: (LastFmRecommendationsEngine.RecCategory, Boolean) -> Unit = { cat, reset ->
+        val targetUser = lastfmUsername.ifEmpty { "JmDemisana" }
         scope.launch {
             if (reset) {
                 isRecommendationsLoading = true
                 recPage = 1
-                recommendations = LastFmRecommendationsEngine.getRecommendations(user, category, page = 1)
+                recommendations = withContext(Dispatchers.IO) {
+                    LastFmRecommendationsEngine.getRecommendations(targetUser, cat, page = 1)
+                }
                 isRecommendationsLoading = false
             } else {
                 isLoadingMore = true
                 val nextPage = recPage + 1
-                val items = LastFmRecommendationsEngine.getRecommendations(user, category, page = nextPage)
-                if (items.isNotEmpty()) {
+                val more = withContext(Dispatchers.IO) {
+                    LastFmRecommendationsEngine.getRecommendations(targetUser, cat, page = nextPage)
+                }
+                if (more.isNotEmpty()) {
                     recPage = nextPage
-                    recommendations = (recommendations + items).distinctBy { "${it.artist.lowercase()} - ${it.title.lowercase()}" }
+                    recommendations = (recommendations + more).distinctBy { "${it.artist.lowercase()} - ${it.title.lowercase()}" }
                 }
                 isLoadingMore = false
             }
         }
     }
 
-    LaunchedEffect(selectedScreen, selectedCategory, lastfmUsername) {
-        if (selectedScreen == NavigationScreen.DISCOVERY && recommendations.isEmpty()) {
-            refreshRecommendations(selectedCategory, reset = true)
+    LaunchedEffect(lastfmUsername) {
+        refreshRecommendations(selectedCategory, true)
+    }
+
+    val onToggleScrobble: (Boolean) -> Unit = { enabled ->
+        scope.launch {
+            prefs.setScrobbleEnabled(enabled)
+            val shouldRun = enabled || receiverEnabled || localEnabled
+            if (shouldRun) LastNotifPollerAlarmScheduler.schedule(context) else LastNotifPollerAlarmScheduler.cancel(context)
         }
     }
 
-    var hasNotifPerm by remember {
-        mutableStateOf(LastNotifMediaMonitor.hasPostNotificationsPermission(context))
-    }
-    var hasMediaAccess by remember {
-        mutableStateOf(LastNotifMediaMonitor.isNotificationAccessGranted(context))
-    }
-
-    val notifPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasNotifPerm = granted
-    }
-
-    LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNotifPerm) {
-            notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    val onToggleReceiver: (Boolean) -> Unit = { enabled ->
+        scope.launch {
+            prefs.setReceiverEnabled(enabled)
+            val shouldRun = enabled || scrobbleEnabled || localEnabled
+            if (shouldRun) LastNotifPollerAlarmScheduler.schedule(context) else LastNotifPollerAlarmScheduler.cancel(context)
         }
     }
 
-    LaunchedEffect(scrobbleEnabled, receiverEnabled, localEnabled) {
-        if (scrobbleEnabled || receiverEnabled || localEnabled) {
-            if (!LastNotifPollerService.isRunning()) {
-                LastNotifPollerService.start(context)
-            }
-        } else {
-            if (LastNotifPollerService.isRunning()) {
-                LastNotifPollerService.stop(context)
-            }
+    val onToggleLocal: (Boolean) -> Unit = { enabled ->
+        scope.launch {
+            prefs.setLocalEnabled(enabled)
+            val shouldRun = enabled || scrobbleEnabled || receiverEnabled
+            if (shouldRun) LastNotifPollerAlarmScheduler.schedule(context) else LastNotifPollerAlarmScheduler.cancel(context)
         }
     }
 
-    val backgroundGradient = remember {
-        Brush.radialGradient(
-            colors = listOf(MaruCosmicTop, MaruCosmicMid, MaruCosmicBot),
-            radius = 1600f
-        )
-    }
-
-    val topBarGradient = remember {
-        Brush.radialGradient(
-            colors = listOf(MaruCosmicTop, MaruCosmicMid, MaruCosmicBot),
-            radius = 1800f
-        )
-    }
-
-    BackHandler {
-        if (drawerState.isOpen) {
-            scope.launch { drawerState.close() }
-        } else if (selectedSongDetail != null) {
-            selectedSongDetail = null
-        } else {
-            Toast.makeText(
-                context,
-                "That back button did not do anything. If you want, close the app on your device's Recents. It will continue to scrobble in the background.",
-                Toast.LENGTH_SHORT
-            ).show()
+    val onSendTestNotification: () -> Unit = {
+        scope.launch {
+            val title = if (mainFmt.isNotBlank()) LastNotifNotificationManager.applyFormat(mainFmt, "Tell Your World", "kz (livetune)", "Tell Your World EP", "Test") else "Tell Your World"
+            val body = if (subFmt.isNotBlank()) LastNotifNotificationManager.applyFormat(subFmt, "Tell Your World", "kz (livetune)", "Tell Your World EP", "Test") else "kz (livetune) • Tell Your World EP"
+            LastNotifNotificationManager(context).sendAlert(title, body)
         }
     }
+
+    val onRestartService: () -> Unit = {
+        LastNotifPollerService.stop(context)
+        LastNotifPollerService.start(context)
+        Toast.makeText(context, "MAudio background service restarted", Toast.LENGTH_SHORT).show()
+    }
+
+    val backgroundGradient = Brush.verticalGradient(
+        colors = listOf(MaruCosmicTop, MaruCosmicMid, MaruCosmicBot)
+    )
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -422,9 +360,6 @@ fun MainScreenContent(
                 username = lastfmUsername,
                 serviceRunning = serviceRunning,
                 onSelectScreen = { screen ->
-                    if (screen == NavigationScreen.PROFILE) {
-                        viewedProfileUsername = null
-                    }
                     selectedScreen = screen
                     scope.launch { drawerState.close() }
                 }
@@ -433,75 +368,66 @@ fun MainScreenContent(
     ) {
         Scaffold(
             topBar = {
-                Column(
-                    modifier = Modifier
-                        .background(topBarGradient)
-                        .border(BorderStroke(1.dp, Brush.verticalGradient(listOf(Color.Transparent, MaruGlassBorderSoft))))
-                        .statusBarsPadding()
-                ) {
+                if (selectedScreen != NavigationScreen.ARTIST_DETAIL) {
                     TopAppBar(
-                        navigationIcon = {
-                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                Icon(
-                                    Icons.Default.Menu,
-                                    contentDescription = "Menu",
-                                    tint = MaruAccentPink
-                                )
-                            }
-                        },
+                        modifier = Modifier
+                            .background(Brush.verticalGradient(listOf(MaruCosmicTop.copy(alpha = 0.95f), Color.Transparent)))
+                            .statusBarsPadding(),
                         title = {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
                                 Icon(
                                     painter = painterResource(id = R.drawable.ic_maru_heart),
                                     contentDescription = null,
-                                    modifier = Modifier.size(22.dp),
+                                    modifier = Modifier.size(24.dp),
                                     tint = Color.Unspecified
                                 )
-                                Spacer(Modifier.width(8.dp))
                                 Text(
-                                    "LASTNOTIF",
+                                    selectedScreen.title,
                                     style = MaterialTheme.typography.titleMedium.copy(
                                         fontWeight = FontWeight.Bold,
-                                        color = MaruTextStrong,
-                                        letterSpacing = 1.sp
-                                    )
+                                        letterSpacing = 0.5.sp,
+                                        fontSize = 18.sp
+                                    ),
+                                    color = MaruTextStrong
                                 )
-                                Spacer(Modifier.width(8.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .background(MaruAccentPink.copy(alpha = 0.15f), MaruPillShape)
-                                        .border(BorderStroke(1.dp, MaruAccentPink.copy(alpha = 0.4f)), MaruPillShape)
-                                        .padding(horizontal = 7.dp, vertical = 2.dp)
-                                ) {
-                                    Text(
-                                        selectedScreen.title.uppercase(),
-                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
-                                        color = MaruAccentPink
-                                    )
-                                }
+                            }
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaruTextStrong)
                             }
                         },
                         actions = {
-                            val animatedDotColor by animateColorAsState(
-                                targetValue = if (serviceRunning) MaruAccentGreen else MaruTextMuted,
-                                animationSpec = spring(stiffness = Spring.StiffnessLow),
-                                label = "DotColor"
-                            )
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .padding(end = 12.dp)
-                                    .background(if (serviceRunning) MaruAccentGreen.copy(alpha = 0.12f) else MaruGlassSubtleBg, MaruPillShape)
-                                    .border(BorderStroke(1.dp, if (serviceRunning) MaruAccentGreen.copy(alpha = 0.4f) else MaruGlassBorderSoft), MaruPillShape)
-                                    .padding(horizontal = 9.dp, vertical = 4.dp)
-                            ) {
-                                Box(modifier = Modifier.size(7.dp).background(animatedDotColor, CircleShape))
-                                Spacer(Modifier.width(5.dp))
-                                Text(
-                                    if (serviceRunning) "ACTIVE" else "IDLE",
-                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                                    color = animatedDotColor
-                                )
+                            val isCasting = MarucastForegroundService.currentToken != null
+                            IconButton(onClick = {
+                                selectedScreen = NavigationScreen.MARUCAST
+                            }) {
+                                if (isCasting) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            Icons.Default.Podcasts,
+                                            contentDescription = "Marucast Broadcasting",
+                                            tint = MaruAccentPink,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .size(7.dp)
+                                                .align(Alignment.TopEnd)
+                                                .background(MaruAccentGreen, CircleShape)
+                                        )
+                                    }
+                                } else {
+                                    Icon(
+                                        Icons.Default.Podcasts,
+                                        contentDescription = "Marucast",
+                                        tint = if (selectedScreen == NavigationScreen.MARUCAST) MaruAccentPink else MaruTextMuted.copy(alpha = 0.7f),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(
@@ -509,33 +435,21 @@ fun MainScreenContent(
                             titleContentColor = MaruTextStrong
                         )
                     )
-
-                    // --- HERO LIVE NOTIFICATION PREVIEW (Click to launch playing player) ---
-                    Box(modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 10.dp)) {
-                        NotificationPreviewBanner(
-                            liveTrack = liveTrack,
-                            lastAlertTitle = lastAlertTitle,
-                            lastAlertSub = lastAlertSub,
-                            lastAlertSource = lastAlertSource,
-                            mainFmt = mainFmt,
-                            subFmt = subFmt,
-                            preferredPlatform = preferredPlatform,
-                            onClick = {
-                                val active = LastNotifMediaMonitor.getActiveTrack(context)
-                                if (active != null && active.packageName.isNotEmpty()) {
-                                    val launchIntent = context.packageManager.getLaunchIntentForPackage(active.packageName)
-                                    if (launchIntent != null) {
-                                        context.startActivity(launchIntent)
-                                        return@NotificationPreviewBanner
-                                    }
-                                }
-                                val title = liveTrack?.title?.ifEmpty { lastAlertTitle } ?: "Tell Your World"
-                                val artist = liveTrack?.artist?.ifEmpty { lastAlertSub } ?: "kz (livetune)"
-                                ItunesClient.openInPreferredPlayer(context, preferredPlatform, title, artist, null)
-                            }
-                        )
-                    }
                 }
+            },
+            bottomBar = {
+                NotificationMirrorBottomBar(
+                    liveTrack = liveTrack,
+                    mainFmt = mainFmt,
+                    subFmt = subFmt,
+                    onClick = { title, artist, album ->
+                        if (directSongLaunch) {
+                            ItunesClient.openInPreferredPlayer(context, preferredPlatform, title, artist, null)
+                        } else {
+                            selectedSongDetail = SongDetailState(title = title, artist = artist, album = album)
+                        }
+                    }
+                )
             },
             containerColor = Color.Transparent
         ) { innerPadding ->
@@ -545,10 +459,16 @@ fun MainScreenContent(
                     .background(backgroundGradient)
                     .padding(innerPadding)
             ) {
-                Crossfade(
+                AnimatedContent(
                     targetState = selectedScreen,
-                    animationSpec = tween(150),
-                    label = "ScreenCrossfade"
+                    transitionSpec = {
+                        val enter = fadeIn(animationSpec = tween(240, easing = FastOutSlowInEasing)) +
+                                scaleIn(initialScale = 0.97f, animationSpec = tween(240, easing = FastOutSlowInEasing))
+                        val exit = fadeOut(animationSpec = tween(160, easing = FastOutLinearInEasing)) +
+                                scaleOut(targetScale = 1.02f, animationSpec = tween(160, easing = FastOutLinearInEasing))
+                        enter togetherWith exit
+                    },
+                    label = "ScreenTransition"
                 ) { targetScreen ->
                     when (targetScreen) {
                         NavigationScreen.DISCOVERY -> {
@@ -556,24 +476,26 @@ fun MainScreenContent(
                                 recommendations = recommendations,
                                 isLoading = isRecommendationsLoading,
                                 isLoadingMore = isLoadingMore,
-                                selectedCategory = selectedCategory,
-                                isGridView = isGridView,
-                                preferredPlatform = preferredPlatform,
-                                onCategoryChange = { cat ->
-                                    selectedCategory = cat
-                                    refreshRecommendations(cat, reset = true)
-                                },
-                                onToggleGridView = { isGridView = !isGridView },
-                                onRefresh = { refreshRecommendations(selectedCategory, reset = true) },
-                                onLoadMore = { refreshRecommendations(selectedCategory, reset = false) },
+                                onRefresh = { refreshRecommendations(selectedCategory, true) },
+                                onLoadMore = { refreshRecommendations(selectedCategory, false) },
                                 onSongClick = { item ->
-                                    selectedSongDetail = SongDetailState(
-                                        title = item.title,
-                                        artist = item.artist,
-                                        album = item.album,
-                                        artworkUrl = item.effectiveArtworkUrl,
-                                        appleMusicUrl = item.itunesMatch?.appleMusicUrl
-                                    )
+                                    if (directSongLaunch) {
+                                        ItunesClient.openInPreferredPlayer(
+                                            context,
+                                            preferredPlatform,
+                                            item.title,
+                                            item.artist,
+                                            item.itunesMatch?.appleMusicUrl
+                                        )
+                                    } else {
+                                        selectedSongDetail = SongDetailState(
+                                            title = item.title,
+                                            artist = item.artist,
+                                            album = item.album,
+                                            artworkUrl = item.effectiveArtworkUrl,
+                                            appleMusicUrl = item.itunesMatch?.appleMusicUrl
+                                        )
+                                    }
                                 }
                             )
                         }
@@ -582,17 +504,32 @@ fun MainScreenContent(
                             SearchScreen(
                                 preferredPlatform = preferredPlatform,
                                 onSongClick = { match ->
-                                    selectedSongDetail = SongDetailState(
-                                        title = match.trackName,
-                                        artist = match.artistName,
-                                        album = match.collectionName,
-                                        artworkUrl = match.artworkUrl,
-                                        appleMusicUrl = match.appleMusicUrl
-                                    )
+                                    if (directSongLaunch) {
+                                        ItunesClient.openInPreferredPlayer(
+                                            context,
+                                            preferredPlatform,
+                                            match.trackName,
+                                            match.artistName,
+                                            match.appleMusicUrl
+                                        )
+                                    } else {
+                                        selectedSongDetail = SongDetailState(
+                                            title = match.trackName,
+                                            artist = match.artistName,
+                                            album = match.collectionName,
+                                            artworkUrl = match.artworkUrl,
+                                            appleMusicUrl = match.appleMusicUrl
+                                        )
+                                    }
                                 },
                                 onOpenProfile = { profileUser ->
                                     viewedProfileUsername = profileUser
                                     selectedScreen = NavigationScreen.PROFILE
+                                },
+                                onOpenArtist = { artistName ->
+                                    previousScreen = selectedScreen
+                                    selectedArtistDetail = artistName
+                                    selectedScreen = NavigationScreen.ARTIST_DETAIL
                                 }
                             )
                         }
@@ -602,11 +539,15 @@ fun MainScreenContent(
                                 username = viewedProfileUsername ?: lastfmUsername.ifEmpty { "JmDemisana" },
                                 preferredPlatform = preferredPlatform,
                                 onSongClick = { title, artist, art ->
-                                    selectedSongDetail = SongDetailState(
-                                        title = title,
-                                        artist = artist,
-                                        artworkUrl = art
-                                    )
+                                    if (directSongLaunch) {
+                                        ItunesClient.openInPreferredPlayer(context, preferredPlatform, title, artist, null)
+                                    } else {
+                                        selectedSongDetail = SongDetailState(
+                                            title = title,
+                                            artist = artist,
+                                            artworkUrl = art
+                                        )
+                                    }
                                 }
                             )
                         }
@@ -617,19 +558,81 @@ fun MainScreenContent(
                             )
                         }
 
+                        NavigationScreen.ARTIST_DETAIL -> {
+                            ArtistFeatureScreen(
+                                artistName = selectedArtistDetail ?: "GUMI",
+                                preferredPlatform = preferredPlatform,
+                                onBack = {
+                                    selectedScreen = previousScreen
+                                },
+                                onSelectSong = { title, artist, art ->
+                                    if (directSongLaunch) {
+                                        ItunesClient.openInPreferredPlayer(context, preferredPlatform, title, artist, null)
+                                    } else {
+                                        selectedSongDetail = SongDetailState(
+                                            title = title,
+                                            artist = artist,
+                                            artworkUrl = art
+                                        )
+                                    }
+                                },
+                                onSelectArtist = { newArtist ->
+                                    selectedArtistDetail = newArtist
+                                }
+                            )
+                        }
+
+                        NavigationScreen.MARUCAST -> {
+                            MarucastScreen(
+                                onStartStream = { pin, onResult ->
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            MarucastApiClient.lookupPin(pin, object : MarucastApiClient.Callback<String> {
+                                                override fun onSuccess(token: String) {
+                                                    val serviceIntent = Intent(context, MarucastForegroundService::class.java).apply {
+                                                        action = MarucastForegroundService.ACTION_START
+                                                        putExtra(MarucastForegroundService.EXTRA_TOKEN, token)
+                                                        if (projectionIntentData != null) {
+                                                            putExtra(MarucastForegroundService.EXTRA_PROJECTION_DATA, projectionIntentData)
+                                                        }
+                                                    }
+                                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                                        context.startForegroundService(serviceIntent)
+                                                    } else {
+                                                        context.startService(serviceIntent)
+                                                    }
+                                                    onResult(true, null)
+                                                }
+
+                                                override fun onError(error: String) {
+                                                    onResult(false, error)
+                                                }
+                                            })
+                                        }
+                                    }
+                                },
+                                onStopStream = {
+                                    val stopIntent = Intent(context, MarucastForegroundService::class.java).apply {
+                                        action = MarucastForegroundService.ACTION_STOP
+                                    }
+                                    context.startService(stopIntent)
+                                }
+                            )
+                        }
+
                         NavigationScreen.SCROBBLING -> {
                             ScrobblingScreen(
                                 scrobbleEnabled = scrobbleEnabled,
                                 onToggleScrobble = onToggleScrobble,
                                 sessionKey = sessionKey,
                                 lastfmUsername = lastfmUsername,
-                                onSessionKeyChange = onSessionKeyChange,
-                                onUsernameChange = onUsernameChange,
+                                onSessionKeyChange = { scope.launch { prefs.setLastfmSessionKey(it) } },
+                                onUsernameChange = { scope.launch { prefs.setLastfmUsername(it) } },
                                 scrobblePercentage = scrobblePercentage,
-                                onScrobblePercentageChange = onScrobblePercentageChange,
+                                onScrobblePercentageChange = { scope.launch { prefs.setScrobblePercentage(it) } },
                                 allApps = allApps,
                                 scrobbleApps = scrobbleApps,
-                                onScrobbleAppsChange = onScrobbleAppsChange,
+                                onScrobbleAppsChange = { scope.launch { prefs.setScrobbleApps(it) } },
                                 onShowManualDialog = { showManualCredsDialog = true }
                             )
                         }
@@ -640,7 +643,7 @@ fun MainScreenContent(
                                 onToggleLocal = onToggleLocal,
                                 allApps = allApps,
                                 localApps = localApps,
-                                onLocalAppsChange = onLocalAppsChange
+                                onLocalAppsChange = { scope.launch { prefs.setLocalApps(it) } }
                             )
                         }
 
@@ -650,7 +653,7 @@ fun MainScreenContent(
                                 onToggleReceiver = onToggleReceiver,
                                 receiverUsername = receiverUsername,
                                 lastfmUsername = lastfmUsername,
-                                onReceiverUsernameChange = onReceiverUsernameChange
+                                onReceiverUsernameChange = { scope.launch { prefs.setReceiverUsername(it) } }
                             )
                         }
 
@@ -658,16 +661,18 @@ fun MainScreenContent(
                             CommonSettingsScreen(
                                 mainFmt = mainFmt,
                                 subFmt = subFmt,
-                                onMainFmtChange = onMainFmtChange,
-                                onSubFmtChange = onSubFmtChange,
+                                onMainFmtChange = { scope.launch { prefs.setNotifMainFormat(it) } },
+                                onSubFmtChange = { scope.launch { prefs.setNotifSubFormat(it) } },
                                 preferredPlatform = preferredPlatform,
-                                onPreferredPlatformChange = onPreferredPlatformChange,
+                                onPreferredPlatformChange = { scope.launch { prefs.setPreferredPlatform(it) } },
+                                directSongLaunch = directSongLaunch,
+                                onDirectSongLaunchChange = { scope.launch { prefs.setDirectSongLaunch(it) } },
                                 notifySongUpdate = notifySongUpdate,
-                                onToggleSongUpdate = onToggleSongUpdate,
+                                onToggleSongUpdate = { scope.launch { prefs.setNotifySongUpdate(it) } },
                                 intervalEnabled = intervalEnabled,
-                                onIntervalToggle = onIntervalToggle,
+                                onIntervalToggle = { scope.launch { prefs.setIntervalEnabled(it) } },
                                 intervalMinutes = intervalMinutes,
-                                onIntervalMinutesChange = onIntervalMinutesChange,
+                                onIntervalMinutesChange = { scope.launch { prefs.setIntervalMinutes(it) } },
                                 onSendTestNotification = onSendTestNotification,
                                 onRestartService = onRestartService
                             )
@@ -683,6 +688,12 @@ fun MainScreenContent(
                         onDismiss = { selectedSongDetail = null },
                         onSelectSimilarSong = { newSong ->
                             selectedSongDetail = newSong
+                        },
+                        onOpenArtist = { artist ->
+                            selectedSongDetail = null
+                            selectedArtistDetail = artist
+                            previousScreen = selectedScreen
+                            selectedScreen = NavigationScreen.ARTIST_DETAIL
                         }
                     )
                 }
@@ -693,8 +704,10 @@ fun MainScreenContent(
                         currentKey = sessionKey,
                         currentUsername = lastfmUsername,
                         onSave = { key, user ->
-                            onSessionKeyChange(key)
-                            onUsernameChange(user)
+                            scope.launch {
+                                prefs.setLastfmSessionKey(key)
+                                prefs.setLastfmUsername(user)
+                            }
                             showManualCredsDialog = false
                         },
                         onDismiss = { showManualCredsDialog = false }
@@ -706,7 +719,7 @@ fun MainScreenContent(
 }
 
 // -------------------------------------------------------------------------------------------------
-// 1. DISCOVERY SCREEN (Swipe-to-Refresh & Category Tabs)
+// 1. DISCOVERY SCREEN (Simplified Track-Only View with Contextual Seed Reasons)
 // -------------------------------------------------------------------------------------------------
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -714,17 +727,13 @@ fun DiscoveryScreen(
     recommendations: List<LastFmRecommendationsEngine.RecommendedTrackItem>,
     isLoading: Boolean,
     isLoadingMore: Boolean,
-    selectedCategory: LastFmRecommendationsEngine.RecCategory,
-    isGridView: Boolean,
-    preferredPlatform: String,
-    onCategoryChange: (LastFmRecommendationsEngine.RecCategory) -> Unit,
-    onToggleGridView: () -> Unit,
     onRefresh: () -> Unit,
     onLoadMore: () -> Unit,
     onSongClick: (LastFmRecommendationsEngine.RecommendedTrackItem) -> Unit
 ) {
     val pullRefreshState = rememberPullToRefreshState()
     val listState = rememberLazyListState()
+    var isGridView by remember { mutableStateOf(false) }
 
     val shouldLoadMore by remember(recommendations.size, isLoading, isLoadingMore) {
         derivedStateOf {
@@ -751,57 +760,16 @@ fun DiscoveryScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 16.dp),
-            contentPadding = PaddingValues(top = 16.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            contentPadding = PaddingValues(top = 12.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Category Tab Bar: All Recommendations | Artists | Albums | Tracks
-            item(key = "category_tabs") {
-                ScrollableTabRow(
-                    selectedTabIndex = selectedCategory.ordinal,
-                    containerColor = Color.Transparent,
-                    contentColor = MaruAccentPink,
-                    edgePadding = 0.dp,
-                    divider = { HorizontalDivider(color = MaruGlassBorderSoft) },
-                    indicator = { tabPositions ->
-                        TabRowDefaults.SecondaryIndicator(
-                            Modifier.tabIndicatorOffset(tabPositions[selectedCategory.ordinal]),
-                            color = MaruAccentPink
-                        )
-                    }
-                ) {
-                    LastFmRecommendationsEngine.RecCategory.entries.forEach { cat ->
-                        val selected = selectedCategory == cat
-                        Tab(
-                            selected = selected,
-                            onClick = {
-                                if (selectedCategory != cat) {
-                                    onCategoryChange(cat)
-                                }
-                            },
-                            text = {
-                                Text(
-                                    if (cat == LastFmRecommendationsEngine.RecCategory.ALL) "All Recommendations" else cat.label,
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                        letterSpacing = 0.5.sp,
-                                        fontSize = 11.5.sp
-                                    ),
-                                    color = if (selected) MaruAccentPink else MaruTextMuted
-                                )
-                            }
-                        )
-                    }
-                }
-            }
-
-            // Sub-header row with Category Title and Grid Toggle
-            item(key = "subheader") {
+            item(key = "header") {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.AutoAwesome, null, Modifier.size(15.dp), tint = MaruAccentPink)
@@ -816,16 +784,32 @@ fun DiscoveryScreen(
                         )
                     }
 
-                    IconButton(
-                        onClick = onToggleGridView,
-                        modifier = Modifier.size(32.dp)
+                    Surface(
+                        onClick = { isGridView = !isGridView },
+                        shape = MaruPillShape,
+                        color = MaruGlassSubtleBg,
+                        border = BorderStroke(1.dp, MaruGlassBorderSoft)
                     ) {
-                        Icon(
-                            if (isGridView) Icons.Default.List else Icons.Default.GridView,
-                            contentDescription = "Toggle View",
-                            tint = MaruAccentBlue,
-                            modifier = Modifier.size(18.dp)
-                        )
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                if (isGridView) Icons.Default.ViewList else Icons.Default.GridView,
+                                contentDescription = "Toggle View",
+                                tint = MaruAccentPink,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                if (isGridView) "LIST" else "GRID",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 9.5.sp
+                                ),
+                                color = MaruTextStrong
+                            )
+                        }
                     }
                 }
             }
@@ -873,59 +857,56 @@ fun DiscoveryScreen(
                         }
                     }
                 }
-            } else {
-                if (isGridView) {
-                    val chunked = recommendations.chunked(2)
-                    items(chunked, key = { row -> row.joinToString { "${it.artist}_${it.title}" } }) { rowItems ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            rowItems.forEach { item ->
-                                GlassRecommendationGridCard(
-                                    item = item,
-                                    onClick = { onSongClick(item) },
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                            if (rowItems.size == 1) {
-                                Spacer(Modifier.weight(1f))
-                            }
+            } else if (isGridView) {
+                val chunked = recommendations.chunked(2)
+                items(chunked, key = { row -> row.joinToString("_") { "${it.artist}_${it.title}" } }) { rowItems ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        rowItems.forEach { item ->
+                            GlassRecommendationGridCard(
+                                item = item,
+                                onClick = { onSongClick(item) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        if (rowItems.size == 1) {
+                            Spacer(Modifier.weight(1f))
                         }
                     }
-                } else {
-                    items(recommendations, key = { "${it.artist}_${it.title}" }) { item ->
-                        GlassRecommendationCard(
-                            item = item,
-                            onClick = { onSongClick(item) }
-                        )
-                    }
                 }
+            } else {
+                items(recommendations, key = { "${it.artist}_${it.title}_${it.reason}" }) { item ->
+                    GlassRecommendationCard(
+                        item = item,
+                        onClick = { onSongClick(item) }
+                    )
+                }
+            }
 
-                // Automatic Infinite Scroll Loading Indicator (No extra button clicks needed!)
-                if (isLoadingMore) {
-                    item(key = "loading_more_indicator") {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 12.dp),
-                            contentAlignment = Alignment.Center
+            if (isLoadingMore) {
+                item(key = "loading_more_indicator") {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                CircularProgressIndicator(color = MaruAccentPink, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                                Text(
-                                    "DISCOVERING MORE MUSIC...",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontSize = 10.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        letterSpacing = 0.5.sp
-                                    ),
-                                    color = MaruTextMuted
-                                )
-                            }
+                            CircularProgressIndicator(color = MaruAccentPink, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Text(
+                                "DISCOVERING MORE MUSIC...",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 0.5.sp
+                                ),
+                                color = MaruTextMuted
+                            )
                         }
                     }
                 }
@@ -935,29 +916,90 @@ fun DiscoveryScreen(
 }
 
 // -------------------------------------------------------------------------------------------------
-// 2. SEARCH SCREEN (Instant Debounced Search + Filtering + Profile Lookup)
+// 2. SEARCH SCREEN
 // -------------------------------------------------------------------------------------------------
-enum class SearchScope(val label: String) {
-    MUSIC("Songs, Artists, Albums"),
-    PROFILES("Last.fm Profiles")
+object ArtistCanonicalResolver {
+    private val KNOWN_ALIASES = mapOf(
+        "miku" to "Hatsune Miku",
+        "hatsune" to "Hatsune Miku",
+        "hatsunemiku" to "Hatsune Miku",
+        "初音ミク" to "Hatsune Miku",
+        "gumi" to "GUMI",
+        "megpoid" to "GUMI",
+        "rin" to "Kagamine Rin",
+        "kagamine rin" to "Kagamine Rin",
+        "len" to "Kagamine Len",
+        "kagamine len" to "Kagamine Len",
+        "luka" to "Megurine Luka",
+        "megurine luka" to "Megurine Luka",
+        "kaito" to "KAITO",
+        "meiko" to "MEIKO",
+        "teto" to "Kasane Teto",
+        "kasane teto" to "Kasane Teto",
+        "ia" to "IA",
+        "deco 27" to "DECO*27",
+        "deco27" to "DECO*27",
+        "deco*27" to "DECO*27",
+        "pinocchio-p" to "PinocchioP",
+        "pinocchiop" to "PinocchioP",
+        "pasupare" to "Pastel*Palettes",
+        "pastel palettes" to "Pastel*Palettes",
+        "popipa" to "Poppin'Party",
+        "poppin party" to "Poppin'Party",
+        "roselia" to "Roselia"
+    )
+
+    fun resolveCanonicalName(input: String, bioSummary: String? = null): String {
+        val clean = input.trim()
+        val lower = clean.lowercase()
+        KNOWN_ALIASES[lower]?.let { return it }
+
+        if (bioSummary != null && (bioSummary.contains("Incorrect tag for", ignoreCase = true) || bioSummary.contains("There is more than one artist named", ignoreCase = true))) {
+            if (bioSummary.contains("初音ミク") || lower == "miku") return "Hatsune Miku"
+            if (bioSummary.contains("Incorrect tag for", ignoreCase = true)) {
+                val after = bioSummary.substringAfter("Incorrect tag for", "").trim()
+                val candidate = after.substringBefore(".").substringBefore(",").substringBefore("\n").trim()
+                if (candidate.isNotBlank() && candidate.length < 50) {
+                    return candidate
+                }
+            }
+        }
+        return clean
+    }
 }
+
+enum class SearchScope(val label: String) {
+    ARTISTS("Artists & Albums"),
+    SONGS("Songs"),
+    PROFILES("Profiles")
+}
+
+data class ArtistOverviewResult(
+    val artistName: String,
+    val artistInfo: LastNotifApiClient.ArtistDetailInfo?,
+    val highResArtwork: String?,
+    val topTracks: List<LastNotifApiClient.TopItem>,
+    val topAlbums: List<LastNotifApiClient.TopItem>,
+    val albumMatch: ItunesClient.ItunesSongMatch? = null
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SearchScreen(
     preferredPlatform: String,
     onSongClick: (ItunesClient.ItunesSongMatch) -> Unit,
-    onOpenProfile: (String) -> Unit
+    onOpenProfile: (String) -> Unit,
+    onOpenArtist: (String) -> Unit
 ) {
-    val context = LocalContext.current
-    var selectedScope by remember { mutableStateOf(SearchScope.MUSIC) }
+    var selectedScope by remember { mutableStateOf(SearchScope.ARTISTS) }
     var searchQuery by remember { mutableStateOf("") }
 
-    // Music search states
+    var artistOverview by remember { mutableStateOf<ArtistOverviewResult?>(null) }
+    var isArtistSearching by remember { mutableStateOf(false) }
+
     var musicResults by remember { mutableStateOf<List<ItunesClient.ItunesSongMatch>>(emptyList()) }
     var isMusicSearching by remember { mutableStateOf(false) }
 
-    // Profile search states
     var profileResult by remember { mutableStateOf<LastNotifApiClient.UserProfile?>(null) }
     var profileRecentTracks by remember { mutableStateOf<List<LastNotifApiClient.ScrobbleItem>>(emptyList()) }
     var isProfileSearching by remember { mutableStateOf(false) }
@@ -967,18 +1009,56 @@ fun SearchScreen(
 
     LaunchedEffect(searchQuery, selectedScope) {
         val q = searchQuery.trim()
-        if (selectedScope == SearchScope.MUSIC) {
-            if (q.length >= 2) {
+        if (q.length < 2) {
+            artistOverview = null
+            musicResults = emptyList()
+            profileResult = null
+            profileRecentTracks = emptyList()
+            profileNotFound = false
+            return@LaunchedEffect
+        }
+
+        when (selectedScope) {
+            SearchScope.ARTISTS -> {
+                delay(350)
+                isArtistSearching = true
+                val result = withContext(Dispatchers.IO) {
+                    val canonicalInput = ArtistCanonicalResolver.resolveCanonicalName(q)
+                    var info = LastNotifApiClient.getArtistInfo(canonicalInput)
+                    val resolvedName = ArtistCanonicalResolver.resolveCanonicalName(info?.name?.ifEmpty { canonicalInput } ?: canonicalInput, info?.bioSummary)
+                    if (resolvedName != canonicalInput) {
+                        info = LastNotifApiClient.getArtistInfo(resolvedName) ?: info
+                    }
+
+                    val itunesArtist = ItunesClient.searchArtist(resolvedName)
+                    val tracks = LastNotifApiClient.getArtistTopTracks(resolvedName, limit = 5)
+                    val albums = LastNotifApiClient.getArtistTopAlbums(resolvedName, limit = 4)
+                    val albumMatch = ItunesClient.searchAlbum(q)
+                    val art = itunesArtist?.artworkUrl ?: info?.artworkUrl ?: albumMatch?.artworkUrl
+
+                    if (info != null || itunesArtist != null || albumMatch != null || tracks.isNotEmpty()) {
+                        ArtistOverviewResult(
+                            artistName = resolvedName,
+                            artistInfo = info,
+                            highResArtwork = art,
+                            topTracks = tracks,
+                            topAlbums = albums,
+                            albumMatch = albumMatch
+                        )
+                    } else {
+                        null
+                    }
+                }
+                artistOverview = result
+                isArtistSearching = false
+            }
+            SearchScope.SONGS -> {
                 delay(350)
                 isMusicSearching = true
                 musicResults = withContext(Dispatchers.IO) { ItunesClient.searchInstant(q) }
                 isMusicSearching = false
-            } else if (q.isEmpty()) {
-                musicResults = emptyList()
-                isMusicSearching = false
             }
-        } else {
-            if (q.length >= 2) {
+            SearchScope.PROFILES -> {
                 delay(400)
                 isProfileSearching = true
                 profileNotFound = false
@@ -991,11 +1071,6 @@ fun SearchScreen(
                 profileRecentTracks = recents
                 profileNotFound = (user == null)
                 isProfileSearching = false
-            } else if (q.isEmpty()) {
-                profileResult = null
-                profileRecentTracks = emptyList()
-                profileNotFound = false
-                isProfileSearching = false
             }
         }
     }
@@ -1003,27 +1078,57 @@ fun SearchScreen(
     val pullRefreshState = rememberPullToRefreshState()
 
     PullToRefreshBox(
-        isRefreshing = if (selectedScope == SearchScope.MUSIC) isMusicSearching else isProfileSearching,
+        isRefreshing = when (selectedScope) {
+            SearchScope.ARTISTS -> isArtistSearching
+            SearchScope.SONGS -> isMusicSearching
+            SearchScope.PROFILES -> isProfileSearching
+        },
         onRefresh = {
             val q = searchQuery.trim()
             if (q.isNotBlank()) {
                 scope.launch {
-                    if (selectedScope == SearchScope.MUSIC) {
-                        isMusicSearching = true
-                        musicResults = withContext(Dispatchers.IO) { ItunesClient.searchInstant(q) }
-                        isMusicSearching = false
-                    } else {
-                        isProfileSearching = true
-                        profileNotFound = false
-                        val (user, recents) = withContext(Dispatchers.IO) {
-                            val u = LastNotifApiClient.getUserInfo(q)
-                            val r = if (u != null) LastNotifApiClient.getRecentTracks(q, limit = 4) else emptyList()
-                            u to r
+                    when (selectedScope) {
+                        SearchScope.ARTISTS -> {
+                            isArtistSearching = true
+                            val result = withContext(Dispatchers.IO) {
+                                val info = LastNotifApiClient.getArtistInfo(q)
+                                val resolvedName = info?.name?.ifEmpty { q } ?: q
+                                val itunesArtist = ItunesClient.searchArtist(resolvedName)
+                                val tracks = LastNotifApiClient.getArtistTopTracks(resolvedName, limit = 5)
+                                val albums = LastNotifApiClient.getArtistTopAlbums(resolvedName, limit = 4)
+                                val albumMatch = ItunesClient.searchAlbum(q)
+                                val art = itunesArtist?.artworkUrl ?: info?.artworkUrl ?: albumMatch?.artworkUrl
+
+                                ArtistOverviewResult(
+                                    artistName = resolvedName,
+                                    artistInfo = info,
+                                    highResArtwork = art,
+                                    topTracks = tracks,
+                                    topAlbums = albums,
+                                    albumMatch = albumMatch
+                                )
+                            }
+                            artistOverview = result
+                            isArtistSearching = false
                         }
-                        profileResult = user
-                        profileRecentTracks = recents
-                        profileNotFound = (user == null)
-                        isProfileSearching = false
+                        SearchScope.SONGS -> {
+                            isMusicSearching = true
+                            musicResults = withContext(Dispatchers.IO) { ItunesClient.searchInstant(q) }
+                            isMusicSearching = false
+                        }
+                        SearchScope.PROFILES -> {
+                            isProfileSearching = true
+                            profileNotFound = false
+                            val (user, recents) = withContext(Dispatchers.IO) {
+                                val u = LastNotifApiClient.getUserInfo(q)
+                                val r = if (u != null) LastNotifApiClient.getRecentTracks(q, limit = 4) else emptyList()
+                                u to r
+                            }
+                            profileResult = user
+                            profileRecentTracks = recents
+                            profileNotFound = (user == null)
+                            isProfileSearching = false
+                        }
                     }
                 }
             }
@@ -1038,7 +1143,7 @@ fun SearchScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Scope Picker Tabs (Songs, Artists, Albums vs Last.fm Profiles)
+            // Scope Picker Tabs
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1092,7 +1197,11 @@ fun SearchScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
-                        if (selectedScope == SearchScope.MUSIC) Icons.Default.Search else Icons.Default.PersonSearch,
+                        when (selectedScope) {
+                            SearchScope.ARTISTS -> Icons.Default.MicExternalOn
+                            SearchScope.SONGS -> Icons.Default.MusicNote
+                            SearchScope.PROFILES -> Icons.Default.PersonSearch
+                        },
                         null,
                         tint = MaruAccentPink,
                         modifier = Modifier.size(20.dp)
@@ -1103,8 +1212,13 @@ fun SearchScreen(
                         onValueChange = { searchQuery = it },
                         placeholder = {
                             Text(
-                                if (selectedScope == SearchScope.MUSIC) "Search songs, artists, albums..." else "Search Last.fm username...",
-                                color = MaruTextMuted.copy(alpha = 0.6f)
+                                when (selectedScope) {
+                                    SearchScope.ARTISTS -> "Search artist or album (e.g. GUMI, Yoasobi)..."
+                                    SearchScope.SONGS -> "Search songs & tracks..."
+                                    SearchScope.PROFILES -> "Enter Last.fm username..."
+                                },
+                                color = MaruTextMuted.copy(alpha = 0.6f),
+                                style = MaterialTheme.typography.bodyMedium
                             )
                         },
                         colors = TextFieldDefaults.colors(
@@ -1119,390 +1233,345 @@ fun SearchScreen(
                         modifier = Modifier.weight(1f)
                     )
                     if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { searchQuery = "" }, modifier = Modifier.size(24.dp)) {
-                            Icon(Icons.Default.Close, null, tint = MaruTextMuted, modifier = Modifier.size(16.dp))
+                        IconButton(onClick = { searchQuery = "" }, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.Clear, "Clear", tint = MaruTextMuted, modifier = Modifier.size(16.dp))
                         }
                     }
                 }
             }
 
-            // Explicit content limitation notice (for Music search)
-            if (selectedScope == SearchScope.MUSIC) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Default.Info,
-                        contentDescription = null,
-                        tint = MaruAccentPurple.copy(alpha = 0.85f),
-                        modifier = Modifier.size(13.dp)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        "Note: Search only supports songs that are not explicit.",
-                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
-                        color = MaruTextMuted.copy(alpha = 0.75f)
-                    )
-                }
-            }
-
-            // Results Section
-            if (selectedScope == SearchScope.MUSIC) {
-                if (isMusicSearching && musicResults.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(200.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator(color = MaruAccentPink, modifier = Modifier.size(32.dp))
-                    }
-                } else if (musicResults.isNotEmpty()) {
-                    Text(
-                        "RESULTS (${musicResults.size})",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = MaruAccentPink,
-                            letterSpacing = 0.8.sp
-                        )
-                    )
-
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        musicResults.forEach { match ->
-                            GlassCard(
-                                border = MaruGlassBorderSoft,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onSongClick(match) }
-                            ) {
+            // Results View
+            when (selectedScope) {
+                SearchScope.ARTISTS -> {
+                    if (isArtistSearching) {
+                        Box(modifier = Modifier.fillMaxWidth().height(160.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = MaruAccentPink, modifier = Modifier.size(28.dp))
+                        }
+                    } else if (artistOverview != null) {
+                        val item = artistOverview!!
+                        // 1. Artist Hero Overview Card
+                        GlassCard(
+                            border = MaruAccentPink.copy(alpha = 0.5f),
+                            glowColor = MaruAccentPink.copy(alpha = 0.15f)
+                        ) {
+                            Column(modifier = Modifier.padding(18.dp)) {
                                 Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(16.dp)
                                 ) {
-                                    if (!match.artworkUrl.isNullOrBlank()) {
-                                        AsyncImage(
-                                            model = match.artworkUrl,
-                                            contentDescription = null,
-                                            modifier = Modifier
-                                                .size(54.dp)
-                                                .clip(MaruCardShape)
-                                                .background(MaruGlassSubtleBg),
-                                            contentScale = ContentScale.Crop,
-                                            error = painterResource(id = R.drawable.ic_maru_heart),
-                                            placeholder = painterResource(id = R.drawable.ic_maru_heart)
-                                        )
-                                    } else {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(54.dp)
-                                                .clip(MaruCardShape)
-                                                .background(MaruGlassSubtleBg)
-                                                .border(BorderStroke(1.dp, MaruGlassBorderSoft), MaruCardShape),
-                                            contentAlignment = Alignment.Center
-                                        ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(72.dp)
+                                            .clip(CircleShape)
+                                            .background(MaruGlassSubtleBg)
+                                            .border(1.5.dp, MaruAccentPink, CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (!item.highResArtwork.isNullOrBlank()) {
+                                            AsyncImage(
+                                                model = item.highResArtwork,
+                                                contentDescription = item.artistName,
+                                                modifier = Modifier.fillMaxSize(),
+                                                contentScale = ContentScale.Crop,
+                                                error = painterResource(id = R.drawable.ic_maru_heart),
+                                                placeholder = painterResource(id = R.drawable.ic_maru_heart)
+                                            )
+                                        } else {
                                             Icon(
                                                 painter = painterResource(id = R.drawable.ic_maru_heart),
                                                 contentDescription = null,
                                                 tint = Color.Unspecified,
-                                                modifier = Modifier.size(24.dp)
+                                                modifier = Modifier.size(32.dp)
                                             )
                                         }
                                     }
-                                    Spacer(Modifier.width(12.dp))
+
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            match.trackName,
+                                            item.artistName,
+                                            style = MaterialTheme.typography.titleLarge.copy(
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 20.sp
+                                            ),
+                                            color = MaruTextStrong,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+
+                                        val listeners = item.artistInfo?.listeners ?: 0L
+                                        val playcount = item.artistInfo?.playcount ?: 0L
+                                        if (listeners > 0 || playcount > 0) {
+                                            Spacer(Modifier.height(2.dp))
+                                            Text(
+                                                "%,d listeners • %,d plays".format(listeners, playcount),
+                                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                                                color = MaruAccentPink
+                                            )
+                                        }
+
+                                        if (!item.artistInfo?.tags.isNullOrEmpty()) {
+                                            Spacer(Modifier.height(6.dp))
+                                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                item.artistInfo!!.tags.take(3).forEach { tag ->
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .background(MaruGlassSubtleBg, MaruPillShape)
+                                                            .border(1.dp, MaruGlassBorderSoft, MaruPillShape)
+                                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    ) {
+                                                        Text(
+                                                            tag.lowercase(),
+                                                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                                                            color = MaruTextMuted
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (!item.artistInfo?.bioSummary.isNullOrBlank()) {
+                                    Spacer(Modifier.height(12.dp))
+                                    Text(
+                                        item.artistInfo!!.bioSummary,
+                                        style = MaterialTheme.typography.bodySmall.copy(lineHeight = 18.sp),
+                                        color = MaruTextMuted,
+                                        maxLines = 3,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                Spacer(Modifier.height(14.dp))
+
+                                Surface(
+                                    onClick = { onOpenArtist(item.artistName) },
+                                    shape = MaruPillShape,
+                                    color = MaruAccentPink,
+                                    modifier = Modifier.fillMaxWidth().height(40.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxSize(),
+                                        horizontalArrangement = Arrangement.Center,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(Icons.Default.AutoAwesome, null, tint = Color.White, modifier = Modifier.size(15.dp))
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            "EXPLORE ARTIST FEATURE",
+                                            color = Color.White,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.5.sp,
+                                            letterSpacing = 0.6.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. Top Tracks Preview
+                        if (item.topTracks.isNotEmpty()) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "POPULAR TRACKS",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp),
+                                color = MaruAccentPink
+                            )
+
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                item.topTracks.take(4).forEachIndexed { index, track ->
+                                    GlassCard(
+                                        border = MaruGlassBorderSoft,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                onSongClick(
+                                                    ItunesClient.ItunesSongMatch(
+                                                        trackId = 0L,
+                                                        trackName = track.name,
+                                                        artistName = item.artistName,
+                                                        collectionName = "",
+                                                        artworkUrl = track.artworkUrl ?: item.highResArtwork,
+                                                        appleMusicUrl = null,
+                                                        previewUrl = null
+                                                    )
+                                                )
+                                            }
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                "#${index + 1}",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = MaruAccentPink,
+                                                modifier = Modifier.width(28.dp)
+                                            )
+
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    track.name,
+                                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                                                    color = MaruTextStrong,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Text(
+                                                    item.artistName,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaruTextMuted,
+                                                    maxLines = 1
+                                                )
+                                            }
+
+                                            Icon(
+                                                Icons.Default.PlayArrow,
+                                                contentDescription = "Play",
+                                                tint = MaruAccentPink,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 3. Album Match Card (if query was an album)
+                        if (item.albumMatch != null && !item.albumMatch.collectionName.equals(item.artistName, ignoreCase = true)) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "MATCHED ALBUM",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp),
+                                color = MaruAccentBlue
+                            )
+                            GlassCard(
+                                border = MaruAccentBlue.copy(alpha = 0.5f),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onOpenArtist(item.albumMatch.artistName) }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(54.dp)
+                                            .clip(MaruCardShape)
+                                            .background(MaruGlassSubtleBg)
+                                    ) {
+                                        if (!item.albumMatch.artworkUrl.isNullOrBlank()) {
+                                            AsyncImage(
+                                                model = item.albumMatch.artworkUrl,
+                                                contentDescription = item.albumMatch.collectionName,
+                                                modifier = Modifier.fillMaxSize(),
+                                                contentScale = ContentScale.Crop,
+                                                error = painterResource(id = R.drawable.ic_maru_heart),
+                                                placeholder = painterResource(id = R.drawable.ic_maru_heart)
+                                            )
+                                        } else {
+                                            Icon(
+                                                Icons.Default.Album,
+                                                contentDescription = null,
+                                                tint = MaruAccentBlue,
+                                                modifier = Modifier.size(28.dp).align(Alignment.Center)
+                                            )
+                                        }
+                                    }
+
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            item.albumMatch.collectionName,
                                             style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
                                             color = MaruTextStrong,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
                                         )
-                                        Spacer(Modifier.height(2.dp))
                                         Text(
-                                            match.artistName,
+                                            "Album by ${item.albumMatch.artistName}",
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = MaruTextMuted,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
+                                            color = MaruAccentBlue,
+                                            maxLines = 1
                                         )
-                                        if (match.collectionName.isNotEmpty()) {
-                                            Text(
-                                                match.collectionName,
-                                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                                                color = MaruAccentPurple.copy(alpha = 0.8f),
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
                                     }
-                                    Spacer(Modifier.width(8.dp))
+
                                     Icon(
                                         Icons.Default.ChevronRight,
-                                        contentDescription = "Details",
-                                        tint = MaruAccentPink,
+                                        contentDescription = "View Artist",
+                                        tint = MaruAccentBlue,
                                         modifier = Modifier.size(20.dp)
                                     )
                                 }
                             }
                         }
-                    }
-                } else if (searchQuery.isNotEmpty()) {
-                    GlassCard {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(28.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text("No songs found for \"$searchQuery\"", color = MaruTextMuted, style = MaterialTheme.typography.bodyMedium)
-                        }
-                    }
-                } else {
-                    // Empty search suggestions
-                    GlassCard {
-                        Column(
-                            modifier = Modifier.padding(20.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.TrendingUp, null, tint = MaruAccentPink, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text("POPULAR DISCOVERIES", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold), color = MaruAccentPink)
-                            }
-                            val sampleQueries = listOf("YOASOBI", "Hatsune Miku", "GUMI", "Kenshi Yonezu", "Pastel*Palettes", "DECO*27")
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    } else if (searchQuery.length >= 2) {
+                        GlassCard {
+                            Column(
+                                modifier = Modifier.padding(24.dp).fillMaxWidth(),
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                sampleQueries.take(3).forEach { q ->
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .background(MaruGlassSubtleBg, MaruPillShape)
-                                            .border(BorderStroke(1.dp, MaruGlassBorderSoft), MaruPillShape)
-                                            .clickable { searchQuery = q }
-                                            .padding(vertical = 8.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(q, style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp), color = MaruTextStrong, maxLines = 1)
-                                    }
-                                }
+                                Icon(Icons.Default.SearchOff, null, tint = MaruTextMuted, modifier = Modifier.size(32.dp))
+                                Spacer(Modifier.height(8.dp))
+                                Text("No artist or album found", color = MaruTextStrong, fontWeight = FontWeight.Bold)
+                                Text("Try searching by artist name (e.g. GUMI, DECO*27, Yoasobi)", color = MaruTextMuted, style = MaterialTheme.typography.bodySmall)
                             }
                         }
                     }
                 }
-            } else {
-                // Profile Search Results
-                if (isProfileSearching && profileResult == null) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(200.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator(color = MaruAccentPink, modifier = Modifier.size(32.dp))
-                    }
-                } else if (profileResult != null) {
-                    val user = profileResult!!
-                    Text(
-                        "LAST.FM PROFILE",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = MaruAccentPink,
-                            letterSpacing = 0.8.sp
+
+                SearchScope.SONGS -> {
+                    if (isMusicSearching) {
+                        Box(modifier = Modifier.fillMaxWidth().height(140.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = MaruAccentPink, modifier = Modifier.size(28.dp))
+                        }
+                    } else if (musicResults.isNotEmpty()) {
+                        Text(
+                            "SEARCH RESULTS (${musicResults.size})",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp),
+                            color = MaruAccentPink
                         )
-                    )
-
-                    GlassCard(
-                        border = MaruAccentPink.copy(alpha = 0.4f),
-                        glowColor = MaruAccentPink.copy(alpha = 0.15f)
-                    ) {
-                        Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(64.dp)
-                                        .clip(CircleShape)
-                                        .background(MaruGlassSubtleBg)
-                                        .border(1.5.dp, MaruAccentPink, CircleShape),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    if (!user.avatarUrl.isNullOrBlank()) {
-                                        AsyncImage(
-                                            model = user.avatarUrl,
-                                            contentDescription = null,
-                                            modifier = Modifier.fillMaxSize(),
-                                            contentScale = ContentScale.Crop,
-                                            error = painterResource(id = R.drawable.ic_maru_heart),
-                                            placeholder = painterResource(id = R.drawable.ic_maru_heart)
-                                        )
-                                    } else {
-                                        Icon(
-                                            painter = painterResource(id = R.drawable.ic_maru_heart),
-                                            contentDescription = null,
-                                            tint = Color.Unspecified,
-                                            modifier = Modifier.size(32.dp)
-                                        )
-                                    }
-                                }
-
-                                Spacer(Modifier.width(14.dp))
-
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        user.realName.ifEmpty { user.username },
-                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                        color = MaruTextStrong
-                                    )
-                                    Text(
-                                        "@${user.username}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaruAccentPink
-                                    )
-                                    Spacer(Modifier.height(4.dp))
-                                    Text(
-                                        "${user.playcount} scrobbles",
-                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                                        color = MaruAccentGreen
-                                    )
-                                }
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            musicResults.forEach { match ->
+                                GlassMusicSearchItem(match = match, onClick = { onSongClick(match) })
                             }
-
-                            if (profileRecentTracks.isNotEmpty()) {
-                                HorizontalDivider(color = MaruGlassBorderSoft)
-                                Text(
-                                    "RECENT ACTIVITY",
-                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, color = MaruAccentBlue)
-                                )
-                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    profileRecentTracks.take(3).forEach { track ->
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            if (!track.artworkUrl.isNullOrBlank()) {
-                                                AsyncImage(
-                                                    model = track.artworkUrl,
-                                                    contentDescription = null,
-                                                    modifier = Modifier
-                                                        .size(32.dp)
-                                                        .clip(MaruCardShape)
-                                                        .background(MaruGlassSubtleBg),
-                                                    contentScale = ContentScale.Crop,
-                                                    error = painterResource(id = R.drawable.ic_maru_heart),
-                                                    placeholder = painterResource(id = R.drawable.ic_maru_heart)
-                                                )
-                                            } else {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(32.dp)
-                                                        .clip(MaruCardShape)
-                                                        .background(MaruGlassSubtleBg)
-                                                        .border(BorderStroke(1.dp, MaruGlassBorderSoft), MaruCardShape),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    Icon(
-                                                        painter = painterResource(id = R.drawable.ic_maru_heart),
-                                                        contentDescription = null,
-                                                        tint = Color.Unspecified,
-                                                        modifier = Modifier.size(16.dp)
-                                                    )
-                                                }
-                                            }
-                                            Spacer(Modifier.width(8.dp))
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(track.title, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold), color = MaruTextStrong, maxLines = 1)
-                                                Text(track.artist, style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp), color = MaruTextMuted, maxLines = 1)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        }
+                    } else if (searchQuery.length >= 2) {
+                        GlassCard {
+                            Column(
+                                modifier = Modifier.padding(24.dp).fillMaxWidth(),
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                GlassButton(
-                                    onClick = { onOpenProfile(user.username) },
-                                    modifier = Modifier.weight(1f),
-                                    borderColor = MaruAccentPink,
-                                    background = MaruAccentPink.copy(alpha = 0.2f)
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        Icon(Icons.Default.Person, null, tint = MaruAccentPink, modifier = Modifier.size(16.dp))
-                                        Text("VIEW FULL PROFILE", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold), color = MaruAccentPink)
-                                    }
-                                }
-
-                                GlassButton(
-                                    onClick = {
-                                        try {
-                                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(user.url.ifEmpty { "https://www.last.fm/user/${user.username}" }))
-                                            context.startActivity(intent)
-                                        } catch (_: Exception) {}
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    borderColor = MaruAccentBlue,
-                                    background = MaruAccentBlue.copy(alpha = 0.15f)
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        Icon(Icons.Default.OpenInNew, null, tint = MaruAccentBlue, modifier = Modifier.size(16.dp))
-                                        Text("OPEN ON LAST.FM", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold), color = MaruAccentBlue)
-                                    }
-                                }
+                                Icon(Icons.Default.SearchOff, null, tint = MaruTextMuted, modifier = Modifier.size(32.dp))
+                                Spacer(Modifier.height(8.dp))
+                                Text("No songs found", color = MaruTextStrong, fontWeight = FontWeight.Bold)
+                                Text("Try searching by song title", color = MaruTextMuted, style = MaterialTheme.typography.bodySmall)
                             }
                         }
                     }
-                } else if (profileNotFound) {
-                    GlassCard {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(28.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text("No Last.fm user found for \"$searchQuery\"", color = MaruTextMuted, style = MaterialTheme.typography.bodyMedium)
+                }
+
+                SearchScope.PROFILES -> {
+                    if (isProfileSearching) {
+                        Box(modifier = Modifier.fillMaxWidth().height(140.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = MaruAccentPink, modifier = Modifier.size(28.dp))
                         }
-                    }
-                } else {
-                    // Quick profile suggestions
-                    GlassCard {
-                        Column(
-                            modifier = Modifier.padding(20.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Group, null, tint = MaruAccentPink, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text("QUICK PROFILE LOOKUP", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold), color = MaruAccentPink)
-                            }
-                            val sampleProfiles = listOf("JmDemisana")
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    } else if (profileResult != null) {
+                        GlassProfileResultCard(
+                            profile = profileResult!!,
+                            recentTracks = profileRecentTracks,
+                            onOpen = { onOpenProfile(profileResult!!.username) }
+                        )
+                    } else if (profileNotFound) {
+                        GlassCard {
+                            Column(
+                                modifier = Modifier.padding(24.dp).fillMaxWidth(),
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                sampleProfiles.forEach { u ->
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .background(MaruGlassSubtleBg, MaruPillShape)
-                                            .border(BorderStroke(1.dp, MaruGlassBorderSoft), MaruPillShape)
-                                            .clickable { searchQuery = u }
-                                            .padding(vertical = 8.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text("@$u", style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold), color = MaruTextStrong, maxLines = 1)
-                                    }
-                                }
+                                Icon(Icons.Default.PersonOff, null, tint = MaruTextMuted, modifier = Modifier.size(32.dp))
+                                Spacer(Modifier.height(8.dp))
+                                Text("Last.fm User Not Found", color = MaruTextStrong, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -1513,7 +1582,347 @@ fun SearchScreen(
 }
 
 // -------------------------------------------------------------------------------------------------
-// 3. PROFILE SCREEN (User Stats, History & Top Charts across timeframes)
+// 3. ARTIST FEATURE SCREEN (Comprehensive Artist Profile & Discography)
+// -------------------------------------------------------------------------------------------------
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ArtistFeatureScreen(
+    artistName: String,
+    preferredPlatform: String,
+    onBack: () -> Unit,
+    onSelectSong: (title: String, artist: String, artworkUrl: String?) -> Unit,
+    onSelectArtist: (String) -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var artistInfo by remember(artistName) { mutableStateOf<LastNotifApiClient.ArtistDetailInfo?>(null) }
+    var topTracks by remember(artistName) { mutableStateOf<List<LastNotifApiClient.TopItem>>(emptyList()) }
+    var topAlbums by remember(artistName) { mutableStateOf<List<LastNotifApiClient.TopItem>>(emptyList()) }
+    var similarArtists by remember(artistName) { mutableStateOf<List<String>>(emptyList()) }
+    var isLoading by remember(artistName) { mutableStateOf(true) }
+    var highResArtwork by remember(artistName) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(artistName) {
+        isLoading = true
+        withContext(Dispatchers.IO) {
+            val canonical = ArtistCanonicalResolver.resolveCanonicalName(artistName)
+            var info = LastNotifApiClient.getArtistInfo(canonical)
+            val resolved = ArtistCanonicalResolver.resolveCanonicalName(info?.name?.ifEmpty { canonical } ?: canonical, info?.bioSummary)
+            if (resolved != canonical) {
+                info = LastNotifApiClient.getArtistInfo(resolved) ?: info
+            }
+
+            val tracks = LastNotifApiClient.getArtistTopTracks(resolved, limit = 10)
+            val albums = LastNotifApiClient.getArtistTopAlbums(resolved, limit = 8)
+            val similar = LastNotifApiClient.getSimilarArtists(resolved, limit = 8)
+            val itunes = ItunesClient.searchArtist(resolved)
+
+            artistInfo = info
+            topTracks = tracks
+            topAlbums = albums
+            similarArtists = similar
+            highResArtwork = itunes?.artworkUrl ?: info?.artworkUrl
+            isLoading = false
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        artistName.uppercase(),
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = 1.sp
+                        ),
+                        color = MaruTextStrong
+                    )
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = MaruAccentPink)
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
+            )
+        },
+        containerColor = Color.Transparent
+    ) { innerPadding ->
+        if (isLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(color = MaruAccentPink, modifier = Modifier.size(36.dp))
+            }
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Artist Hero Card
+                GlassCard(border = MaruAccentPink.copy(alpha = 0.5f), glowColor = MaruAccentPink.copy(alpha = 0.2f)) {
+                    Column(
+                        modifier = Modifier.padding(20.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(130.dp)
+                                .clip(CircleShape)
+                                .background(MaruGlassSubtleBg)
+                                .border(2.dp, MaruAccentPink, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (!highResArtwork.isNullOrBlank()) {
+                                AsyncImage(
+                                    model = highResArtwork,
+                                    contentDescription = artistName,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop,
+                                    error = painterResource(id = R.drawable.ic_maru_heart),
+                                    placeholder = painterResource(id = R.drawable.ic_maru_heart)
+                                )
+                            } else {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_maru_heart),
+                                    contentDescription = null,
+                                    tint = Color.Unspecified,
+                                    modifier = Modifier.size(48.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.height(12.dp))
+
+                        Text(
+                            artistName,
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 20.sp
+                            ),
+                            color = MaruTextStrong,
+                            textAlign = TextAlign.Center
+                        )
+
+                        val listeners = artistInfo?.listeners ?: 0L
+                        val playcount = artistInfo?.playcount ?: 0L
+                        if (listeners > 0 || playcount > 0) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "%,d listeners • %,d scrobbles".format(listeners, playcount),
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                                color = MaruAccentPink
+                            )
+                        }
+
+                        if (!artistInfo?.tags.isNullOrEmpty()) {
+                            Spacer(Modifier.height(10.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                artistInfo!!.tags.take(4).forEach { tag ->
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(horizontal = 4.dp)
+                                            .background(MaruGlassSubtleBg, MaruPillShape)
+                                            .border(1.dp, MaruGlassBorderSoft, MaruPillShape)
+                                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                                    ) {
+                                        Text(
+                                            "#$tag",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.5.sp, fontWeight = FontWeight.Bold),
+                                            color = MaruTextMuted
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!artistInfo?.bioSummary.isNullOrBlank()) {
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                artistInfo!!.bioSummary,
+                                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.5.sp, lineHeight = 16.sp),
+                                color = MaruTextMuted,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+
+                        Spacer(Modifier.height(14.dp))
+
+                        Text("OPEN ARTIST IN STREAMING PLAYER", style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold), color = MaruTextMuted)
+                        Spacer(Modifier.height(6.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            val platforms = listOf("Apple Music", "Spotify", "YouTube Music", "Tidal")
+                            platforms.forEach { platform ->
+                                StreamingPlatformIconButton(
+                                    platform = platform,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = {
+                                        ItunesClient.openInPreferredPlayer(context, platform, "", artistName, null)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Top Popular Songs
+                if (topTracks.isNotEmpty()) {
+                    GlassSectionHeader("POPULAR TRACKS", Icons.Default.MusicNote)
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        topTracks.forEach { track ->
+                            GlassCard(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        onSelectSong(track.name, artistName, track.artworkUrl)
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(24.dp)
+                                            .background(MaruAccentPink.copy(alpha = 0.15f), CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            track.rank.toString(),
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = MaruAccentPink
+                                        )
+                                    }
+                                    Spacer(Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            track.name,
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                                            color = MaruTextStrong,
+                                            maxLines = 1
+                                        )
+                                        if (track.playcount > 0) {
+                                            Text(
+                                                "%,d scrobbles".format(track.playcount),
+                                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                                color = MaruTextMuted
+                                            )
+                                        }
+                                    }
+                                    Icon(Icons.Default.PlayArrow, null, tint = MaruAccentPink, modifier = Modifier.size(20.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Top Albums / Discography
+                if (topAlbums.isNotEmpty()) {
+                    GlassSectionHeader("ALBUMS & DISCOGRAPHY", Icons.Default.Album)
+                    val chunkedAlbums = topAlbums.chunked(2)
+                    chunkedAlbums.forEach { rowAlbums ->
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            rowAlbums.forEach { alb ->
+                                GlassCard(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable {
+                                            scope.launch {
+                                                ItunesClient.openAlbumFirstTrack(context, preferredPlatform, alb.name, artistName)
+                                            }
+                                        }
+                                ) {
+                                    Column {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .aspectRatio(1f)
+                                                .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
+                                                .background(MaruGlassSubtleBg)
+                                        ) {
+                                            AutoArtworkImage(
+                                                title = alb.name,
+                                                artist = artistName,
+                                                initialUrl = alb.artworkUrl,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        }
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Text(
+                                                alb.name,
+                                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold, fontSize = 12.5.sp),
+                                                color = MaruTextStrong,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            if (alb.playcount > 0) {
+                                                Text(
+                                                    "%,d plays".format(alb.playcount),
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                                    color = MaruTextMuted
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (rowAlbums.size == 1) {
+                                Spacer(Modifier.weight(1f))
+                            }
+                        }
+                    }
+                }
+
+                // Similar Artists
+                if (similarArtists.isNotEmpty()) {
+                    GlassSectionHeader("SIMILAR ARTISTS", Icons.Default.AutoAwesome)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        similarArtists.forEach { simArtist ->
+                            Box(
+                                modifier = Modifier
+                                    .background(MaruGlassCardBg, MaruPillShape)
+                                    .border(BorderStroke(1.dp, MaruGlassBorderSoft), MaruPillShape)
+                                    .clickable { onSelectArtist(simArtist) }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Icon(Icons.Default.Person, null, tint = MaruAccentPurple, modifier = Modifier.size(14.dp))
+                                    Text(
+                                        simArtist,
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.5.sp),
+                                        color = MaruTextStrong
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(24.dp))
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// 4. PROFILE SCREEN & HISTORY
 // -------------------------------------------------------------------------------------------------
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1522,40 +1931,54 @@ fun ProfileScreen(
     preferredPlatform: String,
     onSongClick: (String, String, String?) -> Unit
 ) {
-    var userProfile by remember { mutableStateOf<LastNotifApiClient.UserProfile?>(null) }
-    var recentScrobbles by remember { mutableStateOf<List<LastNotifApiClient.ScrobbleItem>>(emptyList()) }
-    var topTracks by remember { mutableStateOf<List<LastNotifApiClient.TopItem>>(emptyList()) }
-    var topArtists by remember { mutableStateOf<List<LastNotifApiClient.TopItem>>(emptyList()) }
-    var topAlbums by remember { mutableStateOf<List<LastNotifApiClient.TopItem>>(emptyList()) }
+    val context = LocalContext.current
+    var profile by remember(username) { mutableStateOf<LastNotifApiClient.UserProfile?>(null) }
+    var recentTracks by remember(username) { mutableStateOf<List<LastNotifApiClient.ScrobbleItem>>(emptyList()) }
+    var topTracks by remember(username) { mutableStateOf<List<LastNotifApiClient.TopItem>>(emptyList()) }
+    var topArtists by remember(username) { mutableStateOf<List<LastNotifApiClient.TopItem>>(emptyList()) }
+    var topAlbums by remember(username) { mutableStateOf<List<LastNotifApiClient.TopItem>>(emptyList()) }
+    var selectedPeriod by remember { mutableStateOf("1month") }
+    var isLoading by remember(username, selectedPeriod) { mutableStateOf(true) }
 
-    var selectedTab by remember { mutableStateOf(0) } // 0: History, 1: Top Tracks, 2: Top Artists, 3: Top Albums
-    var selectedPeriod by remember { mutableStateOf("1month") } // 7day, 1month, 3month, 12month, overall
-    var isLoading by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
+    LaunchedEffect(username, selectedPeriod) {
+        isLoading = true
+        withContext(Dispatchers.IO) {
+            val u = LastNotifApiClient.getUserInfo(username)
+            val r = LastNotifApiClient.getRecentTracks(username, limit = 25)
+            val tt = LastNotifApiClient.getTopTracks(username, period = selectedPeriod, limit = 8)
+            val ta = LastNotifApiClient.getTopArtists(username, period = selectedPeriod, limit = 8)
+            val talb = LastNotifApiClient.getTopAlbums(username, period = selectedPeriod, limit = 6)
 
-    fun loadProfileData() {
-        scope.launch {
-            isLoading = true
-            withContext(Dispatchers.IO) {
-                userProfile = LastNotifApiClient.getUserInfo(username)
-                recentScrobbles = LastNotifApiClient.getRecentTracks(username, limit = 25)
-                topTracks = LastNotifApiClient.getTopTracks(username, period = selectedPeriod, limit = 15)
-                topArtists = LastNotifApiClient.getTopArtists(username, period = selectedPeriod, limit = 15)
-                topAlbums = LastNotifApiClient.getTopAlbums(username, period = selectedPeriod, limit = 15)
-            }
+            profile = u
+            recentTracks = r
+            topTracks = tt
+            topArtists = ta
+            topAlbums = talb
             isLoading = false
         }
     }
 
-    LaunchedEffect(username, selectedPeriod) {
-        loadProfileData()
-    }
-
     val pullRefreshState = rememberPullToRefreshState()
+    val scope = rememberCoroutineScope()
 
     PullToRefreshBox(
         isRefreshing = isLoading,
-        onRefresh = { loadProfileData() },
+        onRefresh = {
+            scope.launch {
+                isLoading = true
+                val u = withContext(Dispatchers.IO) { LastNotifApiClient.getUserInfo(username) }
+                val r = withContext(Dispatchers.IO) { LastNotifApiClient.getRecentTracks(username, limit = 25) }
+                val tt = withContext(Dispatchers.IO) { LastNotifApiClient.getTopTracks(username, period = selectedPeriod, limit = 8) }
+                val ta = withContext(Dispatchers.IO) { LastNotifApiClient.getTopArtists(username, period = selectedPeriod, limit = 8) }
+                val talb = withContext(Dispatchers.IO) { LastNotifApiClient.getTopAlbums(username, period = selectedPeriod, limit = 6) }
+                profile = u
+                recentTracks = r
+                topTracks = tt
+                topArtists = ta
+                topAlbums = talb
+                isLoading = false
+            }
+        },
         state = pullRefreshState,
         modifier = Modifier.fillMaxSize()
     ) {
@@ -1564,440 +1987,438 @@ fun ProfileScreen(
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Profile Header Card
+            // Profile Card
             GlassCard(
-                border = MaruAccentPink.copy(alpha = 0.4f),
+                modifier = Modifier.fillMaxWidth(),
+                border = MaruAccentPink.copy(alpha = 0.5f),
                 glowColor = MaruAccentPink.copy(alpha = 0.15f)
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(18.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(68.dp)
+                            .size(80.dp)
                             .clip(CircleShape)
                             .background(MaruGlassSubtleBg)
-                            .border(1.5.dp, MaruAccentPink, CircleShape),
+                            .border(2.dp, MaruAccentPink, CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
-                        if (userProfile?.avatarUrl != null) {
+                        if (!profile?.avatarUrl.isNullOrBlank()) {
                             AsyncImage(
-                                model = userProfile?.avatarUrl,
+                                model = profile!!.avatarUrl,
                                 contentDescription = null,
                                 modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Crop
+                                contentScale = ContentScale.Crop,
+                                error = painterResource(id = R.drawable.ic_maru_heart),
+                                placeholder = painterResource(id = R.drawable.ic_maru_heart)
                             )
                         } else {
-                            Icon(Icons.Default.Person, null, tint = MaruAccentPink, modifier = Modifier.size(36.dp))
+                            Icon(Icons.Default.Person, null, tint = MaruAccentPink, modifier = Modifier.size(40.dp))
                         }
                     }
 
-                    Spacer(Modifier.width(16.dp))
+                    Spacer(Modifier.height(10.dp))
 
-                    Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        profile?.username ?: username,
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold, fontSize = 20.sp),
+                        color = MaruTextStrong
+                    )
+
+                    if (!profile?.realName.isNullOrBlank()) {
                         Text(
-                            userProfile?.realName?.ifEmpty { username } ?: username,
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            color = MaruTextStrong
-                        )
-                        Text(
-                            "@$username",
+                            profile!!.realName,
                             style = MaterialTheme.typography.bodySmall,
+                            color = MaruTextMuted
+                        )
+                    }
+
+                    Spacer(Modifier.height(4.dp))
+
+                    val playcount = profile?.playcount ?: 0L
+                    Box(
+                        modifier = Modifier
+                            .background(MaruAccentPink.copy(alpha = 0.18f), MaruPillShape)
+                            .border(1.dp, MaruAccentPink.copy(alpha = 0.5f), MaruPillShape)
+                            .padding(horizontal = 12.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            "%,d total scrobbles".format(playcount),
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.5.sp, fontWeight = FontWeight.Bold),
                             color = MaruAccentPink
                         )
-                        Spacer(Modifier.height(6.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Column {
-                                Text(
-                                    "${userProfile?.playcount ?: 0}",
-                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                                    color = MaruTextStrong
-                                )
-                                Text("SCROBBLES", style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp), color = MaruTextMuted)
-                            }
-                        }
                     }
                 }
             }
 
-            // Profile Tabs: Recent History | Top Tracks | Top Artists | Top Albums
-            val tabs = listOf("Recent History", "Top Tracks", "Top Artists", "Top Albums")
-            ScrollableTabRow(
-                selectedTabIndex = selectedTab,
-                containerColor = Color.Transparent,
-                contentColor = MaruAccentPink,
-                edgePadding = 0.dp,
-                divider = { HorizontalDivider(color = MaruGlassBorderSoft) },
-                indicator = { tabPositions ->
-                    TabRowDefaults.SecondaryIndicator(
-                        Modifier.tabIndicatorOffset(tabPositions[selectedTab]),
-                        color = MaruAccentPink
-                    )
-                }
+            // Period Selector Tabs
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaruGlassCardBg, MaruPillShape)
+                    .border(BorderStroke(1.dp, MaruGlassBorderSoft), MaruPillShape)
+                    .padding(3.dp),
+                horizontalArrangement = Arrangement.spacedBy(3.dp)
             ) {
-                tabs.forEachIndexed { idx, title ->
-                    Tab(
-                        selected = selectedTab == idx,
-                        onClick = { selectedTab = idx },
-                        text = {
-                            Text(
-                                title,
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = if (selectedTab == idx) FontWeight.Bold else FontWeight.Medium,
-                                    fontSize = 11.sp
-                                ),
-                                color = if (selectedTab == idx) MaruAccentPink else MaruTextMuted
-                            )
-                        }
-                    )
-                }
-            }
-
-            // Period Selector Chips (Only for Top charts)
-            if (selectedTab > 0) {
                 val periods = listOf(
-                    "7day" to "7 Days",
-                    "1month" to "1 Month",
-                    "3month" to "3 Months",
-                    "12month" to "1 Year",
-                    "overall" to "All Time"
+                    "7day" to "7D",
+                    "1month" to "1M",
+                    "3month" to "3M",
+                    "12month" to "1Y",
+                    "overall" to "ALL"
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    periods.forEach { (key, label) ->
-                        val isSelected = selectedPeriod == key
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .background(if (isSelected) MaruAccentPink.copy(alpha = 0.2f) else MaruGlassSubtleBg, MaruPillShape)
-                                .border(BorderStroke(1.dp, if (isSelected) MaruAccentPink else MaruGlassBorderSoft), MaruPillShape)
-                                .clickable { selectedPeriod = key }
-                                .padding(vertical = 6.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                label,
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontSize = 9.5.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                ),
-                                color = if (isSelected) MaruAccentPink else MaruTextMuted
+                periods.forEach { (key, label) ->
+                    val isSelected = selectedPeriod == key
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .background(
+                                if (isSelected) MaruAccentPink.copy(alpha = 0.25f) else Color.Transparent,
+                                MaruPillShape
                             )
-                        }
+                            .border(
+                                BorderStroke(
+                                    1.dp,
+                                    if (isSelected) MaruAccentPink else Color.Transparent
+                                ),
+                                MaruPillShape
+                            )
+                            .clickable { selectedPeriod = key }
+                            .padding(vertical = 6.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                fontSize = 10.5.sp
+                            ),
+                            color = if (isSelected) MaruAccentPink else MaruTextMuted
+                        )
                     }
                 }
             }
 
-            // Tab Content
-            when (selectedTab) {
-                0 -> { // Recent History
-                    if (recentScrobbles.isEmpty()) {
-                        GlassCard {
-                            Box(modifier = Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                                Text("No recent scrobbles found", color = MaruTextMuted, style = MaterialTheme.typography.bodySmall)
+            // Recent Scrobble Feed
+            GlassSectionHeader("RECENT SCROBBLES (${recentTracks.size})", Icons.Default.History)
+            if (recentTracks.isEmpty()) {
+                GlassCard {
+                    Text(
+                        "No scrobbles found for @$username",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaruTextMuted,
+                        modifier = Modifier.padding(16.dp)
+                    )
+                }
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    recentTracks.forEach { track ->
+                        val timeString = remember(track.timestamp) {
+                            if (track.timestamp == null) "" else {
+                                val now = System.currentTimeMillis() / 1000
+                                val diff = (now - track.timestamp).coerceAtLeast(0)
+                                when {
+                                    diff < 60 -> "just now"
+                                    diff < 3600 -> "${diff / 60}m ago"
+                                    diff < 86400 -> "${diff / 3600}h ago"
+                                    diff < 604800 -> "${diff / 86400}d ago"
+                                    else -> {
+                                        val sdf = java.text.SimpleDateFormat("MMM d", java.util.Locale.getDefault())
+                                        sdf.format(java.util.Date(track.timestamp * 1000))
+                                    }
+                                }
                             }
                         }
-                    } else {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            recentScrobbles.forEach { item ->
-                                GlassCard(
-                                    border = if (item.isNowPlaying) MaruAccentGreen.copy(alpha = 0.5f) else MaruGlassBorderSoft,
+
+                        GlassCard(
+                            border = if (track.isNowPlaying) MaruAccentPink.copy(alpha = 0.6f) else MaruGlassBorderSoft,
+                            glowColor = if (track.isNowPlaying) MaruAccentPink.copy(alpha = 0.12f) else null,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSongClick(track.title, track.artist, track.artworkUrl) }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
                                     modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { onSongClick(item.title, item.artist, item.artworkUrl) }
+                                        .size(48.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(MaruGlassSubtleBg)
                                 ) {
+                                    AutoArtworkImage(
+                                        title = track.title,
+                                        artist = track.artist,
+                                        initialUrl = track.artworkUrl,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        track.title,
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                                        color = MaruTextStrong,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(Modifier.height(2.dp))
+                                    Text(
+                                        if (track.album.isNotBlank()) "${track.artist} • ${track.album}" else track.artist,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaruTextMuted,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                Spacer(Modifier.width(8.dp))
+
+                                if (track.isNowPlaying) {
                                     Row(
-                                        modifier = Modifier.padding(12.dp),
-                                        verticalAlignment = Alignment.CenterVertically
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        modifier = Modifier
+                                            .background(MaruAccentPink.copy(alpha = 0.2f), MaruPillShape)
+                                            .border(1.dp, MaruAccentPink.copy(alpha = 0.5f), MaruPillShape)
+                                            .padding(horizontal = 7.dp, vertical = 3.dp)
                                     ) {
-                                        AutoArtworkImage(
-                                            title = item.title,
-                                            artist = item.artist,
-                                            initialArtworkUrl = item.artworkUrl,
-                                            modifier = Modifier.size(48.dp)
+                                        EqualizerVisualizer()
+                                        Text(
+                                            "NOW",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.5.sp, fontWeight = FontWeight.Bold),
+                                            color = MaruAccentPink
                                         )
-                                        Spacer(Modifier.width(12.dp))
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                item.title,
-                                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                                                color = MaruTextStrong,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Text(
-                                                item.artist,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaruTextMuted,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                        if (item.isNowPlaying) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .background(MaruAccentGreen.copy(alpha = 0.15f), MaruPillShape)
-                                                    .border(BorderStroke(1.dp, MaruAccentGreen.copy(alpha = 0.5f)), MaruPillShape)
-                                                    .padding(horizontal = 8.dp, vertical = 3.dp)
-                                            ) {
-                                                Text("SCROBBLING", style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.5.sp, fontWeight = FontWeight.Bold), color = MaruAccentGreen)
-                                            }
-                                        }
                                     }
+                                } else if (timeString.isNotEmpty()) {
+                                    Text(
+                                        timeString,
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                        color = MaruTextMuted
+                                    )
                                 }
                             }
                         }
                     }
                 }
+            }
 
-                1 -> { // Top Tracks
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        topTracks.forEach { item ->
-                            GlassRankRow(
-                                rank = item.rank,
-                                title = item.name,
-                                subtitle = item.subtext,
-                                playcount = item.playcount,
-                                artworkUrl = item.artworkUrl,
-                                onClick = { onSongClick(item.name, item.subtext, item.artworkUrl) }
-                            )
-                        }
-                    }
-                }
-
-                2 -> { // Top Artists
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        topArtists.forEach { item ->
-                            GlassRankRow(
-                                rank = item.rank,
-                                title = item.name,
-                                subtitle = item.subtext,
-                                playcount = item.playcount,
-                                artworkUrl = null,
-                                isArtistMode = true,
-                                onClick = { onSongClick("", item.name, null) }
-                            )
-                        }
-                    }
-                }
-
-                3 -> { // Top Albums
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        topAlbums.forEach { item ->
-                            GlassRankRow(
-                                rank = item.rank,
-                                title = item.name,
-                                subtitle = item.subtext,
-                                playcount = item.playcount,
-                                artworkUrl = item.artworkUrl,
-                                isAlbumMode = true,
-                                onClick = { onSongClick(item.name, item.subtext, item.artworkUrl) }
-                            )
+            // Top Tracks
+            if (topTracks.isNotEmpty()) {
+                GlassSectionHeader("TOP TRACKS (${selectedPeriod.uppercase()})", Icons.Default.Leaderboard)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    topTracks.forEach { item ->
+                        GlassCard(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSongClick(item.name, item.subtext, item.artworkUrl) }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .background(MaruAccentPink.copy(alpha = 0.15f), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        "#${item.rank}",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp),
+                                        color = MaruAccentPink
+                                    )
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(item.name, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold), color = MaruTextStrong, maxLines = 1)
+                                    Text(item.subtext, style = MaterialTheme.typography.bodySmall, color = MaruTextMuted, maxLines = 1)
+                                }
+                                if (item.playcount > 0) {
+                                    Text(
+                                        "%,d plays".format(item.playcount),
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold),
+                                        color = MaruAccentPink
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
+
+            // Top Artists
+            if (topArtists.isNotEmpty()) {
+                GlassSectionHeader("TOP ARTISTS (${selectedPeriod.uppercase()})", Icons.Default.People)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    topArtists.forEach { item ->
+                        GlassCard(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    ItunesClient.openInPreferredPlayer(context, preferredPlatform, "", item.name, null)
+                                }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .background(MaruAccentBlue.copy(alpha = 0.15f), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        "#${item.rank}",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp),
+                                        color = MaruAccentBlue
+                                    )
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(item.name, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold), color = MaruTextStrong, maxLines = 1)
+                                }
+                                if (item.playcount > 0) {
+                                    Text(
+                                        "%,d plays".format(item.playcount),
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold),
+                                        color = MaruAccentBlue
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Top Albums
+            if (topAlbums.isNotEmpty()) {
+                GlassSectionHeader("TOP ALBUMS (${selectedPeriod.uppercase()})", Icons.Default.Album)
+                val chunkedAlbums = topAlbums.chunked(2)
+                chunkedAlbums.forEach { rowAlbums ->
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        rowAlbums.forEach { alb ->
+                            GlassCard(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable {
+                                        scope.launch {
+                                            val artistName = alb.subtext.ifEmpty { username }
+                                            ItunesClient.openAlbumFirstTrack(context, preferredPlatform, alb.name, artistName)
+                                        }
+                                    }
+                            ) {
+                                Column {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .aspectRatio(1f)
+                                            .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
+                                            .background(MaruGlassSubtleBg)
+                                    ) {
+                                        AutoArtworkImage(
+                                            title = alb.name,
+                                            artist = alb.subtext,
+                                            initialUrl = alb.artworkUrl,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    }
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Text(
+                                            alb.name,
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold, fontSize = 12.5.sp),
+                                            color = MaruTextStrong,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            alb.subtext,
+                                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                                            color = MaruTextMuted,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (alb.playcount > 0) {
+                                            Spacer(Modifier.height(2.dp))
+                                            Text(
+                                                "%,d plays".format(alb.playcount),
+                                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                                                color = MaruAccentPurple
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (rowAlbums.size == 1) {
+                            Spacer(Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
         }
     }
 }
 
 // -------------------------------------------------------------------------------------------------
-// 3.5. AUTO ARTWORK RESOLVER (iTunes Auto Lookup with fallback)
-// -------------------------------------------------------------------------------------------------
-@Composable
-fun AutoArtworkImage(
-    title: String,
-    artist: String,
-    initialArtworkUrl: String?,
-    modifier: Modifier = Modifier,
-    isArtistMode: Boolean = false,
-    isAlbumMode: Boolean = false
-) {
-    var artworkUrl by remember(title, artist, initialArtworkUrl) { mutableStateOf(initialArtworkUrl) }
-
-    LaunchedEffect(title, artist, initialArtworkUrl) {
-        if (artworkUrl.isNullOrBlank() && (title.isNotEmpty() || artist.isNotEmpty())) {
-            withContext(Dispatchers.IO) {
-                val match = when {
-                    isArtistMode -> ItunesClient.searchArtist(artist.ifEmpty { title })
-                    isAlbumMode -> ItunesClient.searchAlbum(title, artist)
-                    else -> ItunesClient.searchSong(title, artist)
-                }
-                if (!match?.artworkUrl.isNullOrBlank()) {
-                    artworkUrl = match?.artworkUrl
-                }
-            }
-        }
-    }
-
-    if (!artworkUrl.isNullOrBlank()) {
-        AsyncImage(
-            model = artworkUrl,
-            contentDescription = null,
-            modifier = modifier
-                .clip(MaruCardShape)
-                .background(MaruGlassSubtleBg),
-            contentScale = ContentScale.Crop,
-            error = painterResource(id = R.drawable.ic_maru_heart),
-            placeholder = painterResource(id = R.drawable.ic_maru_heart)
-        )
-    } else {
-        Box(
-            modifier = modifier
-                .clip(MaruCardShape)
-                .background(MaruGlassSubtleBg)
-                .border(BorderStroke(1.dp, MaruGlassBorderSoft), MaruCardShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                painter = painterResource(id = R.drawable.ic_maru_heart),
-                contentDescription = null,
-                tint = Color.Unspecified,
-                modifier = Modifier.size(24.dp)
-            )
-        }
-    }
-}
-
-@Composable
-fun GlassRankRow(
-    rank: Int,
-    title: String,
-    subtitle: String,
-    playcount: Long,
-    artworkUrl: String?,
-    isArtistMode: Boolean = false,
-    isAlbumMode: Boolean = false,
-    onClick: () -> Unit
-) {
-    GlassCard(
-        border = MaruGlassBorderSoft,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onClick() }
-    ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier.width(28.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    "#$rank",
-                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                    color = if (rank <= 3) MaruAccentPink else MaruTextMuted
-                )
-            }
-
-            AutoArtworkImage(
-                title = title,
-                artist = subtitle,
-                initialArtworkUrl = artworkUrl,
-                isArtistMode = isArtistMode,
-                isAlbumMode = isAlbumMode,
-                modifier = Modifier.size(46.dp)
-            )
-            Spacer(Modifier.width(12.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                    color = MaruTextStrong,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaruTextMuted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            if (playcount > 0) {
-                Text(
-                    "$playcount plays",
-                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                    color = MaruAccentPurple
-                )
-            }
-        }
-    }
-}
-
-// -------------------------------------------------------------------------------------------------
-// 4. NAMIREC SCREEN (WebView Embed of Month In Songs without Navbar & Splash)
+// 4.5. NamiRec Monthly Recap Screen
 // -------------------------------------------------------------------------------------------------
 class NamiRecJsBridge(private val context: Context) {
     @JavascriptInterface
-    fun downloadBase64Image(base64Data: String, fileName: String) {
-        try {
-            val cleanBase64 = if (base64Data.contains(",")) {
-                base64Data.substringAfter(",")
-            } else {
-                base64Data
-            }
-            val bytes = Base64.decode(cleanBase64, Base64.DEFAULT)
-            val finalName = if (fileName.isNotBlank()) fileName else "nami-recap-${System.currentTimeMillis()}.png"
+    fun saveBase64Image(base64Data: String, filename: String): Boolean {
+        return try {
+            val cleanData = if (base64Data.contains(",")) base64Data.substringAfter(",") else base64Data
+            val decodedBytes = Base64.decode(cleanData, Base64.DEFAULT)
 
-            val resolver = context.contentResolver
-            val contentValues = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, finalName)
-                put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, filename.ifEmpty { "NamiRec_${System.currentTimeMillis()}.png" })
+                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/LastNotif")
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/MAudio")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
                 }
             }
 
-            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
-            if (uri != null) {
-                resolver.openOutputStream(uri)?.use { stream ->
-                    stream.write(bytes)
-                    stream.flush()
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    contentValues.clear()
-                    contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
-                    resolver.update(uri, contentValues, null, null)
-                }
-                Handler(Looper.getMainLooper()).post {
-                    Toast.makeText(context, "Saved $finalName to Gallery!", Toast.LENGTH_SHORT).show()
-                }
-            } else {
-                val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-                val targetDir = java.io.File(picturesDir, "LastNotif").apply { mkdirs() }
-                val targetFile = java.io.File(targetDir, finalName)
-                targetFile.outputStream().use { it.write(bytes) }
-                Handler(Looper.getMainLooper()).post {
-                    Toast.makeText(context, "Saved $finalName to Pictures/LastNotif", Toast.LENGTH_SHORT).show()
-                }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return false
+
+            resolver.openOutputStream(uri)?.use { stream ->
+                stream.write(decodedBytes)
+                stream.flush()
             }
-        } catch (e: Exception) {
-            Log.e("NamiRecScreen", "Failed to download image: ${e.message}", e)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            }
+
             Handler(Looper.getMainLooper()).post {
-                Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Saved recap card to Pictures/MAudio!", Toast.LENGTH_SHORT).show()
             }
+            true
+        } catch (e: Exception) {
+            Log.e("NamiRecJsBridge", "Failed to save base64 image", e)
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(context, "Failed to save image card: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+            false
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NamiRecScreen(
-    username: String
-) {
+fun NamiRecScreen(username: String) {
     val context = LocalContext.current
     var isLoading by remember { mutableStateOf(true) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
@@ -2024,7 +2445,7 @@ fun NamiRecScreen(
                     settings.useWideViewPort = true
                     settings.builtInZoomControls = false
                     settings.displayZoomControls = false
-                    settings.userAgentString = settings.userAgentString + " LastNotifMobileApp/1.0"
+                    settings.userAgentString = settings.userAgentString + " MAudioMobileApp/1.0"
 
                     addJavascriptInterface(NamiRecJsBridge(ctx), "AndroidBridge")
 
@@ -2085,7 +2506,7 @@ fun NamiRecScreen(
 }
 
 // -------------------------------------------------------------------------------------------------
-// 4.5. STREAMING PLATFORM ICON BUTTON
+// 5. STREAMING PLATFORM ICON BUTTON
 // -------------------------------------------------------------------------------------------------
 @Composable
 fun StreamingPlatformIconButton(
@@ -2156,7 +2577,7 @@ fun StreamingPlatformIconButton(
 }
 
 // -------------------------------------------------------------------------------------------------
-// 5. SONG DETAIL BOTTOM SHEET WITH SIMILAR TRACKS
+// 6. SONG DETAIL BOTTOM SHEET (More by Artist & Similar Songs)
 // -------------------------------------------------------------------------------------------------
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -2164,14 +2585,16 @@ fun SongDetailBottomSheet(
     song: SongDetailState,
     preferredPlatform: String,
     onDismiss: () -> Unit,
-    onSelectSimilarSong: (SongDetailState) -> Unit
+    onSelectSimilarSong: (SongDetailState) -> Unit,
+    onOpenArtist: (String) -> Unit
 ) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var artworkUrl by remember(song) { mutableStateOf(song.artworkUrl) }
     var appleMusicUrl by remember(song) { mutableStateOf(song.appleMusicUrl) }
+    var artistTopTracks by remember(song) { mutableStateOf<List<LastNotifApiClient.TopItem>>(emptyList()) }
     var similarTracks by remember(song) { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
-    var isSimilarLoading by remember(song) { mutableStateOf(true) }
+    var isLoading by remember(song) { mutableStateOf(true) }
 
     LaunchedEffect(song) {
         withContext(Dispatchers.IO) {
@@ -2180,9 +2603,11 @@ fun SongDetailBottomSheet(
                 artworkUrl = match?.artworkUrl
                 appleMusicUrl = match?.appleMusicUrl
             }
-            val similar = LastNotifApiClient.getSimilarTracks(song.artist, song.title, limit = 8)
-            similarTracks = similar
-            isSimilarLoading = false
+            val moreFromArtist = LastNotifApiClient.getArtistTopTracks(song.artist, limit = 5)
+            val similar = LastNotifApiClient.getSimilarTracks(song.artist, song.title, limit = 6)
+            artistTopTracks = moreFromArtist.filterNot { it.name.equals(song.title, ignoreCase = true) }.take(4)
+            similarTracks = similar.filterNot { it.first.equals(song.title, ignoreCase = true) }
+            isLoading = false
         }
     }
 
@@ -2201,10 +2626,10 @@ fun SongDetailBottomSheet(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Album Artwork with glowing halo and fallback to Maru blue heart
+            // Album Artwork with glowing halo
             Box(
                 modifier = Modifier
-                    .size(200.dp)
+                    .size(190.dp)
                     .clip(RoundedCornerShape(16.dp))
                     .background(MaruGlassSubtleBg)
                     .border(1.5.dp, MaruAccentPink.copy(alpha = 0.5f), RoundedCornerShape(16.dp)),
@@ -2229,7 +2654,7 @@ fun SongDetailBottomSheet(
                 }
             }
 
-            // Title & Artist
+            // Title & Interactive Artist Badge
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     song.title,
@@ -2237,14 +2662,31 @@ fun SongDetailBottomSheet(
                     color = MaruTextStrong,
                     textAlign = TextAlign.Center
                 )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    song.artist,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaruAccentPink,
-                    textAlign = TextAlign.Center
-                )
+                Spacer(Modifier.height(6.dp))
+
+                Surface(
+                    onClick = { onOpenArtist(song.artist) },
+                    shape = MaruPillShape,
+                    color = MaruAccentPink.copy(alpha = 0.15f),
+                    border = BorderStroke(1.dp, MaruAccentPink.copy(alpha = 0.5f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(Icons.Default.Person, null, tint = MaruAccentPink, modifier = Modifier.size(14.dp))
+                        Text(
+                            song.artist,
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.5.sp),
+                            color = MaruAccentPink
+                        )
+                        Icon(Icons.Default.ChevronRight, null, tint = MaruAccentPink, modifier = Modifier.size(14.dp))
+                    }
+                }
+
                 if (song.album.isNotEmpty()) {
+                    Spacer(Modifier.height(4.dp))
                     Text(
                         song.album,
                         style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
@@ -2278,18 +2720,64 @@ fun SongDetailBottomSheet(
                 }
             }
 
-            // Similar Tracks Section - Only show if loading or has similar tracks (hide completely if niche / no similar tracks)
-            if (isSimilarLoading) {
+            // 1. FROM THE SAME ARTIST SECTION
+            if (artistTopTracks.isNotEmpty()) {
                 HorizontalDivider(color = MaruGlassBorderSoft)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Icon(Icons.Default.AutoAwesome, null, tint = MaruAccentBlue, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("SIMILAR TRACKS", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold), color = MaruAccentBlue)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.MicExternalOn, null, tint = MaruAccentPink, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("MORE BY ${song.artist.uppercase()}", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold), color = MaruAccentPink)
+                    }
+
+                    Text(
+                        "View All →",
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp, fontWeight = FontWeight.Bold),
+                        color = MaruAccentPink,
+                        modifier = Modifier.clickable { onOpenArtist(song.artist) }
+                    )
                 }
-                Box(modifier = Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center) {
+
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    artistTopTracks.forEach { track ->
+                        GlassCard(
+                            border = MaruGlassBorderSoft,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onSelectSimilarSong(
+                                        SongDetailState(
+                                            title = track.name,
+                                            artist = song.artist
+                                        )
+                                    )
+                                }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.PlayArrow, null, tint = MaruAccentPink, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(track.name, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold), color = MaruTextStrong, maxLines = 1)
+                                    Text(song.artist, style = MaterialTheme.typography.bodySmall, color = MaruTextMuted, maxLines = 1)
+                                }
+                                Icon(Icons.Default.ChevronRight, null, tint = MaruTextMuted, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. SIMILAR TRACKS SECTION
+            if (isLoading) {
+                HorizontalDivider(color = MaruGlassBorderSoft)
+                Box(modifier = Modifier.fillMaxWidth().height(60.dp), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = MaruAccentBlue, modifier = Modifier.size(24.dp))
                 }
             } else if (similarTracks.isNotEmpty()) {
@@ -2300,8 +2788,9 @@ fun SongDetailBottomSheet(
                 ) {
                     Icon(Icons.Default.AutoAwesome, null, tint = MaruAccentBlue, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("SIMILAR TRACKS", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold), color = MaruAccentBlue)
+                    Text("SIMILAR TO \"${song.title.uppercase()}\"", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold), color = MaruAccentBlue)
                 }
+
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     similarTracks.forEach { (simTitle, simArtist) ->
                         GlassCard(
@@ -2340,7 +2829,7 @@ fun SongDetailBottomSheet(
 }
 
 // -------------------------------------------------------------------------------------------------
-// 6. HERO LIVE NOTIFICATION BANNER (Interactive Click to Open Player)
+// 7. HERO LIVE NOTIFICATION BANNER
 // -------------------------------------------------------------------------------------------------
 @Composable
 fun NotificationPreviewBanner(
@@ -2467,7 +2956,7 @@ fun NotificationPreviewBanner(
 }
 
 // -------------------------------------------------------------------------------------------------
-// 7. NAVIGATION DRAWER (Organized by Recommendation Engine & Core Functionality)
+// 8. NAVIGATION DRAWER
 // -------------------------------------------------------------------------------------------------
 @Composable
 fun GlassNavigationDrawer(
@@ -2506,7 +2995,7 @@ fun GlassNavigationDrawer(
                 Spacer(Modifier.width(12.dp))
                 Column {
                     Text(
-                        "LASTNOTIF",
+                        "MAUDIO",
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = FontWeight.Bold,
                             color = MaruTextStrong,
@@ -2534,7 +3023,7 @@ fun GlassNavigationDrawer(
                 )
             )
 
-            NavigationScreen.entries.filter { it.group == NavigationGroup.RECOMMENDATION_ENGINE }.forEach { screen ->
+            NavigationScreen.entries.filter { it.group == NavigationGroup.RECOMMENDATION_ENGINE && it != NavigationScreen.ARTIST_DETAIL }.forEach { screen ->
                 NavigationDrawerItemRow(screen, isSelected = currentScreen == screen) { onSelectScreen(screen) }
             }
 
@@ -2581,7 +3070,6 @@ fun GlassNavigationDrawer(
 
             Spacer(Modifier.height(16.dp))
 
-            // Footer
             Box(
                 modifier = Modifier.fillMaxWidth(),
                 contentAlignment = Alignment.Center
@@ -2645,104 +3133,8 @@ fun NavigationDrawerItemRow(
     }
 }
 
-fun isNotificationListenerAccessGranted(context: Context): Boolean {
-    return try {
-        NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
-    } catch (_: Exception) {
-        false
-    }
-}
-
-@Composable
-fun NotificationAccessWarningBanner() {
-    val context = LocalContext.current
-    var hasAccess by remember { mutableStateOf(isNotificationListenerAccessGranted(context)) }
-    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-
-    DisposableEffect(lifecycleOwner) {
-        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                hasAccess = isNotificationListenerAccessGranted(context)
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
-    }
-
-    if (!hasAccess) {
-        GlassCard(
-            border = MaruAccentPink.copy(alpha = 0.8f),
-            glowColor = MaruAccentPink.copy(alpha = 0.25f),
-            background = Color(0x33F43F5E)
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Icon(
-                        Icons.Default.Warning,
-                        contentDescription = null,
-                        tint = MaruAccentPink,
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Text(
-                        "NOTIFICATION ACCESS REQUIRED",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp,
-                            letterSpacing = 1.sp
-                        ),
-                        color = MaruAccentPink
-                    )
-                }
-
-                Text(
-                    "LastNotif needs Notification Access to detect current media playback from Spotify, Apple Music, YouTube Music, and other music players on your device.",
-                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
-                    color = MaruTextStrong
-                )
-
-                GlassButton(
-                    onClick = {
-                        try {
-                            val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-                            context.startActivity(intent)
-                        } catch (e: Exception) {
-                            try {
-                                val intent = Intent(Settings.ACTION_SETTINGS)
-                                context.startActivity(intent)
-                            } catch (_: Exception) {}
-                        }
-                    },
-                    borderColor = MaruAccentPink,
-                    background = MaruAccentPink.copy(alpha = 0.25f),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(Icons.Default.Security, null, tint = MaruAccentPink, modifier = Modifier.size(16.dp))
-                        Text(
-                            "GRANT NOTIFICATION ACCESS",
-                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                            color = MaruAccentPink
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
 // -------------------------------------------------------------------------------------------------
-// 8. OTHER SUB-SCREENS (Scrobbling, Local, Receiver, Common)
+// 9. SUB-SCREENS (Scrobbling, Local, Receiver, Common)
 // -------------------------------------------------------------------------------------------------
 @Composable
 fun ScrobblingScreen(
@@ -2804,54 +3196,60 @@ fun ScrobblingScreen(
                             onClick = onShowManualDialog,
                             borderColor = MaruGlassBorderSoft
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Key, null, modifier = Modifier.size(16.dp), tint = MaruAccentBlue)
-                                Spacer(Modifier.width(10.dp))
-                                Text("ENTER SESSION KEY MANUALLY", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaruAccentBlue)
-                            }
+                            Text("ENTER SESSION KEY MANUALLY", fontSize = 11.5.sp, color = MaruTextMuted, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 } else {
-                    GlassCard(
-                        border = MaruAccentGreen.copy(alpha = 0.4f),
-                        glowColor = MaruAccentGreen.copy(alpha = 0.12f)
-                    ) {
-                        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Column {
-                                Text("LOGGED IN", color = MaruAccentGreen, style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp), fontWeight = FontWeight.Bold)
-                                Text(lastfmUsername.ifEmpty { "Connected User" }, color = MaruTextStrong, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                    GlassCard {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(painterResource(id = R.drawable.ic_lastfm_logo), null, modifier = Modifier.size(28.dp), tint = Color.Unspecified)
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(lastfmUsername, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, color = MaruTextStrong)
+                                Text("Connected & Authorized", style = MaterialTheme.typography.labelSmall, color = MaruAccentGreen)
                             }
-                            Spacer(Modifier.weight(1f))
-                            TextButton(onClick = { onSessionKeyChange(""); onUsernameChange("") }, shape = MaruInputShape) {
-                                Text("LOGOUT", color = MaruTextMuted, style = MaterialTheme.typography.labelSmall)
+                            IconButton(onClick = {
+                                onSessionKeyChange("")
+                                onUsernameChange("")
+                            }) {
+                                Icon(Icons.Default.Logout, "Disconnect", tint = MaruDanger)
                             }
                         }
                     }
                 }
 
-                GlassSectionHeader("TRIGGER THRESHOLD", Icons.Default.Timelapse)
+                GlassSectionHeader("SCROBBLE PERCENTAGE", Icons.Default.Tune)
                 GlassCard {
-                    Column(Modifier.padding(16.dp)) {
-                        Text("Submit scrobble at $scrobblePercentage% track duration", style = MaterialTheme.typography.bodySmall, color = MaruTextStrong)
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Trigger Threshold", style = MaterialTheme.typography.bodyMedium, color = MaruTextStrong)
+                            Text("$scrobblePercentage%", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = MaruAccentPink)
+                        }
                         Slider(
                             value = scrobblePercentage.toFloat(),
-                            onValueChange = { raw ->
-                                val snapped = kotlin.math.round(raw / 5f).toInt() * 5
-                                onScrobblePercentageChange(snapped.coerceIn(10, 90))
-                            },
+                            onValueChange = { onScrobblePercentageChange(it.toInt()) },
                             valueRange = 10f..90f,
-                            steps = 15,
-                            colors = SliderDefaults.colors(
-                                thumbColor = MaruAccentPink,
-                                activeTrackColor = MaruAccentPink,
-                                inactiveTrackColor = MaruGlassBorderSoft
-                            )
+                            steps = 7,
+                            colors = SliderDefaults.colors(thumbColor = MaruAccentPink, activeTrackColor = MaruAccentPink)
                         )
                     }
                 }
 
-                GlassSectionHeader("SCROBBLE APPS FILTER", Icons.Default.Apps)
-                GlassAppSelectionTile(allApps, scrobbleApps, onScrobbleAppsChange)
+                GlassSectionHeader("APP FILTER", Icons.Default.Apps)
+                GlassAppSelectionTile(
+                    allApps = allApps,
+                    selectedPackages = scrobbleApps,
+                    onSelectionChange = onScrobbleAppsChange
+                )
             }
         }
     }
@@ -2876,7 +3274,7 @@ fun LocalScreen(
 
         GlassMasterTile(
             title = "LOCAL MEDIA MONITOR",
-            description = "Track songs currently playing on this device and display them on your smart band/watch.",
+            description = "Intercept active Android media notifications and mirror them into MAudio alerts.",
             isEnabled = localEnabled,
             onToggle = onToggleLocal
         )
@@ -2887,8 +3285,12 @@ fun LocalScreen(
             exit = shrinkVertically(spring()) + fadeOut()
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                GlassSectionHeader("TRACKED APPS", Icons.Default.Apps)
-                GlassAppSelectionTile(allApps, localApps, onLocalAppsChange)
+                GlassSectionHeader("APP FILTER", Icons.Default.Apps)
+                GlassAppSelectionTile(
+                    allApps = allApps,
+                    selectedPackages = localApps,
+                    onSelectionChange = onLocalAppsChange
+                )
             }
         }
     }
@@ -2941,6 +3343,8 @@ fun CommonSettingsScreen(
     onSubFmtChange: (String) -> Unit,
     preferredPlatform: String,
     onPreferredPlatformChange: (String) -> Unit,
+    directSongLaunch: Boolean,
+    onDirectSongLaunchChange: (Boolean) -> Unit,
     notifySongUpdate: Boolean,
     onToggleSongUpdate: (Boolean) -> Unit,
     intervalEnabled: Boolean,
@@ -2957,24 +3361,11 @@ fun CommonSettingsScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        GlassSectionHeader("NOTIFICATION FORMAT", Icons.Default.TextFields)
-        GlassCard {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                GlassTextField(value = mainFmt, onValueChange = onMainFmtChange, placeholder = "{artist} - {title}", label = "MAIN LINE (TITLE)")
-                GlassTextField(value = subFmt, onValueChange = onSubFmtChange, placeholder = "{source} • {album}", label = "SUB LINE (BODY)")
-                Text(
-                    "Placeholders: {title}, {song_name}, {artist}, {album}, {source}, {media_player}",
-                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                    color = MaruTextMuted
-                )
-            }
-        }
-
-        GlassSectionHeader("PREFERRED MUSIC PLAYER", Icons.Default.MusicNote)
+        GlassSectionHeader("PLAYER & LAUNCH BEHAVIOR", Icons.Default.PlayCircle)
         GlassCard {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "Open recommended tracks and albums in:",
+                    "Preferred streaming service:",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaruTextMuted
                 )
@@ -2993,6 +3384,43 @@ fun CommonSettingsScreen(
                         )
                     }
                 }
+
+                HorizontalDivider(color = MaruGlassBorderSoft, modifier = Modifier.padding(vertical = 4.dp))
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onDirectSongLaunchChange(!directSongLaunch) },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Direct Player Launch", color = MaruTextStrong, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                        Text("Tapping a song opens streaming player immediately instead of showing song details.", color = MaruTextMuted, style = MaterialTheme.typography.bodySmall)
+                    }
+                    Switch(
+                        checked = directSongLaunch,
+                        onCheckedChange = onDirectSongLaunchChange,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = MaruAccentPink,
+                            uncheckedThumbColor = MaruTextMuted,
+                            uncheckedTrackColor = MaruGlassSubtleBg
+                        )
+                    )
+                }
+            }
+        }
+
+        GlassSectionHeader("NOTIFICATION FORMAT", Icons.Default.TextFields)
+        GlassCard {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                GlassTextField(value = mainFmt, onValueChange = onMainFmtChange, placeholder = "{artist} - {title}", label = "MAIN LINE (TITLE)")
+                GlassTextField(value = subFmt, onValueChange = onSubFmtChange, placeholder = "{source} • {album}", label = "SUB LINE (BODY)")
+                Text(
+                    "Placeholders: {title}, {song_name}, {artist}, {album}, {source}, {media_player}",
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                    color = MaruTextMuted
+                )
             }
         }
 
@@ -3038,55 +3466,146 @@ fun CommonSettingsScreen(
 }
 
 // -------------------------------------------------------------------------------------------------
-// 9. REUSABLE GLASS UI COMPONENTS
+// 10. REUSABLE GLASS UI COMPONENTS
 // -------------------------------------------------------------------------------------------------
 @Composable
 fun EqualizerVisualizer(modifier: Modifier = Modifier) {
     val infiniteTransition = rememberInfiniteTransition(label = "Equalizer")
     val bar1 by infiniteTransition.animateFloat(
-        initialValue = 3f, targetValue = 13f,
-        animationSpec = infiniteRepeatable(animation = tween(450), repeatMode = RepeatMode.Reverse),
+        initialValue = 4f, targetValue = 14f,
+        animationSpec = infiniteRepeatable(animation = tween(420, easing = FastOutSlowInEasing), repeatMode = RepeatMode.Reverse),
         label = "Bar1"
     )
     val bar2 by infiniteTransition.animateFloat(
-        initialValue = 13f, targetValue = 4f,
-        animationSpec = infiniteRepeatable(animation = tween(350), repeatMode = RepeatMode.Reverse),
+        initialValue = 14f, targetValue = 5f,
+        animationSpec = infiniteRepeatable(animation = tween(320, easing = FastOutSlowInEasing), repeatMode = RepeatMode.Reverse),
         label = "Bar2"
     )
     val bar3 by infiniteTransition.animateFloat(
-        initialValue = 5f, targetValue = 14f,
-        animationSpec = infiniteRepeatable(animation = tween(550), repeatMode = RepeatMode.Reverse),
+        initialValue = 6f, targetValue = 15f,
+        animationSpec = infiniteRepeatable(animation = tween(520, easing = FastOutSlowInEasing), repeatMode = RepeatMode.Reverse),
         label = "Bar3"
     )
+    val bar4 by infiniteTransition.animateFloat(
+        initialValue = 12f, targetValue = 3f,
+        animationSpec = infiniteRepeatable(animation = tween(380, easing = FastOutSlowInEasing), repeatMode = RepeatMode.Reverse),
+        label = "Bar4"
+    )
 
-    androidx.compose.foundation.Canvas(modifier = modifier.size(16.dp, 14.dp)) {
-        val w = 2.5.dp.toPx()
-        val spacing = 2.dp.toPx()
-        val corner = androidx.compose.ui.geometry.CornerRadius(1.dp.toPx())
+    androidx.compose.foundation.Canvas(modifier = modifier.size(18.dp, 16.dp)) {
+        val barCount = 4
+        val barWidth = 2.5.dp.toPx()
+        val spacing = 1.8.dp.toPx()
+        val corner = androidx.compose.ui.geometry.CornerRadius(1.2.dp.toPx())
+        val totalBarsWidth = (barCount * barWidth) + ((barCount - 1) * spacing)
+        val startX = (size.width - totalBarsWidth) / 2f
 
-        val h1 = bar1.dp.toPx()
-        drawRoundRect(
-            color = MaruAccentPink,
-            topLeft = androidx.compose.ui.geometry.Offset(0f, size.height - h1),
-            size = androidx.compose.ui.geometry.Size(w, h1),
-            cornerRadius = corner
+        val heights = listOf(bar1.dp.toPx(), bar2.dp.toPx(), bar3.dp.toPx(), bar4.dp.toPx())
+        val colors = listOf(
+            MaruAccentPink,
+            MaruAccentPink.copy(alpha = 0.85f),
+            MaruAccentBlue,
+            MaruAccentGreen
         )
 
-        val h2 = bar2.dp.toPx()
-        drawRoundRect(
-            color = MaruAccentBlue,
-            topLeft = androidx.compose.ui.geometry.Offset(w + spacing, size.height - h2),
-            size = androidx.compose.ui.geometry.Size(w, h2),
-            cornerRadius = corner
-        )
+        heights.forEachIndexed { i, h ->
+            val clampedH = h.coerceIn(2.dp.toPx(), size.height)
+            val x = startX + i * (barWidth + spacing)
+            drawRoundRect(
+                color = colors[i % colors.size],
+                topLeft = androidx.compose.ui.geometry.Offset(x, size.height - clampedH),
+                size = androidx.compose.ui.geometry.Size(barWidth, clampedH),
+                cornerRadius = corner
+            )
+        }
+    }
+}
 
-        val h3 = bar3.dp.toPx()
-        drawRoundRect(
-            color = MaruAccentGreen,
-            topLeft = androidx.compose.ui.geometry.Offset((w + spacing) * 2, size.height - h3),
-            size = androidx.compose.ui.geometry.Size(w, h3),
-            cornerRadius = corner
-        )
+@Composable
+fun GlassRecommendationCard(
+    item: LastFmRecommendationsEngine.RecommendedTrackItem,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val artwork = item.effectiveArtworkUrl
+
+    GlassCard(
+        border = MaruGlassBorderSoft,
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(MaruCardShape)
+                    .background(MaruGlassSubtleBg)
+            ) {
+                if (!artwork.isNullOrBlank()) {
+                    AsyncImage(
+                        model = artwork,
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                        error = painterResource(id = R.drawable.ic_maru_heart),
+                        placeholder = painterResource(id = R.drawable.ic_maru_heart)
+                    )
+                } else {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.ic_maru_heart),
+                            contentDescription = null,
+                            tint = Color.Unspecified,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                if (item.reason.isNotEmpty()) {
+                    Text(
+                        text = item.reason,
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                        color = MaruAccentPink,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(2.dp))
+                }
+
+                Text(
+                    text = item.title,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                    color = MaruTextStrong,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = item.artist,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaruTextMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(Modifier.width(8.dp))
+            Icon(
+                Icons.Default.ChevronRight,
+                contentDescription = "Details",
+                tint = MaruAccentPink,
+                modifier = Modifier.size(20.dp)
+            )
+        }
     }
 }
 
@@ -3096,13 +3615,6 @@ fun GlassRecommendationGridCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val categoryBadge = when (item.category) {
-        LastFmRecommendationsEngine.RecCategory.ARTISTS -> "ARTIST"
-        LastFmRecommendationsEngine.RecCategory.ALBUMS -> "ALBUM"
-        LastFmRecommendationsEngine.RecCategory.TRACKS -> "TRACK"
-        else -> null
-    }
-
     val artwork = item.effectiveArtworkUrl
 
     GlassCard(
@@ -3129,10 +3641,7 @@ fun GlassRecommendationGridCard(
                         placeholder = painterResource(id = R.drawable.ic_maru_heart)
                     )
                 } else {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Icon(
                             painter = painterResource(id = R.drawable.ic_maru_heart),
                             contentDescription = null,
@@ -3142,29 +3651,24 @@ fun GlassRecommendationGridCard(
                     }
                 }
 
-                categoryBadge?.let { badge ->
+                if (item.reason.isNotEmpty()) {
                     Box(
                         modifier = Modifier
                             .padding(8.dp)
                             .align(Alignment.TopStart)
-                            .background(
-                                color = when (item.category) {
-                                    LastFmRecommendationsEngine.RecCategory.ARTISTS -> MaruAccentPurple.copy(alpha = 0.85f)
-                                    LastFmRecommendationsEngine.RecCategory.ALBUMS -> MaruAccentBlue.copy(alpha = 0.85f)
-                                    else -> MaruAccentPink.copy(alpha = 0.85f)
-                                },
-                                shape = MaruPillShape
-                            )
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                            .background(Color(0xD9161026), MaruPillShape)
+                            .border(BorderStroke(1.dp, MaruAccentPink.copy(alpha = 0.6f)), MaruPillShape)
+                            .padding(horizontal = 7.dp, vertical = 3.dp)
                     ) {
                         Text(
-                            text = badge,
+                            text = item.reason,
                             style = MaterialTheme.typography.labelSmall.copy(
                                 fontSize = 8.sp,
-                                fontWeight = FontWeight.Black,
-                                letterSpacing = 0.5.sp
+                                fontWeight = FontWeight.Bold
                             ),
-                            color = Color.White
+                            color = MaruAccentPink,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -3201,23 +3705,105 @@ fun GlassRecommendationGridCard(
 }
 
 @Composable
-fun GlassRecommendationCard(
-    item: LastFmRecommendationsEngine.RecommendedTrackItem,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
+fun NotificationMirrorBottomBar(
+    liveTrack: LastNotifPollerService.ActiveTrackState?,
+    mainFmt: String,
+    subFmt: String,
+    onClick: (String, String, String) -> Unit
 ) {
-    val categoryBadge = when (item.category) {
-        LastFmRecommendationsEngine.RecCategory.ARTISTS -> "ARTIST"
-        LastFmRecommendationsEngine.RecCategory.ALBUMS -> "ALBUM"
-        LastFmRecommendationsEngine.RecCategory.TRACKS -> "TRACK"
-        else -> null
+    AnimatedVisibility(
+        visible = liveTrack != null && liveTrack.isPlaying,
+        enter = slideInVertically(
+            animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow),
+            initialOffsetY = { it }
+        ) + fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)),
+        exit = slideOutVertically(
+            animationSpec = spring(dampingRatio = 1.0f, stiffness = Spring.StiffnessMedium),
+            targetOffsetY = { it }
+        ) + fadeOut(animationSpec = tween(160, easing = FastOutLinearInEasing))
+    ) {
+        val track = liveTrack ?: return@AnimatedVisibility
+        val titleText = remember(track, mainFmt) {
+            if (mainFmt.isNotBlank()) {
+                LastNotifNotificationManager.applyFormat(mainFmt, track.title, track.artist, track.album, track.pollingMethod)
+            } else track.title
+        }
+        val subText = remember(track, subFmt) {
+            if (subFmt.isNotBlank()) {
+                LastNotifNotificationManager.applyFormat(subFmt, track.title, track.artist, track.album, track.pollingMethod)
+            } else "${track.artist}${if (track.album.isNotBlank()) " • ${track.album}" else ""}"
+        }
+
+        Surface(
+            color = Color(0xF5161026),
+            shape = androidx.compose.ui.graphics.RectangleShape,
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .clickable { onClick(track.title, track.artist, track.album) }
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                HorizontalDivider(
+                    color = MaruAccentPink.copy(alpha = 0.5f),
+                    thickness = 1.dp
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(MaruAccentPink.copy(alpha = 0.15f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        EqualizerVisualizer()
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            titleText,
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold, fontSize = 13.sp),
+                            color = MaruTextStrong,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            subText,
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                            color = MaruTextMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .background(MaruAccentPink.copy(alpha = 0.2f), MaruPillShape)
+                            .border(1.dp, MaruAccentPink.copy(alpha = 0.5f), MaruPillShape)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            track.pollingMethod.uppercase(),
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.5.sp, fontWeight = FontWeight.Bold),
+                            color = MaruAccentPink
+                        )
+                    }
+                }
+            }
+        }
     }
+}
 
-    val artwork = item.effectiveArtworkUrl
-
+@Composable
+fun GlassMusicSearchItem(match: ItunesClient.ItunesSongMatch, onClick: () -> Unit) {
     GlassCard(
         border = MaruGlassBorderSoft,
-        modifier = modifier
+        modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick() }
     ) {
@@ -3229,13 +3815,13 @@ fun GlassRecommendationCard(
         ) {
             Box(
                 modifier = Modifier
-                    .size(56.dp)
-                    .clip(MaruCardShape)
+                    .size(46.dp)
+                    .clip(RoundedCornerShape(8.dp))
                     .background(MaruGlassSubtleBg)
             ) {
-                if (!artwork.isNullOrBlank()) {
+                if (!match.artworkUrl.isNullOrBlank()) {
                     AsyncImage(
-                        model = artwork,
+                        model = match.artworkUrl,
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop,
@@ -3243,77 +3829,120 @@ fun GlassRecommendationCard(
                         placeholder = painterResource(id = R.drawable.ic_maru_heart)
                     )
                 } else {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Icon(
-                            painter = painterResource(id = R.drawable.ic_maru_heart),
-                            contentDescription = null,
-                            tint = Color.Unspecified,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
+                    Icon(
+                        painter = painterResource(id = R.drawable.ic_maru_heart),
+                        contentDescription = null,
+                        tint = Color.Unspecified,
+                        modifier = Modifier.size(20.dp).align(Alignment.Center)
+                    )
                 }
             }
 
             Spacer(Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                categoryBadge?.let { badge ->
-                    Box(
-                        modifier = Modifier
-                            .background(
-                                color = when (item.category) {
-                                    LastFmRecommendationsEngine.RecCategory.ARTISTS -> MaruAccentPurple.copy(alpha = 0.25f)
-                                    LastFmRecommendationsEngine.RecCategory.ALBUMS -> MaruAccentBlue.copy(alpha = 0.25f)
-                                    else -> MaruAccentPink.copy(alpha = 0.25f)
-                                },
-                                shape = MaruPillShape
-                            )
-                            .border(
-                                width = 1.dp,
-                                color = when (item.category) {
-                                    LastFmRecommendationsEngine.RecCategory.ARTISTS -> MaruAccentPurple.copy(alpha = 0.5f)
-                                    LastFmRecommendationsEngine.RecCategory.ALBUMS -> MaruAccentBlue.copy(alpha = 0.5f)
-                                    else -> MaruAccentPink.copy(alpha = 0.5f)
-                                },
-                                shape = MaruPillShape
-                            )
-                            .padding(horizontal = 6.dp, vertical = 1.dp)
-                    ) {
-                        Text(
-                            text = badge,
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 7.5.sp, fontWeight = FontWeight.Bold),
-                            color = when (item.category) {
-                                LastFmRecommendationsEngine.RecCategory.ARTISTS -> MaruAccentPurple
-                                LastFmRecommendationsEngine.RecCategory.ALBUMS -> MaruAccentBlue
-                                else -> MaruAccentPink
-                            }
-                        )
-                    }
-                    Spacer(Modifier.height(2.dp))
-                }
-
+                Text(match.trackName, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold), color = MaruTextStrong, maxLines = 1)
                 Text(
-                    text = item.title,
-                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                    color = MaruTextStrong,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = item.artist,
+                    "${match.artistName}${if (match.collectionName.isNotEmpty()) " • ${match.collectionName}" else ""}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaruTextMuted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    maxLines = 1
                 )
             }
 
-            Spacer(Modifier.width(8.dp))
+            Icon(Icons.Default.ChevronRight, null, tint = MaruAccentPink, modifier = Modifier.size(18.dp))
+        }
+    }
+}
+
+@Composable
+fun GlassProfileResultCard(
+    profile: LastNotifApiClient.UserProfile,
+    recentTracks: List<LastNotifApiClient.ScrobbleItem>,
+    onOpen: () -> Unit
+) {
+    GlassCard(
+        border = MaruAccentPink.copy(alpha = 0.5f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onOpen() }
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(MaruGlassSubtleBg)
+                        .border(1.5.dp, MaruAccentPink, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (!profile.avatarUrl.isNullOrBlank()) {
+                        AsyncImage(model = profile.avatarUrl, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                    } else {
+                        Icon(Icons.Default.Person, null, tint = MaruAccentPink, modifier = Modifier.size(24.dp))
+                    }
+                }
+
+                Spacer(Modifier.width(12.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(profile.username, style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold), color = MaruTextStrong)
+                    Text("%,d scrobbles".format(profile.playcount), style = MaterialTheme.typography.labelSmall, color = MaruAccentPink)
+                }
+
+                Icon(Icons.Default.ChevronRight, null, tint = MaruAccentPink)
+            }
+
+            if (recentTracks.isNotEmpty()) {
+                HorizontalDivider(color = MaruGlassBorderSoft)
+                Text("RECENT ACTIVITY", style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold), color = MaruTextMuted)
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    recentTracks.take(2).forEach { t ->
+                        Text("• ${t.title} - ${t.artist}", style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.5.sp), color = MaruTextStrong, maxLines = 1)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AutoArtworkImage(
+    title: String,
+    artist: String,
+    initialUrl: String?,
+    modifier: Modifier = Modifier
+) {
+    var resolvedUrl by remember(title, artist) { mutableStateOf(initialUrl) }
+
+    LaunchedEffect(title, artist) {
+        if (resolvedUrl.isNullOrBlank()) {
+            withContext(Dispatchers.IO) {
+                val match = ItunesClient.searchSong(title, artist)
+                if (match?.artworkUrl != null) {
+                    resolvedUrl = match.artworkUrl
+                }
+            }
+        }
+    }
+
+    if (!resolvedUrl.isNullOrBlank()) {
+        AsyncImage(
+            model = resolvedUrl,
+            contentDescription = null,
+            modifier = modifier,
+            contentScale = ContentScale.Crop,
+            error = painterResource(id = R.drawable.ic_maru_heart),
+            placeholder = painterResource(id = R.drawable.ic_maru_heart)
+        )
+    } else {
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
             Icon(
-                Icons.Default.ChevronRight,
-                contentDescription = "Details",
-                tint = MaruAccentPink,
-                modifier = Modifier.size(20.dp)
+                painter = painterResource(id = R.drawable.ic_maru_heart),
+                contentDescription = null,
+                tint = Color.Unspecified,
+                modifier = Modifier.size(24.dp)
             )
         }
     }
@@ -3598,38 +4227,42 @@ fun AppSelectionDialog(
             } else {
                 LazyColumn(modifier = Modifier.height(340.dp)) {
                     items(filteredApps, key = { it.packageName }) { app ->
+                        val isChecked = currentSelection.contains(app.packageName)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    currentSelection = if (currentSelection.contains(app.packageName)) currentSelection - app.packageName else currentSelection + app.packageName
+                                    currentSelection = if (isChecked) currentSelection - app.packageName else currentSelection + app.packageName
                                 }
-                                .padding(vertical = 8.dp),
+                                .padding(vertical = 8.dp, horizontal = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Checkbox(checked = currentSelection.contains(app.packageName), onCheckedChange = null, colors = CheckboxDefaults.colors(checkedColor = MaruAccentPink))
-                            Spacer(Modifier.width(10.dp))
+                            if (app.icon != null) {
+                                Image(bitmap = app.icon, contentDescription = null, modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)))
+                            } else {
+                                Icon(Icons.Default.Apps, null, tint = MaruTextMuted, modifier = Modifier.size(36.dp))
+                            }
+                            Spacer(Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(app.name, color = MaruTextStrong, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                                Text(app.packageName, color = MaruTextMuted.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp))
+                                Text(app.appName, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium), color = MaruTextStrong, maxLines = 1)
+                                Text(app.packageName, style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp), color = MaruTextMuted, maxLines = 1)
                             }
-                            if (app.isMedia) {
-                                Box(
-                                    modifier = Modifier
-                                        .background(MaruAccentBlue.copy(alpha = 0.15f), MaruPillShape)
-                                        .border(BorderStroke(1.dp, MaruAccentBlue.copy(alpha = 0.4f)), MaruPillShape)
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                ) {
-                                    Text("MEDIA", style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp, fontWeight = FontWeight.Bold), color = MaruAccentBlue)
-                                }
-                            }
+                            Checkbox(
+                                checked = isChecked,
+                                onCheckedChange = { checked ->
+                                    currentSelection = if (checked) currentSelection + app.packageName else currentSelection - app.packageName
+                                },
+                                colors = CheckboxDefaults.colors(checkedColor = MaruAccentPink, checkmarkColor = Color.White)
+                            )
                         }
                     }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = { onAppsSelected(currentSelection) }) { Text("SAVE (${currentSelection.size})", color = MaruAccentPink, fontWeight = FontWeight.Bold) }
+            TextButton(onClick = { onAppsSelected(currentSelection) }) {
+                Text("DONE", color = MaruAccentPink, fontWeight = FontWeight.Bold)
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("CANCEL", color = MaruTextMuted) }
@@ -3637,157 +4270,159 @@ fun AppSelectionDialog(
     )
 }
 
-data class AppInfo(
-    val name: String,
-    val packageName: String,
-    val isMedia: Boolean = false
-)
+fun isNotificationListenerAccessGranted(context: Context): Boolean {
+    return try {
+        NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
+    } catch (_: Exception) {
+        false
+    }
+}
 
 @Composable
-fun rememberAppList(context: Context): List<AppInfo> {
-    var apps by remember { mutableStateOf(emptyList<AppInfo>()) }
-    LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
-            val pm = context.packageManager
-            val intent = Intent(Intent.ACTION_MAIN, null).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
-            val resolveInfos = pm.queryIntentActivities(intent, 0)
+fun NotificationAccessWarningBanner() {
+    val context = LocalContext.current
+    var hasAccess by remember { mutableStateOf(isNotificationListenerAccessGranted(context)) }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
 
-            val mediaServiceIntent = Intent("android.media.browse.MediaBrowserService")
-            val mediaBrowserPackages = try {
-                pm.queryIntentServices(mediaServiceIntent, 0).map { it.serviceInfo.packageName }.toSet()
-            } catch (_: Exception) { emptySet() }
-
-            val media3Intent = Intent("androidx.media3.session.MediaSessionService")
-            val media3Packages = try {
-                pm.queryIntentServices(media3Intent, 0).map { it.serviceInfo.packageName }.toSet()
-            } catch (_: Exception) { emptySet() }
-
-            val knownMediaKeywords = setOf(
-                "music", "audio", "player", "sound", "radio", "podcast", "spotify", "tidal",
-                "deezer", "apple.android.music", "youtube.music", "vlc", "foobar", "poweramp",
-                "musicolet", "retro", "oto", "symfonium", "rimusic", "vimusic", "innertune",
-                "aimp", "blackplayer", "shuttle", "gonemad", "neutron", "stellio", "jetaudio",
-                "pulsar", "audiomack", "pandora", "tunein", "soundcloud", "bandcamp", "qobuz",
-                "amazon.mp3", "anghami", "gaana", "jiosaavn", "wynk", "kugou", "netease",
-                "smartplayer", "audioplayer", "boom", "trebel", "evermusic", "cloudbeats",
-                "sonos", "bubbleupnp", "fiio", "hiby", "hibymusic", "hificast", "poweramp2",
-                "track", "tune", "ytmusic"
-            )
-
-            val nonMediaPackages = setOf(
-                "com.facebook.orca", "com.whatsapp", "com.instagram.android", "com.discord",
-                "org.telegram.messenger", "com.twitter.android", "com.google.android.talk",
-                "com.google.android.apps.messaging", "com.samsung.android.messaging",
-                "com.google.android.calculator", "com.sec.android.app.popupcalculator",
-                "com.google.android.deskclock", "com.sec.android.app.clockpackage",
-                "com.google.android.calendar", "com.samsung.android.calendar",
-                "com.google.android.apps.maps", "com.samsung.android.maps",
-                "com.google.android.gm", "com.microsoft.office.outlook", "com.android.chrome",
-                "com.sec.android.app.sbrowser", "org.mozilla.firefox", "com.opera.browser",
-                "com.samsung.android.bixby.agent", "com.samsung.android.app.camera",
-                "com.google.android.apps.photos", "com.sec.android.gallery3d",
-                "com.google.android.googlequicksearchbox", "com.samsung.android.honeyboard",
-                "com.microsoft.bing", "com.microsoft.emmx", "com.microsoft.office.excel",
-                "com.microsoft.office.word", "com.microsoft.office.powerpoint",
-                "com.microsoft.office.onenote", "com.microsoft.office.officehubrow",
-                "com.microsoft.teams", "com.sec.android.app.shealth",
-                "com.samsung.android.app.notes", "com.google.android.keep"
-            )
-
-            val mediaList = mutableListOf<AppInfo>()
-            val otherList = mutableListOf<AppInfo>()
-
-            resolveInfos.forEach { ri ->
-                val pkg = ri.activityInfo.packageName
-                val name = ri.loadLabel(pm).toString()
-                val lowerPkg = pkg.lowercase()
-                val lowerName = name.lowercase()
-                var isMedia = false
-
-                val isExcluded = nonMediaPackages.contains(pkg) || 
-                                 lowerName.contains("bixby") || 
-                                 lowerName.contains("photos") || 
-                                 lowerName.contains("gallery") ||
-                                 lowerName.contains("camera") ||
-                                 lowerName.contains("calculator") ||
-                                 lowerName.contains("clock") ||
-                                 lowerName.contains("calendar")
-
-                if (!isExcluded) {
-                    try {
-                        val appInfo = pm.getApplicationInfo(pkg, 0)
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            if (appInfo.category == android.content.pm.ApplicationInfo.CATEGORY_AUDIO) {
-                                isMedia = true
-                            }
-                        }
-                    } catch (_: Exception) {}
-
-                    if (mediaBrowserPackages.contains(pkg) || media3Packages.contains(pkg)) {
-                        isMedia = true
-                    }
-
-                    if (knownMediaKeywords.any { lowerPkg.contains(it) || lowerName.contains(it) }) {
-                        isMedia = true
-                    }
-                }
-
-                val info = AppInfo(name, pkg, isMedia)
-                if (isMedia) {
-                    mediaList.add(info)
-                } else {
-                    otherList.add(info)
-                }
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                hasAccess = isNotificationListenerAccessGranted(context)
             }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
-            val fullList = mediaList.distinctBy { it.packageName }.sortedBy { it.name } +
-                           otherList.distinctBy { it.packageName }.sortedBy { it.name }
+    if (!hasAccess) {
+        GlassCard(
+            border = MaruAccentPink.copy(alpha = 0.8f),
+            glowColor = MaruAccentPink.copy(alpha = 0.25f),
+            background = Color(0x33F43F5E)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaruAccentPink,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Text(
+                        "NOTIFICATION ACCESS REQUIRED",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            letterSpacing = 1.sp
+                        ),
+                        color = MaruAccentPink
+                    )
+                }
 
-            withContext(Dispatchers.Main) {
-                apps = fullList
+                Text(
+                    "MAudio needs Notification Access to detect current media playback from Spotify, Apple Music, YouTube Music, and other music players on your device.",
+                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
+                    color = MaruTextStrong
+                )
+
+                GlassButton(
+                    onClick = {
+                        try {
+                            val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
+                            try {
+                                val intent = Intent(Settings.ACTION_SETTINGS)
+                                context.startActivity(intent)
+                            } catch (_: Exception) {}
+                        }
+                    },
+                    borderColor = MaruAccentPink,
+                    background = MaruAccentPink.copy(alpha = 0.25f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Default.Security, null, tint = MaruAccentPink, modifier = Modifier.size(16.dp))
+                        Text(
+                            "GRANT NOTIFICATION ACCESS",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaruAccentPink
+                        )
+                    }
+                }
             }
         }
     }
-    return apps
 }
 
-@Preview(showBackground = true)
-@Composable
-fun MainScreenPreview() {
-    LastNotifTheme {
-        MainScreenContent(
-            scrobbleEnabled = true, receiverEnabled = false, localEnabled = true,
-            lastfmUsername = "MaruSenpai", sessionKey = "", scrobbleApps = emptySet(), scrobblePercentage = 50,
-            receiverUsername = "", localApps = emptySet(), notifySongUpdate = true,
-            mainFmt = "{song_name}", subFmt = "{artist}", intervalEnabled = true, intervalMinutes = 5,
-            preferredPlatform = "Apple Music",
-            lastAlertTitle = "Test Song", lastAlertSub = "Test Artist", lastAlertSource = "Local",
-            serviceRunning = true, liveTrack = LastNotifPollerService.ActiveTrackState("Test Song", "Test Artist", "Test Album", true, "Local"),
-            onToggleScrobble = {}, onToggleReceiver = {}, onToggleLocal = {},
-            onUsernameChange = {}, onSessionKeyChange = {}, onScrobbleAppsChange = {}, onScrobblePercentageChange = {},
-            onReceiverUsernameChange = {}, onLocalAppsChange = {}, onToggleSongUpdate = {},
-            onMainFmtChange = {}, onSubFmtChange = {}, onIntervalToggle = {}, onIntervalMinutesChange = {},
-            onPreferredPlatformChange = {},
-            onRestartService = {}, onSendTestNotification = {}
+// -------------------------------------------------------------------------------------------------
+// 11. HELPER CLASSES FOR INSTALLED APPS
+// -------------------------------------------------------------------------------------------------
+data class AppInfo(
+    val packageName: String,
+    val appName: String,
+    val isMedia: Boolean,
+    val icon: androidx.compose.ui.graphics.ImageBitmap?
+)
+
+object AppUtils {
+    fun getInstalledMediaApps(context: Context): List<AppInfo> {
+        val pm = context.packageManager
+        val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
+            addCategory(Intent.CATEGORY_LAUNCHER)
+        }
+        val resolveInfos = pm.queryIntentActivities(mainIntent, 0)
+        val mediaPackages = setOf(
+            "com.spotify.music",
+            "com.apple.android.music",
+            "com.google.android.apps.youtube.music",
+            "com.aspiro.tidal",
+            "com.amazon.mp3",
+            "deezer.android.app",
+            "com.soundcloud.android",
+            "com.netease.cloudmusic",
+            "com.tencent.qqmusic",
+            "com.pandora.android",
+            "org.videolan.vlc",
+            "com.foobar2000.foobar2000",
+            "com.maxmpz.audioplayer",
+            "gonemad.gmmp"
         )
-    }
-}
 
-@Composable
-fun LastNotifTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = darkColorScheme(
-            primary = MaruAccentPink,
-            secondary = MaruAccentBlue,
-            tertiary = MaruAccentPurple,
-            surface = MaruGlassCardBg,
-            background = MaruCosmicBot,
-            onSurface = MaruTextStrong
-        ),
-        typography = Typography(
-            bodySmall = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
-            labelSmall = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, letterSpacing = 0.5.sp)
-        ),
-        content = content
-    )
+        return resolveInfos.map { resolveInfo ->
+            val pkg = resolveInfo.activityInfo.packageName
+            val name = resolveInfo.loadLabel(pm).toString()
+            val drawable = try {
+                resolveInfo.loadIcon(pm)
+            } catch (_: Exception) {
+                null
+            }
+            val bitmap = drawable?.let { d ->
+                try {
+                    val w = d.intrinsicWidth.coerceAtLeast(1)
+                    val h = d.intrinsicHeight.coerceAtLeast(1)
+                    val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    val canvas = android.graphics.Canvas(b)
+                    d.setBounds(0, 0, canvas.width, canvas.height)
+                    d.draw(canvas)
+                    b.asImageBitmap()
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            val isMedia = mediaPackages.contains(pkg) || name.contains("music", ignoreCase = true) || name.contains("player", ignoreCase = true) || name.contains("radio", ignoreCase = true)
+            AppInfo(pkg, name, isMedia, bitmap)
+        }.sortedWith(compareByDescending<AppInfo> { it.isMedia }.thenBy { it.appName })
+    }
 }

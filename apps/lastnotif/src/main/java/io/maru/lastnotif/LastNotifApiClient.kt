@@ -260,6 +260,113 @@ object LastNotifApiClient {
         }
     }
 
+    data class ArtistDetailInfo(
+        val name: String,
+        val bioSummary: String = "",
+        val listeners: Long = 0L,
+        val playcount: Long = 0L,
+        val tags: List<String> = emptyList(),
+        val artworkUrl: String? = null
+    )
+
+    fun getArtistInfo(artist: String): ArtistDetailInfo? {
+        if (artist.isBlank()) return null
+        return try {
+            val url = "$LASTFM_BASE?method=artist.getinfo&artist=${encode(artist)}&autocorrect=1&api_key=$API_KEY&format=json"
+            val json = fetchJson(url) ?: return null
+            val root = gson.fromJson(json, Map::class.java)
+            val artistMap = root["artist"] as? Map<*, *> ?: return null
+
+            val name = artistMap["name"] as? String ?: artist
+            val statsObj = artistMap["stats"] as? Map<*, *>
+            val listeners = (statsObj?.get("listeners") as? String)?.toLongOrNull() ?: 0L
+            val playcount = (statsObj?.get("playcount") as? String)?.toLongOrNull() ?: 0L
+
+            val bioObj = artistMap["bio"] as? Map<*, *>
+            val bioSummary = (bioObj?.get("summary") as? String)?.substringBefore("<a href")?.trim() ?: ""
+
+            val tagsObj = artistMap["tags"] as? Map<*, *>
+            val tagsList = (tagsObj?.get("tag") as? List<*>)?.mapNotNull { (it as? Map<*, *>)?.get("name") as? String } ?: emptyList()
+
+            val images = artistMap["image"] as? List<Map<*, *>>
+            val artwork = images?.lastOrNull()?.get("#text") as? String
+
+            ArtistDetailInfo(
+                name = name,
+                bioSummary = bioSummary,
+                listeners = listeners,
+                playcount = playcount,
+                tags = tagsList.take(6),
+                artworkUrl = cleanLastFmArtwork(artwork)
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "getArtistInfo error", e)
+            null
+        }
+    }
+
+    fun getArtistTopTracks(artist: String, limit: Int = 10): List<TopItem> {
+        if (artist.isBlank()) return emptyList()
+        return try {
+            val url = "$LASTFM_BASE?method=artist.gettoptracks&artist=${encode(artist)}&autocorrect=1&limit=$limit&api_key=$API_KEY&format=json"
+            val json = fetchJson(url) ?: return emptyList()
+            val root = gson.fromJson(json, Map::class.java)
+            val topObj = root["toptracks"] as? Map<*, *> ?: return emptyList()
+            val trackList = (topObj["track"] as? List<*>)?.filterIsInstance<Map<*, *>>() ?: emptyList()
+
+            trackList.mapIndexed { idx, t ->
+                val name = t["name"] as? String ?: ""
+                val playcount = (t["playcount"] as? String)?.toLongOrNull() ?: 0L
+                val images = t["image"] as? List<Map<*, *>>
+                val artwork = images?.lastOrNull()?.get("#text") as? String
+                val rank = idx + 1
+                TopItem(rank, name, artist, playcount, cleanLastFmArtwork(artwork))
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "getArtistTopTracks error", e)
+            emptyList()
+        }
+    }
+
+    fun getArtistTopAlbums(artist: String, limit: Int = 8): List<TopItem> {
+        if (artist.isBlank()) return emptyList()
+        return try {
+            val url = "$LASTFM_BASE?method=artist.gettopalbums&artist=${encode(artist)}&autocorrect=1&limit=$limit&api_key=$API_KEY&format=json"
+            val json = fetchJson(url) ?: return emptyList()
+            val root = gson.fromJson(json, Map::class.java)
+            val topObj = root["topalbums"] as? Map<*, *> ?: return emptyList()
+            val albumList = (topObj["album"] as? List<*>)?.filterIsInstance<Map<*, *>>() ?: emptyList()
+
+            albumList.mapIndexed { idx, a ->
+                val name = a["name"] as? String ?: ""
+                val playcount = (a["playcount"] as? String)?.toLongOrNull() ?: 0L
+                val images = a["image"] as? List<Map<*, *>>
+                val artwork = images?.lastOrNull()?.get("#text") as? String
+                val rank = idx + 1
+                TopItem(rank, name, artist, playcount, cleanLastFmArtwork(artwork))
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "getArtistTopAlbums error", e)
+            emptyList()
+        }
+    }
+
+    fun getSimilarArtists(artist: String, limit: Int = 8): List<String> {
+        if (artist.isBlank()) return emptyList()
+        return try {
+            val url = "$LASTFM_BASE?method=artist.getsimilar&artist=${encode(artist)}&autocorrect=1&limit=$limit&api_key=$API_KEY&format=json"
+            val json = fetchJson(url) ?: return emptyList()
+            val root = gson.fromJson(json, Map::class.java)
+            val simObj = root["similarartists"] as? Map<*, *> ?: return emptyList()
+            val list = (simObj["artist"] as? List<*>)?.filterIsInstance<Map<*, *>>() ?: emptyList()
+
+            list.mapNotNull { a -> a["name"] as? String }
+        } catch (e: Exception) {
+            Log.w(TAG, "getSimilarArtists error", e)
+            emptyList()
+        }
+    }
+
     fun searchTracks(query: String, limit: Int = 20): List<Pair<String, String>> {
         if (query.isBlank()) return emptyList()
         return try {

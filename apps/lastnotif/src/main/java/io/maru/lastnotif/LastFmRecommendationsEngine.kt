@@ -26,10 +26,9 @@ object LastFmRecommendationsEngine {
     private val gson = Gson()
 
     enum class RecCategory(val label: String) {
-        ALL("All"),
-        ARTISTS("Artists"),
-        ALBUMS("Albums"),
-        TRACKS("Tracks")
+        ALL("All Tracks"),
+        ARTISTS("From Top Artists"),
+        TRACKS("Similar Tracks")
     }
 
     data class RecommendedTrackItem(
@@ -71,23 +70,38 @@ object LastFmRecommendationsEngine {
     private data class SimilarTracksResponse(@SerializedName("similartracks") val similartracks: SimilarTracksBody?)
     private data class SimilarTracksBody(@SerializedName("track") val track: List<TrackEntry>?)
 
-    private data class TopAlbumsResponse(@SerializedName("topalbums") val topalbums: TopAlbumsBody?)
-    private data class TopAlbumsBody(@SerializedName("album") val album: List<AlbumEntry>?)
-    private data class AlbumEntry(
-        @SerializedName("name") val name: String,
-        @SerializedName("artist") val artist: ArtistEntry?,
-        @SerializedName("image") val image: List<Map<String, String>>? = null
-    )
-
     private data class RecCandidate(
         val reason: String,
         val artist: String,
-        val extra: String = "",
+        val title: String,
         val art: String? = null
     )
 
     private fun List<Map<String, String>>?.extractLastFmImage(): String? {
         return this?.lastOrNull()?.get("#text")?.takeIf { it.isNotBlank() }
+    }
+
+    private fun normalizeTitle(t: String): String {
+        return t.lowercase()
+            .replace(Regex("\\(.*?\\)|\\[.*?\\]"), "")
+            .replace(Regex("[-–—].*"), "")
+            .replace(Regex("[^a-z0-9]"), "")
+            .trim()
+    }
+
+    private fun isSameTrack(titleA: String, artistA: String, titleB: String, artistB: String): Boolean {
+        val normA = normalizeTitle(titleA)
+        val normB = normalizeTitle(titleB)
+        if (normA.isEmpty() || normB.isEmpty()) return false
+        if (normA == normB) return true
+        if (normA.contains(normB) || normB.contains(normA)) {
+            val aA = artistA.lowercase().trim()
+            val aB = artistB.lowercase().trim()
+            if (aA.isNotEmpty() && aB.isNotEmpty() && (aA.contains(aB) || aB.contains(aA))) {
+                return true
+            }
+        }
+        return false
     }
 
     suspend fun getRecommendations(
@@ -100,222 +114,119 @@ object LastFmRecommendationsEngine {
             val periods = listOf("7day", "1month", "3month", "6month", "12month", "overall")
             val randomPeriod = periods[Random.nextInt(periods.size)]
 
+            val topArtistsPool = fetchTopArtists(username, period = randomPeriod, limit = 30)
+            val userTopTracksPool = fetchUserTopTracks(username, period = randomPeriod, limit = 30)
+
+            val candidates = mutableListOf<RecCandidate>()
+
+            val userTopTrackNames = userTopTracksPool
+            val userTopArtistNames = topArtistsPool.map { it.name.lowercase().trim() }.toSet()
+
             when (category) {
                 RecCategory.ALL -> {
-                    // Sample diverse seeds from top artists and top tracks
-                    val topArtistsPool = fetchTopArtists(username, period = randomPeriod, limit = 30)
-                    val userTopTracksPool = fetchUserTopTracks(username, period = randomPeriod, limit = 30)
+                    // 1. Tracks similar to user's top tracks ("Similar to <Song>")
+                    val sampledTracks = if (page == 1) userTopTracksPool.shuffled().take(6)
+                    else userTopTracksPool.drop((page - 1) * 3).take(3).ifEmpty { userTopTracksPool.shuffled().take(3) }
 
-                    val sampledArtists = if (page == 1) {
-                        topArtistsPool.shuffled().take(4)
-                    } else {
-                        topArtistsPool.drop((page - 1) * 3).take(3).ifEmpty { topArtistsPool.shuffled().take(3) }
-                    }
-
-                    val sampledTracks = if (page == 1) {
-                        userTopTracksPool.shuffled().take(4)
-                    } else {
-                        userTopTracksPool.drop((page - 1) * 3).take(3).ifEmpty { userTopTracksPool.shuffled().take(3) }
-                    }
-
-                    val tracksRaw = mutableListOf<RecCandidate>() // reason, artist, song, art
                     for (track in sampledTracks) {
                         val artistName = track.artist?.name ?: continue
-                        val similar = fetchSimilarTracks(artistName, track.name, limit = 6)
-                        for (s in similar.shuffled().take(2)) {
+                        val similar = fetchSimilarTracks(artistName, track.name, limit = 8)
+                        var added = 0
+                        for (s in similar.shuffled()) {
                             val sArtist = s.artist?.name ?: continue
-                            tracksRaw.add(RecCandidate("Similar to \"${track.name}\"", sArtist, s.name, s.image.extractLastFmImage()))
+                            if (isSameTrack(s.name, sArtist, track.name, artistName)) continue
+                            if (userTopTrackNames.any { isSameTrack(s.name, sArtist, it.name, it.artist?.name ?: "") }) continue
+                            candidates.add(RecCandidate("Similar to \"${track.name}\"", sArtist, s.name, s.image.extractLastFmImage()))
+                            added++
+                            if (added >= 2) break
                         }
                     }
 
-                    val artistsRaw = mutableListOf<RecCandidate>() // reason, artist, "", art
+                    // 2. Notable tracks from user's top artists ("From the same artist")
+                    val sampledArtists = if (page == 1) topArtistsPool.shuffled().take(4)
+                    else topArtistsPool.drop((page - 1) * 2).take(2).ifEmpty { topArtistsPool.shuffled().take(2) }
+
                     for (artist in sampledArtists) {
-                        val similar = fetchSimilarArtists(artist.name, limit = 6)
-                        for (simArtist in similar.shuffled().take(2)) {
-                            artistsRaw.add(RecCandidate("Similar to ${artist.name}", simArtist.name, "", simArtist.image.extractLastFmImage()))
+                        val topTracks = fetchArtistTopTracks(artist.name, limit = 8)
+                        var added = 0
+                        for (t in topTracks.shuffled()) {
+                            val tArtist = t.artist?.name ?: artist.name
+                            if (userTopTrackNames.any { isSameTrack(t.name, tArtist, it.name, it.artist?.name ?: "") }) continue
+                            candidates.add(RecCandidate("From the same artist (${artist.name})", tArtist, t.name, t.image.extractLastFmImage()))
+                            added++
+                            if (added >= 2) break
                         }
                     }
 
-                    val albumsRaw = mutableListOf<RecCandidate>() // reason, artist, album, art
-                    for (artist in sampledArtists) {
-                        val albums = fetchArtistTopAlbums(artist.name, limit = 6)
-                        for (album in albums.shuffled().take(2)) {
-                            albumsRaw.add(RecCandidate("Album by ${artist.name}", artist.name, album.name, album.image.extractLastFmImage()))
-                        }
-                    }
-
-                    coroutineScope {
-                        val enrichedTracks = tracksRaw.distinctBy { "${it.artist.lowercase()} - ${it.extra.lowercase()}" }.take(6).map { cand ->
-                            async {
-                                val itunes = ItunesClient.searchSong(cand.extra, cand.artist)
-                                RecommendedTrackItem(
-                                    title = itunes?.trackName ?: cand.extra,
-                                    artist = itunes?.artistName ?: cand.artist,
-                                    album = itunes?.collectionName ?: "",
-                                    reason = cand.reason,
-                                    category = RecCategory.TRACKS,
-                                    itunesMatch = itunes,
-                                    lastFmArtworkUrl = cand.art
-                                )
+                    // 3. Similar artist highlights ("Because you listen to <Artist>")
+                    for (artist in sampledArtists.take(2)) {
+                        val simArtists = fetchSimilarArtists(artist.name, limit = 6)
+                        for (sim in simArtists.shuffled().take(2)) {
+                            if (userTopArtistNames.contains(sim.name.lowercase().trim())) continue
+                            val simTracks = fetchArtistTopTracks(sim.name, limit = 4)
+                            val pick = simTracks.firstOrNull { t ->
+                                !userTopTrackNames.any { isSameTrack(t.name, sim.name, it.name, it.artist?.name ?: "") }
+                            }
+                            if (pick != null) {
+                                candidates.add(RecCandidate("Because you listen to ${artist.name}", sim.name, pick.name, pick.image.extractLastFmImage()))
                             }
                         }
-
-                        val enrichedArtists = artistsRaw.distinctBy { it.artist.lowercase() }.take(4).map { cand ->
-                            async {
-                                val itunes = ItunesClient.searchArtist(cand.artist)
-                                RecommendedTrackItem(
-                                    title = itunes?.artistName ?: cand.artist,
-                                    artist = itunes?.collectionName ?: "Artist",
-                                    album = "",
-                                    reason = cand.reason,
-                                    category = RecCategory.ARTISTS,
-                                    itunesMatch = itunes,
-                                    lastFmArtworkUrl = cand.art
-                                )
-                            }
-                        }
-
-                        val enrichedAlbums = albumsRaw.distinctBy { "${it.artist.lowercase()} - ${it.extra.lowercase()}" }.take(4).map { cand ->
-                            async {
-                                val itunes = ItunesClient.searchAlbum(cand.extra, cand.artist)
-                                RecommendedTrackItem(
-                                    title = itunes?.collectionName ?: cand.extra,
-                                    artist = itunes?.artistName ?: cand.artist,
-                                    album = itunes?.collectionName ?: cand.extra,
-                                    reason = cand.reason,
-                                    category = RecCategory.ALBUMS,
-                                    itunesMatch = itunes,
-                                    lastFmArtworkUrl = cand.art
-                                )
-                            }
-                        }
-
-                        val tList = enrichedTracks.awaitAll()
-                        val aList = enrichedArtists.awaitAll()
-                        val albList = enrichedAlbums.awaitAll()
-
-                        // Interleave into a diverse mixed feed
-                        val mixed = mutableListOf<RecommendedTrackItem>()
-                        val maxLen = maxOf(tList.size, aList.size, albList.size)
-                        for (i in 0 until maxLen) {
-                            if (i < tList.size) mixed.add(tList[i])
-                            if (i + 1 < tList.size && i % 2 == 0) mixed.add(tList[i + 1])
-                            if (i < aList.size) mixed.add(aList[i])
-                            if (i < albList.size) mixed.add(albList[i])
-                        }
-                        mixed.distinctBy { "${it.artist.lowercase()} - ${it.title.lowercase()}" }
                     }
                 }
 
                 RecCategory.ARTISTS -> {
-                    val topArtistsPool = fetchTopArtists(username, period = randomPeriod, limit = 30)
-                    val sampledArtists = if (page == 1) {
-                        topArtistsPool.shuffled().take(6)
-                    } else {
-                        topArtistsPool.drop((page - 1) * 4).take(4).ifEmpty { topArtistsPool.shuffled().take(4) }
-                    }
+                    val sampledArtists = if (page == 1) topArtistsPool.shuffled().take(8)
+                    else topArtistsPool.drop((page - 1) * 5).take(5).ifEmpty { topArtistsPool.shuffled().take(5) }
 
-                    val artistsRaw = mutableListOf<RecCandidate>() // reason, artist, art
                     for (artist in sampledArtists) {
-                        val similar = fetchSimilarArtists(artist.name, limit = 8)
-                        for (simArtist in similar.shuffled().take(3)) {
-                            artistsRaw.add(RecCandidate("Similar to ${artist.name}", simArtist.name, "", simArtist.image.extractLastFmImage()))
+                        val topTracks = fetchArtistTopTracks(artist.name, limit = 8)
+                        var added = 0
+                        for (t in topTracks.shuffled()) {
+                            val tArtist = t.artist?.name ?: artist.name
+                            if (userTopTrackNames.any { isSameTrack(t.name, tArtist, it.name, it.artist?.name ?: "") }) continue
+                            candidates.add(RecCandidate("From the same artist (${artist.name})", tArtist, t.name, t.image.extractLastFmImage()))
+                            added++
+                            if (added >= 2) break
                         }
-                    }
-
-                    val distinct = artistsRaw.distinctBy { it.artist.lowercase() }.take(16)
-                    coroutineScope {
-                        distinct.map { cand ->
-                            async {
-                                val itunes = ItunesClient.searchArtist(cand.artist)
-                                RecommendedTrackItem(
-                                    title = itunes?.artistName ?: cand.artist,
-                                    artist = itunes?.collectionName ?: "Artist",
-                                    album = "",
-                                    reason = cand.reason,
-                                    category = RecCategory.ARTISTS,
-                                    itunesMatch = itunes,
-                                    lastFmArtworkUrl = cand.art
-                                )
-                            }
-                        }.awaitAll()
-                    }
-                }
-
-                RecCategory.ALBUMS -> {
-                    val topArtistsPool = fetchTopArtists(username, period = randomPeriod, limit = 30)
-                    val sampledArtists = if (page == 1) {
-                        topArtistsPool.shuffled().take(6)
-                    } else {
-                        topArtistsPool.drop((page - 1) * 4).take(4).ifEmpty { topArtistsPool.shuffled().take(4) }
-                    }
-
-                    val albumsRaw = mutableListOf<RecCandidate>() // reason, artist, album, art
-                    for (artist in sampledArtists) {
-                        val similar = fetchSimilarArtists(artist.name, limit = 5)
-                        for (simArtist in similar.shuffled().take(2)) {
-                            val albums = fetchArtistTopAlbums(simArtist.name, limit = 6)
-                            for (album in albums.shuffled().take(2)) {
-                                albumsRaw.add(RecCandidate("Similar to ${artist.name}", simArtist.name, album.name, album.image.extractLastFmImage()))
-                            }
-                        }
-                    }
-
-                    val distinct = albumsRaw.distinctBy { "${it.artist.lowercase()} - ${it.extra.lowercase()}" }.take(16)
-                    coroutineScope {
-                        distinct.map { cand ->
-                            async {
-                                val itunes = ItunesClient.searchAlbum(cand.extra, cand.artist)
-                                RecommendedTrackItem(
-                                    title = itunes?.collectionName ?: cand.extra,
-                                    artist = itunes?.artistName ?: cand.artist,
-                                    album = itunes?.collectionName ?: cand.extra,
-                                    reason = cand.reason,
-                                    category = RecCategory.ALBUMS,
-                                    itunesMatch = itunes,
-                                    lastFmArtworkUrl = cand.art
-                                )
-                            }
-                        }.awaitAll()
                     }
                 }
 
                 RecCategory.TRACKS -> {
-                    val userTopTracksPool = fetchUserTopTracks(username, period = randomPeriod, limit = 30)
-                    val sampledTracks = if (page == 1) {
-                        userTopTracksPool.shuffled().take(8)
-                    } else {
-                        userTopTracksPool.drop((page - 1) * 5).take(5).ifEmpty { userTopTracksPool.shuffled().take(5) }
-                    }
+                    val sampledTracks = if (page == 1) userTopTracksPool.shuffled().take(8)
+                    else userTopTracksPool.drop((page - 1) * 5).take(5).ifEmpty { userTopTracksPool.shuffled().take(5) }
 
-                    val tracksRaw = mutableListOf<RecCandidate>() // reason, artist, song, art
                     for (track in sampledTracks) {
                         val artistName = track.artist?.name ?: continue
-                        val similar = fetchSimilarTracks(artistName, track.name, limit = 6)
-                        for (s in similar.shuffled().take(2)) {
+                        val similar = fetchSimilarTracks(artistName, track.name, limit = 8)
+                        var added = 0
+                        for (s in similar.shuffled()) {
                             val sArtist = s.artist?.name ?: continue
-                            tracksRaw.add(RecCandidate("Similar to \"${track.name}\"", sArtist, s.name, s.image.extractLastFmImage()))
+                            if (isSameTrack(s.name, sArtist, track.name, artistName)) continue
+                            if (userTopTrackNames.any { isSameTrack(s.name, sArtist, it.name, it.artist?.name ?: "") }) continue
+                            candidates.add(RecCandidate("Similar to \"${track.name}\"", sArtist, s.name, s.image.extractLastFmImage()))
+                            added++
+                            if (added >= 2) break
                         }
                     }
-
-                    val distinct = tracksRaw.distinctBy { "${it.artist.lowercase()} - ${it.extra.lowercase()}" }.take(16)
-                    coroutineScope {
-                        distinct.map { cand ->
-                            async {
-                                val itunes = ItunesClient.searchSong(cand.extra, cand.artist)
-                                RecommendedTrackItem(
-                                    title = itunes?.trackName ?: cand.extra,
-                                    artist = itunes?.artistName ?: cand.artist,
-                                    album = itunes?.collectionName ?: "",
-                                    reason = cand.reason,
-                                    category = RecCategory.TRACKS,
-                                    itunesMatch = itunes,
-                                    lastFmArtworkUrl = cand.art
-                                )
-                            }
-                        }.awaitAll()
-                    }
                 }
+            }
+
+            val distinct = candidates.distinctBy { "${it.artist.lowercase()} - ${it.title.lowercase()}" }.take(18)
+            coroutineScope {
+                distinct.map { cand ->
+                    async {
+                        val itunes = ItunesClient.searchSong(cand.title, cand.artist)
+                        RecommendedTrackItem(
+                            title = itunes?.trackName ?: cand.title,
+                            artist = itunes?.artistName ?: cand.artist,
+                            album = itunes?.collectionName ?: "",
+                            reason = cand.reason,
+                            category = category,
+                            itunesMatch = itunes,
+                            lastFmArtworkUrl = cand.art
+                        )
+                    }
+                }.awaitAll()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error fetching recommendations for $username (cat=$category, page=$page)", e)
@@ -379,18 +290,6 @@ object LastFmRecommendationsEngine {
                 if (!resp.isSuccessful) return emptyList()
                 val body = resp.body?.string() ?: return emptyList()
                 gson.fromJson(body, ArtistTopTracksResponse::class.java).toptracks?.track ?: emptyList()
-            }
-        } catch (_: Exception) { emptyList() }
-    }
-
-    private fun fetchArtistTopAlbums(artist: String, limit: Int = 5): List<AlbumEntry> {
-        return try {
-            val url = "https://ws.audioscrobbler.com/2.0/?method=artist.getTopAlbums&artist=${URLEncoder.encode(artist, "UTF-8")}&api_key=$API_KEY&format=json&limit=$limit"
-            val req = Request.Builder().url(url).build()
-            httpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return emptyList()
-                val body = resp.body?.string() ?: return emptyList()
-                gson.fromJson(body, TopAlbumsResponse::class.java).topalbums?.album ?: emptyList()
             }
         } catch (_: Exception) { emptyList() }
     }

@@ -1,24 +1,28 @@
 package io.maru.marucast
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
-import android.app.Activity
-import android.content.Context
-import android.media.projection.MediaProjectionManager
 import androidx.core.content.ContextCompat
 import io.maru.marucast.network.MarucastApiClient
 import io.maru.marucast.service.MarucastForegroundService
-import io.maru.marucast.ui.DeepBackground
+import io.maru.marucast.ui.MaruDarkBg
 import io.maru.marucast.ui.MarucastAppContent
 
 class MainActivity : ComponentActivity() {
@@ -54,12 +58,28 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
+        
+        // Keep screen awake while streaming / in app
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
         checkAndRequestPermissions()
 
         setContent {
+            BackHandler {
+                Toast.makeText(
+                    this,
+                    "That back button did not do anything. If you want, close the app on your device's Recents. Marucast will continue to broadcast in the background.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+
             Surface(
                 modifier = Modifier.fillMaxSize(),
-                color = DeepBackground
+                color = MaruDarkBg
             ) {
                 MarucastAppContent(
                     onStartStream = { pin, onResult ->

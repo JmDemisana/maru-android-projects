@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">LastNotif</string>
+    <string name="app_name">MAudio</string>
     <string name="notif_channel_alerts">Song Alerts</string>
-    <string name="notif_channel_keepalive">LastNotif Active</string>
+    <string name="notif_channel_keepalive">MAudio Active</string>
     <string name="notif_channel_alerts_desc">Now-playing track and lyric updates</string>
     <string name="notif_channel_keepalive_desc">Background service indicator</string>
-    <string name="notif_keepalive_title">LastNotif is running</string>
-    <string name="notif_keepalive_text">Watching for Last.fm updates</string>
+    <string name="notif_keepalive_title">MAudio is running</string>
+    <string name="notif_keepalive_text">Watching for audio and scrobble updates</string>
 
     <string name="settings_title">Settings</string>
     <string name="settings_username">Last.fm Username</string>

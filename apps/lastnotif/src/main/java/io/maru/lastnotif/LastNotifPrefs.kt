@@ -41,9 +41,11 @@ class LastNotifPrefs(private val context: Context) {
         val KEY_LAST_ALERT_TIME = longPreferencesKey("last_alert_time")
 
         val KEY_PREFERRED_PLATFORM = stringPreferencesKey("preferred_platform")
+        val KEY_DIRECT_SONG_LAUNCH = booleanPreferencesKey("direct_song_launch")
     }
 
     val preferredPlatform: Flow<String> = context.dataStore.data.map { it[KEY_PREFERRED_PLATFORM] ?: "Apple Music" }
+    val directSongLaunch: Flow<Boolean> = context.dataStore.data.map { it[KEY_DIRECT_SONG_LAUNCH] ?: false }
 
     val username: Flow<String> = context.dataStore.data.map { it[KEY_USERNAME] ?: "" }
     val notifySongUpdate: Flow<Boolean> = context.dataStore.data.map { it[KEY_NOTIFY_SONG_UPDATE] ?: true }
@@ -91,6 +93,7 @@ class LastNotifPrefs(private val context: Context) {
     suspend fun setLastfmUsername(value: String) { context.dataStore.edit { it[KEY_LASTFM_USERNAME] = value } }
 
     suspend fun setPreferredPlatform(value: String) { context.dataStore.edit { it[KEY_PREFERRED_PLATFORM] = value } }
+    suspend fun setDirectSongLaunch(value: Boolean) { context.dataStore.edit { it[KEY_DIRECT_SONG_LAUNCH] = value } }
 
     suspend fun setLastAlert(title: String, sub: String, source: String) {
         context.dataStore.edit {

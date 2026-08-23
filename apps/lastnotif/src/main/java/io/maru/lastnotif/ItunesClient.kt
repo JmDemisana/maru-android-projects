@@ -75,7 +75,7 @@ object ItunesClient {
     suspend fun searchSong(
         trackName: String,
         artistName: String = "",
-        country: String = "PH",
+        country: String = "US",
         lang: String = "en_us"
     ): ItunesSongMatch? = withContext(Dispatchers.IO) {
         val cacheKey = "song::${artistName.trim().lowercase()}::${trackName.trim().lowercase()}"
@@ -92,7 +92,7 @@ object ItunesClient {
             }
             val query = if (artistName.isNotEmpty()) "$artistName $trackName" else trackName
             val encodedQuery = URLEncoder.encode(query, "UTF-8")
-            val url = "https://itunes.apple.com/search?term=$encodedQuery&entity=song&limit=1&country=$country&lang=$lang"
+            val url = "https://itunes.apple.com/search?term=$encodedQuery&entity=song&limit=1&country=$country&lang=$lang&explicit=Yes"
 
             val request = Request.Builder()
                 .url(url)
@@ -104,24 +104,28 @@ object ItunesClient {
                 if (!response.isSuccessful) return@withContext null
                 val body = response.body?.string() ?: return@withContext null
                 val searchRes = gson.fromJson(body, ItunesSearchResponse::class.java)
-                val entry = searchRes.results?.firstOrNull() ?: return@withContext null
+                val entry = searchRes.results?.firstOrNull()
 
-                val highResArt = entry.artworkUrl100?.let { art ->
-                    art.replace("100x100bb.jpg", "600x600bb.jpg")
-                        .replace("100x100bb.png", "600x600bb.png")
+                if (entry != null) {
+                    val highResArt = entry.artworkUrl100?.let { art ->
+                        art.replace("100x100bb.jpg", "600x600bb.jpg")
+                            .replace("100x100bb.png", "600x600bb.png")
+                    }
+
+                    val match = ItunesSongMatch(
+                        trackId = entry.trackId ?: 0L,
+                        trackName = entry.trackName ?: trackName,
+                        artistName = entry.artistName ?: artistName,
+                        collectionName = entry.collectionName ?: "",
+                        artworkUrl = highResArt,
+                        appleMusicUrl = entry.trackViewUrl,
+                        previewUrl = entry.previewUrl
+                    )
+                    memoryCache[cacheKey] = match
+                    match
+                } else {
+                    null
                 }
-
-                val match = ItunesSongMatch(
-                    trackId = entry.trackId ?: 0L,
-                    trackName = entry.trackName ?: trackName,
-                    artistName = entry.artistName ?: artistName,
-                    collectionName = entry.collectionName ?: "",
-                    artworkUrl = highResArt,
-                    appleMusicUrl = entry.trackViewUrl,
-                    previewUrl = entry.previewUrl
-                )
-                memoryCache[cacheKey] = match
-                match
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed searching iTunes for song: $artistName - $trackName", e)
@@ -149,7 +153,7 @@ object ItunesClient {
             }
             val query = if (artistName.isNotEmpty()) "$artistName $albumName" else albumName
             val encodedQuery = URLEncoder.encode(query, "UTF-8")
-            val url = "https://itunes.apple.com/search?term=$encodedQuery&entity=album&limit=1&country=$country&lang=$lang"
+            val url = "https://itunes.apple.com/search?term=$encodedQuery&entity=album&limit=1&country=$country&lang=$lang&explicit=Yes"
 
             val request = Request.Builder()
                 .url(url)
@@ -241,7 +245,7 @@ object ItunesClient {
 
     suspend fun searchInstant(
         query: String,
-        country: String = "PH",
+        country: String = "US",
         lang: String = "en_us",
         limit: Int = 15
     ): List<ItunesSongMatch> = withContext(Dispatchers.IO) {
@@ -256,7 +260,7 @@ object ItunesClient {
                 lastRequestTime = System.currentTimeMillis()
             }
             val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
-            val url = "https://itunes.apple.com/search?term=$encodedQuery&media=music&limit=$limit&country=$country&lang=$lang"
+            val url = "https://itunes.apple.com/search?term=$encodedQuery&media=music&limit=$limit&country=$country&lang=$lang&explicit=Yes"
 
             val request = Request.Builder()
                 .url(url)
@@ -264,28 +268,50 @@ object ItunesClient {
                 .get()
                 .build()
 
+            var results: List<ItunesSongMatch> = emptyList()
             httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext emptyList()
-                val body = response.body?.string() ?: return@withContext emptyList()
-                val searchRes = gson.fromJson(body, ItunesSearchResponse::class.java)
-                val results = searchRes.results ?: return@withContext emptyList()
-
-                results.map { entry ->
-                    val highResArt = entry.artworkUrl100?.let { art ->
-                        art.replace("100x100bb.jpg", "600x600bb.jpg")
-                            .replace("100x100bb.png", "600x600bb.png")
+                if (response.isSuccessful) {
+                    val body = response.body?.string()
+                    if (body != null) {
+                        val searchRes = gson.fromJson(body, ItunesSearchResponse::class.java)
+                        val items = searchRes.results ?: emptyList()
+                        results = items.map { entry ->
+                            val highResArt = entry.artworkUrl100?.let { art ->
+                                art.replace("100x100bb.jpg", "600x600bb.jpg")
+                                    .replace("100x100bb.png", "600x600bb.png")
+                            }
+                            ItunesSongMatch(
+                                trackId = entry.trackId ?: 0L,
+                                trackName = entry.trackName ?: query,
+                                artistName = entry.artistName ?: "",
+                                collectionName = entry.collectionName ?: "",
+                                artworkUrl = highResArt,
+                                appleMusicUrl = entry.trackViewUrl,
+                                previewUrl = entry.previewUrl
+                            )
+                        }
                     }
-                    ItunesSongMatch(
-                        trackId = entry.trackId ?: 0L,
-                        trackName = entry.trackName ?: query,
-                        artistName = entry.artistName ?: "",
-                        collectionName = entry.collectionName ?: "",
-                        artworkUrl = highResArt,
-                        appleMusicUrl = entry.trackViewUrl,
-                        previewUrl = entry.previewUrl
-                    )
                 }
             }
+
+            if (results.size < 4) {
+                val lastFmTracks = LastNotifApiClient.searchTracks(query)
+                val supplementary = lastFmTracks.filter { (title, artist) ->
+                    results.none { it.trackName.equals(title, ignoreCase = true) && it.artistName.equals(artist, ignoreCase = true) }
+                }.map { (title, artist) ->
+                    ItunesSongMatch(
+                        trackId = 0L,
+                        trackName = title,
+                        artistName = artist,
+                        collectionName = "",
+                        artworkUrl = null,
+                        appleMusicUrl = null,
+                        previewUrl = null
+                    )
+                }
+                results = (results + supplementary).take(limit)
+            }
+            results
         } catch (e: Exception) {
             Log.w(TAG, "Failed searchInstant for query: $query", e)
             emptyList()
@@ -373,6 +399,37 @@ object ItunesClient {
             }
         } catch (err: Exception) {
             Log.e(TAG, "Failed launching $platform for $artistName - $trackName", err)
+        }
+    }
+
+    suspend fun openAlbumFirstTrack(
+        context: Context,
+        platform: String,
+        albumName: String,
+        artistName: String
+    ) = withContext(Dispatchers.IO) {
+        val trackQuery = if (artistName.isNotEmpty()) "$artistName $albumName" else albumName
+        val songMatch = searchSong(trackName = albumName, artistName = artistName)
+            ?: searchInstant(trackQuery, limit = 1).firstOrNull()
+
+        withContext(Dispatchers.Main) {
+            if (songMatch != null) {
+                openInPreferredPlayer(
+                    context = context,
+                    platform = platform,
+                    trackName = songMatch.trackName,
+                    artistName = songMatch.artistName,
+                    appleMusicUrl = songMatch.appleMusicUrl
+                )
+            } else {
+                openInPreferredPlayer(
+                    context = context,
+                    platform = platform,
+                    trackName = albumName,
+                    artistName = artistName,
+                    appleMusicUrl = null
+                )
+            }
         }
     }
 }

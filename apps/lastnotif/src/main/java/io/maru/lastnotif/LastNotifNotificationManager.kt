@@ -114,6 +114,10 @@ class LastNotifNotificationManager(private val context: Context) {
         post("LastNotif Connected", "Smart band notification sync is working!", "Test")
     }
 
+    fun sendAlert(title: String, body: String) {
+        post(title, body, "Test")
+    }
+
     private fun post(main: String, sub: String, source: String = "Alert") {
         val nm = nm ?: return
 

@@ -1,6 +1,8 @@
-package io.maru.marucast.service
+package io.maru.lastnotif.cast
 
 import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
@@ -13,17 +15,14 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import io.maru.marucast.MainActivity
-import io.maru.marucast.MarucastApp
-import io.maru.marucast.media.MediaSessionState
-import io.maru.marucast.network.MarucastApiClient
+import io.maru.lastnotif.MainActivity
+import io.maru.lastnotif.R
 
 class MarucastForegroundService : Service() {
     private val TAG = "MarucastService"
@@ -54,8 +53,9 @@ class MarucastForegroundService : Service() {
     }
 
     companion object {
-        const val ACTION_START = "io.maru.marucast.action.START"
-        const val ACTION_STOP = "io.maru.marucast.action.STOP"
+        const val CHANNEL_ID = "marucast_broadcaster_channel"
+        const val ACTION_START = "io.maru.lastnotif.cast.action.START"
+        const val ACTION_STOP = "io.maru.lastnotif.cast.action.STOP"
         const val EXTRA_TOKEN = "extra_token"
         const val EXTRA_PROJECTION_DATA = "extra_projection_data"
         
@@ -67,16 +67,31 @@ class MarucastForegroundService : Service() {
 
         var isMicMode = false
         var isKaraokeMode = false
-        var delayManagementMode = "lossless" // "lossless", "automatic", "less_delay"
+        var delayManagementMode = "lossless"
         var lyricsDelayOffsetMs = 0L
     }
 
     override fun onCreate() {
         super.onCreate()
         isRunning = true
+        createNotificationChannel()
         val prefs = getSharedPreferences("marucast_prefs", Context.MODE_PRIVATE)
         delayManagementMode = prefs.getString("delay_mode", "lossless") ?: "lossless"
         lyricsDelayOffsetMs = prefs.getLong("lyrics_delay_offset", 0L)
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Marucast Audio Broadcaster",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Shows active audio & lyrics broadcasting status"
+            }
+            val nm = getSystemService(NotificationManager::class.java)
+            nm?.createNotificationChannel(channel)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -111,7 +126,6 @@ class MarucastForegroundService : Service() {
         
         Log.i(TAG, "Starting stream relay on: $streamUrl")
         
-        // 1. Start HTTP Server
         relayServer = MarucastRelayServer(48543).apply {
             onControlCommand = { command ->
                 handleRemoteCommand(command)
@@ -119,7 +133,6 @@ class MarucastForegroundService : Service() {
             start()
         }
         
-        // 2. Promote to Foreground (MUST happen before MediaProjection creation!)
         val notification = createNotification("Starting Marucast stream...")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             var serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
@@ -131,18 +144,13 @@ class MarucastForegroundService : Service() {
             startForeground(101, notification)
         }
         
-        // 3. Start Audio Capture
         startAudioCapture()
-
-        // 4. Report details to API Complete endpoint
         completeHandoff(streamUrl)
 
-        // 5. Start Presence Heartbeat & Command Poller
         handler.post(presenceRunnable)
         handler.post(commandPollRunnable)
 
-        // 6. Listen for local song metadata changes to push to receiver
-        MediaSessionState.onMetadataChanged = {
+        CastMediaState.onMetadataChanged = {
             updateNotificationAndComplete(streamUrl)
         }
     }
@@ -223,15 +231,11 @@ class MarucastForegroundService : Service() {
             val leftSigned = if (left > 32767) left - 65536 else left
             val rightSigned = if (right > 32767) right - 65536 else right
             
-            // Step 1: Out of Phase Stereo (OOPS) subtraction to cancel center-mixed vocals
             val diff = leftSigned - rightSigned
-            
-            // Step 2: Adaptive sibilance dampening LPF (smooths out high-frequency vocal reverb/hiss)
             val alpha = 0.85f
             val smoothed = (alpha * diff + (1f - alpha) * lastFilterSample).toInt()
             lastFilterSample = smoothed
             
-            // Step 3: Boost accompaniment back up slightly to compensate for cancellation loss
             val result = (smoothed * 1.35f).toInt().coerceIn(-32768, 32767)
             
             buffer[i] = (result and 0xFF).toByte()
@@ -248,11 +252,11 @@ class MarucastForegroundService : Service() {
             token = currentToken,
             relayUrl = streamUrl,
             deviceName = deviceName,
-            serviceName = "marucast-android",
+            serviceName = "maru-audio-suite",
             mediaAccessEnabled = true,
-            mediaAppLabel = MediaSessionState.appLabel ?: "Android Player",
-            mediaArtist = MediaSessionState.artist ?: "Unknown Artist",
-            mediaTitle = MediaSessionState.title ?: "Unknown Track",
+            mediaAppLabel = CastMediaState.appLabel ?: "Android Player",
+            mediaArtist = CastMediaState.artist ?: "Unknown Artist",
+            mediaTitle = CastMediaState.title ?: "Unknown Track",
             relayMode = "lan",
             sampleRate = 44100,
             channelCount = 2,
@@ -275,16 +279,16 @@ class MarucastForegroundService : Service() {
         val currentToken = this.token ?: return
         val payload = MarucastApiClient.PresenceRequest(
             token = currentToken,
-            advancing = MediaSessionState.isPlaying,
-            artist = MediaSessionState.artist,
-            durationMs = MediaSessionState.durationMs,
-            playbackSpeed = if (MediaSessionState.isPlaying) 1.0 else 0.0,
+            advancing = CastMediaState.isPlaying,
+            artist = CastMediaState.artist,
+            durationMs = CastMediaState.durationMs,
+            playbackSpeed = if (CastMediaState.isPlaying) 1.0 else 0.0,
             positionCapturedAtMs = System.currentTimeMillis(),
-            positionMs = MediaSessionState.positionMs,
-            receiverId = "marucast-android-sender",
+            positionMs = CastMediaState.positionMs,
+            receiverId = "marucast-suite-sender",
             receiverLabel = Build.MODEL ?: "Android Sender",
-            title = MediaSessionState.title,
-            trackKey = "${MediaSessionState.title}-${MediaSessionState.artist}"
+            title = CastMediaState.title,
+            trackKey = "${CastMediaState.title}-${CastMediaState.artist}"
         )
 
         MarucastApiClient.sendPresence(payload, object : MarucastApiClient.Callback<Boolean> {
@@ -320,7 +324,7 @@ class MarucastForegroundService : Service() {
             stopSelf()
             return
         }
-        val controller = MediaSessionState.activeController ?: return
+        val controller = CastMediaState.activeController ?: return
         try {
             when (command) {
                 "play" -> controller.transportControls.play()
@@ -334,15 +338,12 @@ class MarucastForegroundService : Service() {
     }
 
     private fun updateNotificationAndComplete(streamUrl: String) {
-        val title = MediaSessionState.title ?: "Unknown Track"
-        val artist = MediaSessionState.artist ?: "Unknown Artist"
-        val app = MediaSessionState.appLabel ?: "Android Player"
+        val title = CastMediaState.title ?: "Unknown Track"
+        val artist = CastMediaState.artist ?: "Unknown Artist"
+        val app = CastMediaState.appLabel ?: "Android Player"
         
-        // Update notification
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(101, createNotification("Casting: $title - $artist ($app)"))
-
-        // Resend complete data to sync metadata to browser
         completeHandoff(streamUrl)
     }
 
@@ -365,10 +366,10 @@ class MarucastForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        return NotificationCompat.Builder(this, MarucastApp.CHANNEL_ID)
-            .setContentTitle("Marucast Audio Sender")
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Marucast Audio Broadcaster")
             .setContentText(content)
-            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setSmallIcon(R.drawable.ic_launcher_lastnotif_monochrome)
             .setContentIntent(mainPendingIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Disconnect", stopPendingIntent)
             .setOngoing(true)
@@ -396,7 +397,7 @@ class MarucastForegroundService : Service() {
         mediaProjection = null
         projectionIntentData = null
         
-        MediaSessionState.onMetadataChanged = null
+        CastMediaState.onMetadataChanged = null
         currentToken = null
         isRunning = false
     }
@@ -420,7 +421,6 @@ class MarucastForegroundService : Service() {
                     val address = addresses.nextElement()
                     if (!address.isLoopbackAddress && address is java.net.Inet4Address) {
                         val ip = address.hostAddress
-                        // Check if it's on a typical local subnet
                         if (ip != null && (networkInterface.name.contains("wlan") || ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172."))) {
                             return ip
                         }
