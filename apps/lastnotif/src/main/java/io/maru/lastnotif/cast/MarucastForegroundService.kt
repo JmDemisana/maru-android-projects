@@ -1,5 +1,6 @@
 package io.maru.lastnotif.cast
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,7 +8,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import androidx.core.content.ContextCompat
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
@@ -135,11 +138,29 @@ class MarucastForegroundService : Service() {
         
         val notification = createNotification("Starting Marucast stream...")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            var serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            var serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            val hasMicPermission = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+
+            if (isMicMode && hasMicPermission) {
+                serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            }
             if (projectionData != null) {
                 serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             }
-            startForeground(101, notification, serviceType)
+            try {
+                startForeground(101, notification, serviceType)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to start with composite service types, falling back to MEDIA_PLAYBACK", e)
+                try {
+                    startForeground(101, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+                } catch (fallbackError: Exception) {
+                    Log.e(TAG, "Fallback startForeground failed", fallbackError)
+                    startForeground(101, notification)
+                }
+            }
         } else {
             startForeground(101, notification)
         }
@@ -188,7 +209,12 @@ class MarucastForegroundService : Service() {
                     }
                 }
 
-                if (audioRecord == null) {
+                val hasMicPerm = ContextCompat.checkSelfPermission(
+                    this@MarucastForegroundService,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+
+                if (audioRecord == null && isMicMode && hasMicPerm) {
                     Log.i(TAG, "Configuring microphone capture")
                     audioRecord = AudioRecord(
                         MediaRecorder.AudioSource.MIC,
@@ -212,7 +238,7 @@ class MarucastForegroundService : Service() {
                         }
                     }
                 } else {
-                    Log.e(TAG, "AudioRecord failed to initialize")
+                    Log.i(TAG, "AudioRecord idle or metadata-only stream mode active")
                 }
             } catch (e: SecurityException) {
                 Log.e(TAG, "Permission denied for audio recording: ${e.message}")
