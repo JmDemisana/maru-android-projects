@@ -23,7 +23,11 @@ rootProject.name = "maru-android-projects"
 // Native Android apps
 include(":apps:lastnotif")
 include(":apps:marucast")
+include(":apps:marucast-gaming")
 include(":apps:tup-ers")
+include(":apps:nami-space")
+include(":apps:manime")
+
 
 // Shared libraries
 include(":libs:shared-ui")

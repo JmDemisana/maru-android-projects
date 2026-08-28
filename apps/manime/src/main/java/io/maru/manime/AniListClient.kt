@@ -1,0 +1,365 @@
+﻿package io.maru.manime
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
+
+// ---------------------------------------------------------------------------
+// Data models
+// ---------------------------------------------------------------------------
+
+data class AniListUser(
+    val id: Int,
+    val name: String,
+    val avatarUrl: String?
+)
+
+data class AnimeMedia(
+    val mediaId: Int,
+    val title: String,
+    val titleEnglish: String?,
+    val titleRomaji: String?,
+    val coverUrl: String?,
+    val bannerUrl: String?,
+    val accentColor: String?,
+    val episodes: Int?,
+    val format: String?,
+    val status: String?,
+    val season: String?,
+    val seasonYear: Int?,
+    val averageScore: Int?,
+    val genres: List<String>,
+    val description: String?,
+    val siteUrl: String?,
+    val isAdult: Boolean,
+    val nextEpisode: Int?,
+    val nextEpisodeAt: Long?,
+    val externalLinks: List<ExternalLink>,
+    // List entry fields (null if not on user's list)
+    val listEntryId: Int?,
+    val listStatus: String?,
+    val progress: Int,
+    val score: Double?,
+    val notes: String?,
+    val isPrivate: Boolean,
+    val updatedAt: Long?
+)
+
+data class ExternalLink(
+    val id: Int,
+    val url: String,
+    val site: String,
+    val type: String,
+    val language: String?
+) {
+    val isEnglishDub: Boolean get() =
+        language?.uppercase() == "ENGLISH" && type.uppercase() == "STREAMING"
+}
+
+data class SearchPage(
+    val results: List<AnimeMedia>,
+    val hasNextPage: Boolean,
+    val total: Int?
+)
+
+// ---------------------------------------------------------------------------
+// AniList GraphQL Client — direct calls to https://graphql.anilist.co
+// Queries mirror those in IsThisDubbed.tsx on the site.
+// ---------------------------------------------------------------------------
+
+object AniListClient {
+    private const val ENDPOINT = "https://graphql.anilist.co"
+
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .build()
+
+    private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+    // -----------------------------------------------------------------------
+    // Core request helper
+    // -----------------------------------------------------------------------
+    private suspend fun query(
+        gql: String,
+        variables: Map<String, Any?> = emptyMap(),
+        token: String? = null
+    ): JSONObject = withContext(Dispatchers.IO) {
+        val body = JSONObject().apply {
+            put("query", gql)
+            put("variables", JSONObject(variables))
+        }.toString().toRequestBody(JSON_MEDIA_TYPE)
+
+        val reqBuilder = Request.Builder()
+            .url(ENDPOINT)
+            .post(body)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+        if (!token.isNullOrBlank()) reqBuilder.header("Authorization", "Bearer $token")
+
+        val resp = client.newCall(reqBuilder.build()).execute()
+        val json = JSONObject(resp.body?.string() ?: "{}")
+        if (json.has("errors")) {
+            val msg = json.getJSONArray("errors").getJSONObject(0).optString("message", "AniList error")
+            throw Exception(msg)
+        }
+        json.getJSONObject("data")
+    }
+
+    // -----------------------------------------------------------------------
+    // Mappers
+    // -----------------------------------------------------------------------
+    private fun mapMedia(obj: JSONObject, listEntry: JSONObject? = null): AnimeMedia {
+        val title = obj.optJSONObject("title")
+        val cover = obj.optJSONObject("coverImage")
+        val nextAir = obj.optJSONObject("nextAiringEpisode")
+        val le = listEntry ?: obj.optJSONObject("mediaListEntry")
+
+        val links = mutableListOf<ExternalLink>()
+        val rawLinks = obj.optJSONArray("externalLinks")
+        if (rawLinks != null) for (i in 0 until rawLinks.length()) {
+            val l = rawLinks.getJSONObject(i)
+            links += ExternalLink(
+                id = l.optInt("id"),
+                url = l.optString("url"),
+                site = l.optString("site"),
+                type = l.optString("type"),
+                language = l.optString("language").ifEmpty { null }
+            )
+        }
+
+        val genres = mutableListOf<String>()
+        val rawGenres = obj.optJSONArray("genres")
+        if (rawGenres != null) for (i in 0 until rawGenres.length()) genres += rawGenres.getString(i)
+
+        val titlePref = title?.optString("userPreferred").orEmpty()
+            .ifEmpty { title?.optString("english").orEmpty() }
+            .ifEmpty { title?.optString("romaji").orEmpty() }
+
+        return AnimeMedia(
+            mediaId       = obj.getInt("id"),
+            title         = titlePref.ifEmpty { "Untitled" },
+            titleEnglish  = title?.optString("english")?.ifEmpty { null },
+            titleRomaji   = title?.optString("romaji")?.ifEmpty { null },
+            coverUrl      = cover?.optString("large")?.ifEmpty { null },
+            bannerUrl     = obj.optString("bannerImage").ifEmpty { null },
+            accentColor   = cover?.optString("color")?.ifEmpty { null },
+            episodes      = obj.optInt("episodes").takeIf { it > 0 },
+            format        = obj.optString("format").ifEmpty { null },
+            status        = obj.optString("status").ifEmpty { null },
+            season        = obj.optString("season").ifEmpty { null },
+            seasonYear    = obj.optInt("seasonYear").takeIf { it > 0 },
+            averageScore  = obj.optInt("averageScore").takeIf { it > 0 },
+            genres        = genres,
+            description   = obj.optString("description").ifEmpty { null },
+            siteUrl       = obj.optString("siteUrl").ifEmpty { null },
+            isAdult       = obj.optBoolean("isAdult"),
+            nextEpisode   = nextAir?.optInt("episode")?.takeIf { it > 0 },
+            nextEpisodeAt = nextAir?.optLong("airingAt")?.takeIf { it > 0 },
+            externalLinks = links,
+            listEntryId   = le?.optInt("id")?.takeIf { it > 0 },
+            listStatus    = le?.optString("status")?.ifEmpty { null },
+            progress      = le?.optInt("progress") ?: 0,
+            score         = le?.optDouble("score")?.takeIf { it > 0 },
+            notes         = le?.optString("notes")?.ifEmpty { null },
+            isPrivate     = le?.optBoolean("private") ?: false,
+            updatedAt     = le?.optLong("updatedAt")?.takeIf { it > 0 }
+        )
+    }
+
+    private fun mediaFields() = """
+        id episodes format status season seasonYear meanScore averageScore isAdult siteUrl bannerImage
+        title { userPreferred english romaji native }
+        coverImage { large color }
+        nextAiringEpisode { episode airingAt }
+        externalLinks { id url site type language }
+        genres
+        description(asHtml: false)
+        mediaListEntry { id status score progress private notes updatedAt }
+    """.trimIndent()
+
+    // -----------------------------------------------------------------------
+    // Viewer (auth check)
+    // -----------------------------------------------------------------------
+    suspend fun getViewer(token: String): AniListUser {
+        val data = query("""
+            query { Viewer { id name avatar { medium } } }
+        """, token = token)
+        val v = data.getJSONObject("Viewer")
+        return AniListUser(
+            id        = v.getInt("id"),
+            name      = v.getString("name"),
+            avatarUrl = v.optJSONObject("avatar")?.optString("medium")?.ifEmpty { null }
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // User list (currently watching, planning, etc.)
+    // -----------------------------------------------------------------------
+    suspend fun getUserList(username: String, token: String? = null): Map<String, List<AnimeMedia>> {
+        val data = query("""
+            query (${'$'}name: String) {
+              MediaListCollection(userName: ${'$'}name, type: ANIME) {
+                lists {
+                  name status
+                  entries {
+                    id status score progress private notes updatedAt
+                    media { ${mediaFields()} }
+                  }
+                }
+              }
+            }
+        """, mapOf("name" to username), token)
+
+        val result = mutableMapOf<String, MutableList<AnimeMedia>>()
+        val lists = data.getJSONObject("MediaListCollection").getJSONArray("lists")
+        for (i in 0 until lists.length()) {
+            val list = lists.getJSONObject(i)
+            val listName = list.getString("name")
+            val entries = list.getJSONArray("entries")
+            val bucket = result.getOrPut(listName) { mutableListOf() }
+            for (j in 0 until entries.length()) {
+                val entry = entries.getJSONObject(j)
+                val media = entry.optJSONObject("media") ?: continue
+                bucket += mapMedia(media, entry)
+            }
+        }
+        return result
+    }
+
+    // -----------------------------------------------------------------------
+    // Trending / Dashboard
+    // -----------------------------------------------------------------------
+    suspend fun getTrending(perPage: Int = 20): List<AnimeMedia> {
+        val data = query("""
+            query {
+              Page(page: 1, perPage: $perPage) {
+                media(type: ANIME, sort: [TRENDING_DESC, POPULARITY_DESC]) { ${mediaFields()} }
+              }
+            }
+        """)
+        return parsePageMedia(data)
+    }
+
+    // -----------------------------------------------------------------------
+    // Search
+    // -----------------------------------------------------------------------
+    suspend fun search(q: String, page: Int = 1, perPage: Int = 20, token: String? = null): SearchPage {
+        val data = query("""
+            query (${'$'}search: String, ${'$'}page: Int, ${'$'}perPage: Int) {
+              Page(page: ${'$'}page, perPage: ${'$'}perPage) {
+                pageInfo { hasNextPage total }
+                media(search: ${'$'}search, type: ANIME) { ${mediaFields()} }
+              }
+            }
+        """, mapOf("search" to q, "page" to page, "perPage" to perPage), token)
+        val page0 = data.getJSONObject("Page")
+        val info = page0.optJSONObject("pageInfo")
+        return SearchPage(
+            results     = parseMediaArray(page0.optJSONArray("media")),
+            hasNextPage = info?.optBoolean("hasNextPage") ?: false,
+            total       = info?.optInt("total")?.takeIf { it > 0 }
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Category browse (genre / tag)
+    // -----------------------------------------------------------------------
+    suspend fun browseCategory(genre: String? = null, tag: String? = null, perPage: Int = 40): List<AnimeMedia> {
+        val vars = mutableMapOf<String, Any?>()
+        val genreFilter = if (genre != null) ", genre: \$genre" else ""
+        val tagFilter   = if (tag != null)   ", tag_in: [\$tag]" else ""
+        if (genre != null) vars["genre"] = genre
+        if (tag != null)   vars["tag"]   = tag
+        val data = query("""
+            query (${'$'}genre: String, ${'$'}tag: String) {
+              Page(page: 1, perPage: $perPage) {
+                media(type: ANIME, sort: [TRENDING_DESC, POPULARITY_DESC]$genreFilter$tagFilter) { ${mediaFields()} }
+              }
+            }
+        """, vars)
+        return parsePageMedia(data)
+    }
+
+    // -----------------------------------------------------------------------
+    // Recommendations from a set of media IDs
+    // -----------------------------------------------------------------------
+    suspend fun getRecommendations(mediaIds: List<Int>): List<AnimeMedia> {
+        if (mediaIds.isEmpty()) return emptyList()
+        val ids = mediaIds.take(20) // limit to avoid oversized query
+        val data = query("""
+            query (${'$'}ids: [Int]) {
+              Page(page: 1, perPage: 50) {
+                media(id_in: ${'$'}ids, type: ANIME) {
+                  id
+                  recommendations(perPage: 10, sort: [RATING_DESC]) {
+                    nodes {
+                      mediaRecommendation { ${mediaFields()} }
+                    }
+                  }
+                }
+              }
+            }
+        """, mapOf("ids" to ids))
+        val seen = mutableSetOf<Int>()
+        val results = mutableListOf<AnimeMedia>()
+        val media = data.getJSONObject("Page").optJSONArray("media") ?: return emptyList()
+        for (i in 0 until media.length()) {
+            val recs = media.getJSONObject(i).optJSONObject("recommendations")?.optJSONArray("nodes") ?: continue
+            for (j in 0 until recs.length()) {
+                val rec = recs.getJSONObject(j).optJSONObject("mediaRecommendation") ?: continue
+                val id = rec.optInt("id")
+                if (id > 0 && seen.add(id)) results += mapMedia(rec)
+            }
+        }
+        return results
+    }
+
+    // -----------------------------------------------------------------------
+    // Save / Delete list entry (requires token)
+    // -----------------------------------------------------------------------
+    suspend fun saveEntry(
+        mediaId: Int, status: String, progress: Int?,
+        score: Double?, notes: String?, isPrivate: Boolean,
+        token: String
+    ): AnimeMedia {
+        val data = query("""
+            mutation (${'$'}mediaId: Int!, ${'$'}status: MediaListStatus, ${'$'}score: Float,
+                      ${'$'}progress: Int, ${'$'}private: Boolean, ${'$'}notes: String) {
+              SaveMediaListEntry(mediaId: ${'$'}mediaId, status: ${'$'}status, score: ${'$'}score,
+                                 progress: ${'$'}progress, private: ${'$'}private, notes: ${'$'}notes) {
+                id status score progress private notes updatedAt
+                media { ${mediaFields()} }
+              }
+            }
+        """, mapOf(
+            "mediaId" to mediaId, "status" to status, "score" to score,
+            "progress" to progress, "private" to isPrivate, "notes" to notes
+        ), token)
+        val entry = data.getJSONObject("SaveMediaListEntry")
+        return mapMedia(entry.getJSONObject("media"), entry)
+    }
+
+    suspend fun deleteEntry(entryId: Int, token: String): Boolean {
+        val data = query("""
+            mutation (${'$'}id: Int!) { DeleteMediaListEntry(id: ${'$'}id) { deleted } }
+        """, mapOf("id" to entryId), token)
+        return data.getJSONObject("DeleteMediaListEntry").optBoolean("deleted")
+    }
+
+    // -----------------------------------------------------------------------
+    // Private parse helpers
+    // -----------------------------------------------------------------------
+    private fun parsePageMedia(data: JSONObject): List<AnimeMedia> =
+        parseMediaArray(data.getJSONObject("Page").optJSONArray("media"))
+
+    private fun parseMediaArray(arr: org.json.JSONArray?): List<AnimeMedia> {
+        if (arr == null) return emptyList()
+        return (0 until arr.length()).mapNotNull { runCatching { mapMedia(arr.getJSONObject(it)) }.getOrNull() }
+    }
+}

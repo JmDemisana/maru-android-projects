@@ -19,7 +19,8 @@
 
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet("lastnotif","marucast","tup-ers")]
+    [ValidateSet("lastnotif","marucast","tup-ers","manime")]
+
     [string]$App,
 
     [string]$Version = "",

@@ -1,0 +1,11 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MAnime</string>
+    <string name="notif_channel_player">Now Playing</string>
+    <string name="notif_channel_player_desc">Anime playback controls</string>
+    <string name="notif_channel_torrent">Torrent Stream</string>
+    <string name="notif_channel_torrent_desc">Background torrent streaming service</string>
+    <string name="notif_player_title">MAnime Player</string>
+    <string name="notif_torrent_title">MAnime Torrent</string>
+    <string name="notif_torrent_text">Streaming torrent content…</string>
+</resources>
