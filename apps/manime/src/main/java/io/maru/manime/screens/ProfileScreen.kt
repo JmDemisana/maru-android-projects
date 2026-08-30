@@ -15,7 +15,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -32,9 +31,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import io.maru.manime.*
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 @Composable
 fun ProfileScreen(
@@ -50,7 +46,6 @@ fun ProfileScreen(
     onMediaUpdated: (AnimeMedia) -> Unit = {}
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
     val availableCategories = remember(allLists) {
         if (allLists.isEmpty()) {
@@ -103,209 +98,110 @@ fun ProfileScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 14.dp),
-        contentPadding = PaddingValues(top = 10.dp, bottom = 36.dp),
+        contentPadding = PaddingValues(top = 4.dp, bottom = 36.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // User Profile Header Card (Full Span)
-        item(span = { GridItemSpan(2) }, key = "user_header") {
-            GlassCard(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    if (user?.avatarUrl != null) {
-                        AsyncImage(
-                            model = user.avatarUrl,
-                            contentDescription = user.name,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .size(50.dp)
-                                .clip(CircleShape)
-                        )
+        // Library Categories Scrollable Filter Bar (Full Span)
+        item(span = { GridItemSpan(2) }, key = "categories_bar") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                availableCategories.forEach { cat ->
+                    val isSelected = selectedCategory.equals(cat, ignoreCase = true)
+                    val count = if (cat.equals("Completed", ignoreCase = true) && !allLists.containsKey("Completed")) {
+                        completedCount
+                    } else if (cat.equals("Watching", ignoreCase = true) && !allLists.containsKey("Watching")) {
+                        watchingCount
+                    } else if (cat.equals("Planning", ignoreCase = true) && !allLists.containsKey("Planning")) {
+                        planningCount
                     } else {
-                        Icon(
-                            Icons.Default.AccountCircle,
-                            contentDescription = null,
-                            tint = if (isLoggedIn) MaruAccentPurple else MaruAccentPink,
-                            modifier = Modifier.size(50.dp)
-                        )
+                        allLists[cat]?.size ?: allLists.entries.find { it.key.equals(cat, ignoreCase = true) }?.value?.size ?: 0
                     }
 
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = user?.name ?: if (isLoggedIn) "AniList Connected" else "Guest User",
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaruTextStrong
-                        )
-                        Text(
-                            text = if (isLoggedIn) "Synced with AniList" else "Sign in to sync your library",
-                            fontSize = 11.5.sp,
-                            color = if (isLoggedIn) MaruAccentGreen else MaruTextMuted
-                        )
-                    }
-
-                    if (isLoggedIn) {
-                        IconButton(onClick = onLogoutClick) {
-                            Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Log Out", tint = MaruDanger)
-                        }
-                    } else {
-                        GlassButton(
-                            onClick = onLoginClick,
-                            modifier = Modifier.width(90.dp),
-                            background = MaruAccentPink.copy(alpha = 0.2f),
-                            borderColor = MaruAccentPink
+                    Surface(
+                        onClick = { selectedCategory = cat },
+                        shape = MaruPillShape,
+                        color = if (isSelected) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
+                        border = BorderStroke(1.dp, if (isSelected) MaruAccentPink else MaruGlassBorderSoft)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Text("LOGIN", color = MaruTextStrong, fontWeight = FontWeight.Bold, fontSize = 11.5.sp)
-                        }
-                    }
-                }
-            }
-        }
-
-        // Stats Row (Full Span)
-        if (isLoggedIn) {
-            item(span = { GridItemSpan(2) }, key = "stats") {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    StatBox(
-                        title = "WATCHING",
-                        value = "$watchingCount",
-                        color = MaruAccentBlue,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable {
-                                val target = availableCategories.find { it.contains("Watch", ignoreCase = true) || it.equals("Current", ignoreCase = true) } ?: "Watching"
-                                selectedCategory = target
-                            }
-                    )
-                    StatBox(
-                        title = "PLANNING",
-                        value = "$planningCount",
-                        color = MaruAccentPurple,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable {
-                                val target = availableCategories.find { it.contains("Plan", ignoreCase = true) } ?: "Planning"
-                                selectedCategory = target
-                            }
-                    )
-                    StatBox(
-                        title = "COMPLETED",
-                        value = "$completedCount",
-                        color = MaruAccentGreen,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable {
-                                val target = availableCategories.find { it.contains("Complet", ignoreCase = true) } ?: "Completed"
-                                selectedCategory = target
-                            }
-                    )
-                }
-            }
-
-            // Library Categories Scrollable Filter Bar (Full Span)
-            item(span = { GridItemSpan(2) }, key = "categories_bar") {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    availableCategories.forEach { cat ->
-                        val isSelected = selectedCategory.equals(cat, ignoreCase = true)
-                        val count = if (cat.equals("Completed", ignoreCase = true) && !allLists.containsKey("Completed")) {
-                            completedCount
-                        } else {
-                            allLists[cat]?.size ?: allLists.entries.find { it.key.equals(cat, ignoreCase = true) }?.value?.size ?: 0
-                        }
-
-                        Surface(
-                            onClick = { selectedCategory = cat },
-                            shape = MaruPillShape,
-                            color = if (isSelected) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
-                            border = BorderStroke(1.dp, if (isSelected) MaruAccentPink else MaruGlassBorderSoft)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Text(
-                                    text = cat.uppercase(),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSelected) MaruAccentPink else MaruTextMuted
-                                )
-                                if (count > 0) {
-                                    Surface(
-                                        shape = CircleShape,
-                                        color = if (isSelected) MaruAccentPink.copy(alpha = 0.4f) else Color(0x33FFFFFF)
-                                    ) {
-                                        Text(
-                                            text = "$count",
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaruTextStrong,
-                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-                                        )
-                                    }
+                            Text(
+                                text = cat.uppercase(),
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isSelected) MaruAccentPink else MaruTextMuted
+                            )
+                            if (count > 0) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = if (isSelected) MaruAccentPink.copy(alpha = 0.4f) else Color(0x33FFFFFF)
+                                ) {
+                                    Text(
+                                        text = "$count",
+                                        fontSize = 9.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaruTextStrong,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
                                 }
                             }
                         }
                     }
                 }
             }
+        }
 
-            // Category Title Header with Item Count (Full Span)
-            item(span = { GridItemSpan(2) }, key = "section_header") {
-                Row(
+        // Category Title Header with Item Count (Full Span)
+        item(span = { GridItemSpan(2) }, key = "section_header") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = selectedCategory,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = MaruTextStrong
+                )
+                Text(
+                    text = "(${currentList.size})",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaruTextMuted
+                )
+            }
+        }
+
+        if (currentList.isEmpty()) {
+            item(span = { GridItemSpan(2) }, key = "empty_list") {
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 4.dp, bottom = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        .padding(vertical = 48.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = selectedCategory,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaruTextStrong
-                    )
-                    Text(
-                        text = "(${currentList.size})",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = MaruTextMuted
-                    )
+                    Text("No anime in $selectedCategory.", color = MaruTextMuted, fontSize = 13.sp)
                 }
             }
-
-            if (currentList.isEmpty()) {
-                item(span = { GridItemSpan(2) }, key = "empty_list") {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 48.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("No anime in $selectedCategory.", color = MaruTextMuted, fontSize = 13.sp)
-                    }
-                }
-            } else {
-                // 2-Column Poster Cards exactly matching the web reference
-                items(currentList, key = { "media_${it.mediaId}" }) { itemMedia ->
-                    PosterCard(
-                        media = itemMedia,
-                        onClick = { onAnimeClick(itemMedia) }
-                    )
-                }
+        } else {
+            // 2-Column Poster Cards exactly matching the web reference
+            items(currentList, key = { "media_${it.mediaId}" }) { itemMedia ->
+                PosterCard(
+                    media = itemMedia,
+                    onClick = { onAnimeClick(itemMedia) }
+                )
             }
         }
     }
@@ -343,8 +239,8 @@ fun PosterCard(
                             listOf(
                                 Color.Transparent,
                                 Color.Transparent,
-                                Color(0x88050507),
-                                Color(0xEE050507)
+                                Color(0x99050507),
+                                Color(0xF5050507)
                             )
                         )
                     )
@@ -426,7 +322,7 @@ fun PosterCard(
                     )
                     if (media.seasonYear != null) {
                         Text(
-                            text = "â€¢ ${media.season ?: ""} ${media.seasonYear}",
+                            text = "${media.season ?: ""} ${media.seasonYear}".trim(),
                             fontSize = 10.sp,
                             color = MaruTextMuted,
                             maxLines = 1,
@@ -435,37 +331,6 @@ fun PosterCard(
                     }
                 }
             }
-        }
-    }
-}
-
-@Composable
-fun StatBox(
-    title: String,
-    value: String,
-    color: Color,
-    modifier: Modifier = Modifier
-) {
-    GlassCard(
-        modifier = modifier
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(text = value, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = color)
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = title,
-                style = MaterialTheme.typography.labelSmall.copy(
-                    fontSize = 9.5.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.5.sp
-                ),
-                color = MaruTextMuted
-            )
         }
     }
 }

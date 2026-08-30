@@ -1,11 +1,14 @@
-package io.maru.manime.screens
+﻿package io.maru.manime.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -51,159 +54,167 @@ fun RecommendationsScreen(
         }
     }
 
-    Column(
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(2),
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp)
+            .padding(horizontal = 14.dp),
+        contentPadding = PaddingValues(top = 8.dp, bottom = 36.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Spacer(modifier = Modifier.height(8.dp))
-
         // Not Logged In Banner
         if (!isLoggedIn) {
-            GlassCard(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+            item(span = { GridItemSpan(2) }, key = "login_banner") {
+                GlassCard(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "GET PERSONALIZED SUGGESTIONS",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.5.sp,
+                                    letterSpacing = 0.6.sp
+                                ),
+                                color = MaruAccentPink
+                            )
+                            Text(
+                                text = "Log in with AniList to get anime suggestions tailored to your watching history.",
+                                color = MaruTextMuted,
+                                fontSize = 11.5.sp
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        Surface(
+                            onClick = onLoginClick,
+                            shape = MaruPillShape,
+                            color = MaruAccentPink
+                        ) {
+                            Text(
+                                text = "LOGIN",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.sp
+                                ),
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Section Header & Dub Filter
+        item(span = { GridItemSpan(2) }, key = "header_row") {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                GlassSectionHeader(
+                    title = if (isLoggedIn && selectedCategory == "For You") "TASTE PROFILE ($username)" else "TASTE & GENRE ENGINE",
+                    icon = Icons.Default.AutoAwesome,
+                    color = MaruAccentBlue
+                )
+
+                Surface(
+                    onClick = { dubbedOnlyFilter = !dubbedOnlyFilter },
+                    shape = MaruPillShape,
+                    color = if (dubbedOnlyFilter) Color(0x334ADE80) else MaruGlassSubtleBg,
+                    border = BorderStroke(1.dp, if (dubbedOnlyFilter) MaruAccentGreen else MaruGlassBorderSoft)
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.PlayCircle,
+                            contentDescription = null,
+                            tint = if (dubbedOnlyFilter) MaruAccentGreen else MaruTextMuted,
+                            modifier = Modifier.size(13.dp)
+                        )
                         Text(
-                            text = "GET PERSONALIZED SUGGESTIONS",
+                            text = if (dubbedOnlyFilter) "DUBBED ONLY" else "IS THIS DUBBED?",
                             style = MaterialTheme.typography.labelSmall.copy(
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 10.5.sp,
-                                letterSpacing = 0.6.sp
+                                fontSize = 9.5.sp
                             ),
-                            color = MaruAccentPink
-                        )
-                        Text(
-                            text = "Log in with AniList to get anime suggestions tailored to your watching history & score affinity.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaruTextMuted,
-                            fontSize = 11.5.sp
+                            color = if (dubbedOnlyFilter) MaruAccentGreen else MaruTextMuted
                         )
                     }
+                }
+            }
+        }
 
-                    Spacer(modifier = Modifier.width(8.dp))
-
+        // Category Filter Pills Bar
+        item(span = { GridItemSpan(2) }, key = "categories_bar") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                categories.forEach { cat ->
+                    val isSelected = cat == selectedCategory
                     Surface(
-                        onClick = onLoginClick,
+                        onClick = { onSelectCategory(cat) },
                         shape = MaruPillShape,
-                        color = MaruAccentPink
+                        color = if (isSelected) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
+                        border = BorderStroke(1.dp, if (isSelected) MaruAccentPink else MaruGlassBorderSoft)
                     ) {
                         Text(
-                            text = "LOGIN",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 10.sp
-                            ),
-                            color = Color.White,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                            text = cat.uppercase(),
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isSelected) MaruAccentPink else MaruTextMuted,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
                         )
                     }
                 }
             }
-            Spacer(modifier = Modifier.height(8.dp))
         }
-
-        // IsThisDubbed Applet Filter Bar
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            GlassSectionHeader(
-                title = if (isLoggedIn && selectedCategory == "For You") "TASTE PROFILE ($username)" else "TASTE & GENRE ENGINE",
-                icon = Icons.Default.AutoAwesome,
-                color = MaruAccentBlue
-            )
-
-            // IsThisDubbed Toggle Pill
-            Surface(
-                onClick = { dubbedOnlyFilter = !dubbedOnlyFilter },
-                shape = MaruPillShape,
-                color = if (dubbedOnlyFilter) Color(0x334ADE80) else MaruGlassSubtleBg,
-                border = BorderStroke(1.dp, if (dubbedOnlyFilter) MaruAccentGreen else MaruGlassBorderSoft)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        Icons.Default.PlayCircle,
-                        contentDescription = null,
-                        tint = if (dubbedOnlyFilter) MaruAccentGreen else MaruTextMuted,
-                        modifier = Modifier.size(13.dp)
-                    )
-                    Text(
-                        text = if (dubbedOnlyFilter) "DUBBED ONLY" else "IS THIS DUBBED?",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 9.5.sp
-                        ),
-                        color = if (dubbedOnlyFilter) MaruAccentGreen else MaruTextMuted
-                    )
-                }
-            }
-        }
-
-        // Category horizontal scroll pills in MAudio style
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            categories.forEach { cat ->
-                val isSelected = cat == selectedCategory
-                Surface(
-                    onClick = { onSelectCategory(cat) },
-                    shape = MaruPillShape,
-                    color = if (isSelected) Color(0x33E85D9F) else MaruGlassSubtleBg,
-                    border = BorderStroke(1.dp, if (isSelected) MaruAccentPink else MaruGlassBorderSoft)
-                ) {
-                    Text(
-                        text = cat.uppercase(),
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 10.sp,
-                            letterSpacing = 0.6.sp
-                        ),
-                        color = if (isSelected) MaruAccentPink else MaruTextMuted,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(4.dp))
 
         if (isLoading) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = MaruAccentPink)
+            item(span = { GridItemSpan(2) }, key = "loading") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 64.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(color = MaruAccentPink)
+                }
             }
         } else if (displayedRecs.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    text = if (dubbedOnlyFilter) "No dubbed anime found in this category." else "No recommendations found.",
-                    color = MaruTextMuted,
-                    fontSize = 13.sp
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = PaddingValues(bottom = 24.dp)
-            ) {
-                items(displayedRecs, key = { "rec_${it.mediaId}" }) { media ->
-                    AnimeListItemCard(
-                        media = media,
-                        onClick = { onAnimeClick(media) }
+            item(span = { GridItemSpan(2) }, key = "empty") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 64.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (dubbedOnlyFilter) "No dubbed anime found in this category." else "No recommendations found.",
+                        color = MaruTextMuted,
+                        fontSize = 13.sp
                     )
                 }
+            }
+        } else {
+            items(displayedRecs, key = { "rec_${it.mediaId}" }) { media ->
+                PosterCard(
+                    media = media,
+                    onClick = { onAnimeClick(media) }
+                )
             }
         }
     }

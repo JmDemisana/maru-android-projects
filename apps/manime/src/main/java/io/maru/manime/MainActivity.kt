@@ -1,4 +1,4 @@
-﻿package io.maru.manime
+package io.maru.manime
 
 import android.content.Intent
 import android.net.Uri
@@ -27,6 +27,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import coil.compose.AsyncImage
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -353,21 +355,28 @@ fun MainAppScreen(prefs: MAnimePrefs) {
             isRecLoading = true
             try {
                 val results = withContext(Dispatchers.IO) {
-                    if (cat == "For You") {
-                        if (anilistToken.isNotBlank() && (watchingList.isNotEmpty() || completedCount > 0)) {
-                            val userIds = (watchingList.map { it.mediaId } + listOfNotNull(watchingList.firstOrNull()?.mediaId)).distinct().take(15)
-                            val recs = AniListClient.getRecommendations(userIds)
-                            if (recs.isNotEmpty()) recs else AniListClient.getTrending(30)
-                        } else {
-                            // Curated taste profile (CGDCT, Slice of life, Music)
-                            AniListClient.browseCategory(genre = "Slice of Life", perPage = 30)
+                    when (cat) {
+                        "For You" -> {
+                            val allIds = (watchingList.map { it.mediaId } + allUserLists.values.flatten().map { it.mediaId }).distinct()
+                            if (allIds.isNotEmpty()) {
+                                val recs = AniListClient.getRecommendations(allIds.take(15))
+                                if (recs.isNotEmpty()) recs else AniListClient.getTrending(30)
+                            } else {
+                                AniListClient.getTrending(30)
+                            }
                         }
-                    } else {
-                        AniListClient.browseCategory(genre = cat, perPage = 30)
+                        "CGDCT" -> AniListClient.browseCategory(genre = "Slice of Life", tag = "Cute Girls Doing Cute Things", perPage = 30)
+                        "Idol" -> AniListClient.browseCategory(genre = "Music", tag = "Idol", perPage = 30)
+                        else -> AniListClient.browseCategory(genre = cat, perPage = 30)
                     }
                 }
                 recommendations = results
-            } catch (_: Exception) {} finally {
+            } catch (_: Exception) {
+                try {
+                    val fallback = withContext(Dispatchers.IO) { AniListClient.getTrending(30) }
+                    recommendations = fallback
+                } catch (_: Exception) {}
+            } finally {
                 isRecLoading = false
             }
         }
@@ -376,6 +385,12 @@ fun MainAppScreen(prefs: MAnimePrefs) {
     LaunchedEffect(anilistToken) {
         refreshDashboard()
         loadCategoryRecs("For You")
+    }
+
+    LaunchedEffect(selectedScreen) {
+        if (selectedScreen == NavigationScreen.RECOMMENDATIONS && recommendations.isEmpty()) {
+            loadCategoryRecs(selectedRecCategory)
+        }
     }
 
     // Back button handling
@@ -458,15 +473,60 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                             }
                         },
                         actions = {
-                            IconButton(onClick = { selectedScreen = NavigationScreen.SEARCH }) {
-                                Icon(Icons.Default.Search, contentDescription = "Search", tint = MaruTextMuted)
-                            }
-                            IconButton(onClick = { selectedScreen = NavigationScreen.SETTINGS }) {
-                                Icon(
-                                    Icons.Default.Settings,
-                                    contentDescription = "Settings",
-                                    tint = if (selectedScreen == NavigationScreen.SETTINGS) MaruAccentPink else MaruTextMuted
-                                )
+                            if (anilistToken.isNotBlank() && (effectiveUser != null || anilistUsername.isNotBlank())) {
+                                Surface(
+                                    onClick = { selectedScreen = NavigationScreen.SETTINGS },
+                                    shape = MaruPillShape,
+                                    color = MaruGlassSubtleBg,
+                                    border = BorderStroke(1.dp, MaruGlassBorderSoft),
+                                    modifier = Modifier.padding(end = 12.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        if (effectiveUser?.avatarUrl != null) {
+                                            AsyncImage(
+                                                model = effectiveUser.avatarUrl,
+                                                contentDescription = effectiveUser.name,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier
+                                                    .size(24.dp)
+                                                    .clip(CircleShape)
+                                            )
+                                        } else {
+                                            Icon(
+                                                Icons.Default.AccountCircle,
+                                                contentDescription = null,
+                                                tint = MaruAccentPink,
+                                                modifier = Modifier.size(22.dp)
+                                            )
+                                        }
+                                        Text(
+                                            text = effectiveUser?.name ?: anilistUsername,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaruTextStrong,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            } else {
+                                GlassButton(
+                                    onClick = {
+                                        val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=49762&response_type=token"
+                                        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
+                                        context.startActivity(browserIntent)
+                                    },
+                                    modifier = Modifier
+                                        .padding(end = 12.dp)
+                                        .height(32.dp),
+                                    background = MaruAccentPink.copy(alpha = 0.2f),
+                                    borderColor = MaruAccentPink
+                                ) {
+                                    Text("LOGIN", color = MaruTextStrong, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                }
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(
@@ -609,10 +669,29 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                                 }
                                 NavigationScreen.SETTINGS -> {
                                     SettingsScreen(
+                                        user = effectiveUser,
+                                        anilistUsername = anilistUsername,
+                                        isLoggedIn = anilistToken.isNotBlank(),
                                         reportProgress = reportProgress,
                                         onToggleReportProgress = { scope.launch { prefs.setReportProgress(it) } },
                                         rememberPosition = rememberPosition,
-                                        onToggleRememberPosition = { scope.launch { prefs.setRememberPosition(it) } }
+                                        onToggleRememberPosition = { scope.launch { prefs.setRememberPosition(it) } },
+                                        onLoginClick = {
+                                            val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=49762&response_type=token"
+                                            val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
+                                            context.startActivity(browserIntent)
+                                        },
+                                        onLogoutClick = {
+                                            scope.launch {
+                                                prefs.setAnilistToken("")
+                                                prefs.setAnilistUsername("")
+                                                prefs.setAnilistAvatar("")
+                                                userProfile = null
+                                                watchingList = emptyList()
+                                                allUserLists = emptyMap()
+                                                Toast.makeText(context, "Logged out of AniList", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
                                     )
                                 }
                             }
@@ -994,6 +1073,8 @@ private fun DrawerItemRow(
         }
     }
 }
+
+
 
 
 
