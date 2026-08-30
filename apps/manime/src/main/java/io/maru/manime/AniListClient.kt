@@ -52,15 +52,14 @@ data class ExternalLink(
     val type: String,
     val language: String?
 ) {
-    val isEnglishDub: Boolean get() =
-        language?.equals("ENGLISH", ignoreCase = true) == true ||
-        site.contains("Dub", ignoreCase = true) ||
-        url.contains("dub", ignoreCase = true) ||
-        site.contains("Funimation", ignoreCase = true) ||
-        site.contains("Crunchyroll", ignoreCase = true) ||
-        site.contains("HIDIVE", ignoreCase = true) ||
-        site.contains("Netflix", ignoreCase = true) ||
-        site.contains("Hulu", ignoreCase = true)
+    val isEnglishDub: Boolean get() {
+        val isExplicitEnglishLang = language?.equals("ENGLISH", ignoreCase = true) == true
+        val isExplicitEnglishSite = site.contains("English", ignoreCase = true) && site.contains("Dub", ignoreCase = true)
+        val isExplicitEnglishUrl = (url.contains("english", ignoreCase = true) && url.contains("dub", ignoreCase = true)) ||
+                                   url.contains("/en-dub", ignoreCase = true) ||
+                                   url.contains("en_dub", ignoreCase = true)
+        return isExplicitEnglishLang || isExplicitEnglishSite || isExplicitEnglishUrl
+    }
 }
 
 data class VoiceActor(
@@ -87,19 +86,6 @@ data class StaffWorks(
     val image: String?,
     val language: String?,
     val works: List<AnimeMedia>
-)
-
-data class CharacterRole(
-    val characterName: String,
-    val characterImage: String?,
-    val voiceActor: VoiceActor?
-)
-
-data class DubDetails(
-    val isDubbed: Boolean,
-    val dubConfidence: String,
-    val englishCast: List<CharacterRole>,
-    val streamingPlatforms: List<String>
 )
 
 data class AniListActivity(
@@ -553,77 +539,6 @@ object AniListClient {
             replyCount = 0,
             likeCount = 0,
             createdAt = act.optLong("createdAt", System.currentTimeMillis() / 1000)
-        )
-    }
-
-    suspend fun getDubDetails(mediaId: Int): DubDetails {
-        val data = query("""
-            query (${'$'}id: Int) {
-              Media(id: ${'$'}id, type: ANIME) {
-                externalLinks { site type language }
-                characters(sort: [ROLE, RELEVANCE], perPage: 12) {
-                  edges {
-                    node { name { full } image { medium } }
-                    voiceActors(language: ENGLISH) { name { full } image { medium } }
-                  }
-                }
-              }
-            }
-        """, mapOf("id" to mediaId))
-
-        val media = data.getJSONObject("Media")
-        val linksArr = media.optJSONArray("externalLinks")
-        val platforms = mutableListOf<String>()
-        var isDubbed = false
-
-        if (linksArr != null) {
-            for (i in 0 until linksArr.length()) {
-                val l = linksArr.getJSONObject(i)
-                val lang = l.optString("language", "")
-                val site = l.optString("site", "")
-                val type = l.optString("type", "")
-                if (lang.equals("English", ignoreCase = true) && type.equals("STREAMING", ignoreCase = true)) {
-                    isDubbed = true
-                    if (site.isNotBlank() && site !in platforms) platforms += site
-                }
-            }
-        }
-
-        val cast = mutableListOf<CharacterRole>()
-        val charEdges = media.optJSONObject("characters")?.optJSONArray("edges")
-        if (charEdges != null) {
-            for (i in 0 until charEdges.length()) {
-                val edge = charEdges.getJSONObject(i)
-                val charNode = edge.optJSONObject("node") ?: continue
-                val charName = charNode.optJSONObject("name")?.optString("full", "Character") ?: "Character"
-                val charImg = charNode.optJSONObject("image")?.optString("medium")
-                val vaArr = edge.optJSONArray("voiceActors")
-                val vaNode = vaArr?.optJSONObject(0)
-                val va = if (vaNode != null) {
-                    VoiceActor(
-                        id = vaNode.optInt("id", 0),
-                        name = vaNode.optJSONObject("name")?.optString("full", "Voice Actor") ?: "Voice Actor",
-                        image = vaNode.optJSONObject("image")?.optString("medium"),
-                        language = "English"
-                    )
-                } else null
-
-                if (va != null) isDubbed = true
-
-                cast += CharacterRole(
-                    characterName  = charName,
-                    characterImage = charImg,
-                    voiceActor     = va
-                )
-            }
-        }
-
-        val confidence = if (isDubbed) "CONFIRMED" else "SUB_ONLY"
-        return DubDetails(
-            isDubbed           = isDubbed,
-            dubConfidence      = confidence,
-            englishCast        = cast,
-            streamingPlatforms = platforms
         )
     }
 
