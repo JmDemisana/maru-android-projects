@@ -85,14 +85,13 @@ enum class NavigationScreen(
     val group: NavigationGroup
 ) {
     // Recommendation Engine Group
-    DASHBOARD("Discovery", "Trending & Library Feed", Icons.Default.AutoAwesome, NavigationGroup.RECOMMENDATION_ENGINE),
-    SEARCH("Search", "Anime, Studios & Cast", Icons.Default.Search, NavigationGroup.RECOMMENDATION_ENGINE),
+    DASHBOARD("Discovery", "Trending & Community Feed", Icons.Default.AutoAwesome, NavigationGroup.RECOMMENDATION_ENGINE),
+    SEARCH("Search", "Anime, Genres & Cast", Icons.Default.Search, NavigationGroup.RECOMMENDATION_ENGINE),
     RECOMMENDATIONS("Recommendations", "Genre & Mood Browsing", Icons.Default.Stars, NavigationGroup.RECOMMENDATION_ENGINE),
 
     // Core Functionality Group
-    PROFILE("Profile", "AniList Stats & Sync", Icons.Default.Person, NavigationGroup.CORE_FUNCTIONALITY),
-    EXTENSIONS("Extensions", "Cloudstream & Stremio", Icons.Default.Extension, NavigationGroup.CORE_FUNCTIONALITY),
-    SETTINGS("Settings", "Playback & App Options", Icons.Default.Settings, NavigationGroup.CORE_FUNCTIONALITY)
+    PROFILE("My Library", "AniList Lists & Stats", Icons.Default.CollectionsBookmark, NavigationGroup.CORE_FUNCTIONALITY),
+    SETTINGS("Settings", "Theme & App Options", Icons.Default.Settings, NavigationGroup.CORE_FUNCTIONALITY)
 }
 
 class MainActivity : ComponentActivity() {
@@ -239,16 +238,24 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                 for (assetName in assetList) {
                     val destFile = File(pluginsDir, assetName)
                     try {
-                        if (destFile.exists()) destFile.setWritable(true)
+                        if (destFile.exists()) {
+                            destFile.setWritable(true)
+                            destFile.delete()
+                        }
                         context.assets.open("cloudstream_plugins/$assetName").use { input ->
                             FileOutputStream(destFile).use { output ->
                                 input.copyTo(output)
                             }
                         }
                         destFile.setReadOnly()
-                    } catch (_: Exception) {}
+                        android.util.Log.d("MAnime", "Unpacked asset plugin: $assetName (${destFile.length()} bytes)")
+                    } catch (e: Exception) {
+                        android.util.Log.e("MAnime", "Failed to unpack asset plugin $assetName", e)
+                    }
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                android.util.Log.e("MAnime", "Error in asset plugin unpacking", e)
+            }
         }
         refreshInstalledCloudstream()
     }
@@ -275,6 +282,9 @@ fun MainAppScreen(prefs: MAnimePrefs) {
     var activePlayerEpisode by remember { mutableIntStateOf(1) }
     var activePlayerMediaId by remember { mutableIntStateOf(0) }
 
+    // All user library lists
+    var allUserLists by remember { mutableStateOf<Map<String, List<AnimeMedia>>>(emptyMap()) }
+
     // Stream picker sheet
     var availableStreams by remember { mutableStateOf<List<StreamLink>>(emptyList()) }
     var isSearchingStreams by remember { mutableStateOf(false) }
@@ -300,9 +310,10 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                     userProfile = user
 
                     val userLists = withContext(Dispatchers.IO) { AniListClient.getUserList(user.name, anilistToken) }
-                    val current = userLists["Watching"] ?: userLists["Current"] ?: emptyList()
-                    val completed = userLists["Completed"] ?: emptyList()
-                    val planning = userLists["Planning"] ?: emptyList()
+                    allUserLists = userLists
+                    val current = userLists["Watching"] ?: userLists["Current"] ?: userLists["watching"] ?: emptyList()
+                    val completed = userLists["Completed"] ?: userLists["completed"] ?: emptyList()
+                    val planning = userLists["Planning"] ?: userLists["planning"] ?: emptyList()
 
                     watchingList = current
                     completedCount = completed.size
@@ -445,29 +456,13 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                 if (selectedAnimeDetail != null) {
                     AnimeDetailScreen(
                         media = selectedAnimeDetail!!,
+                        anilistToken = anilistToken,
                         onBack = { selectedAnimeDetail = null },
-                        onWatchEpisode = { epNum ->
-                            val currentDetail = selectedAnimeDetail ?: return@AnimeDetailScreen
-                            activePlayerTitle = currentDetail.title
-                            activePlayerEpisode = epNum
-                            activePlayerMediaId = currentDetail.mediaId
-                            availableStreams = emptyList()
-                            isSearchingStreams = true
-                            showQualityPicker = true
-
-                            scope.launch {
-                                try {
-                                    val finalStreams = extensionRouter.resolveStreamsForEpisode(
-                                        animeTitle = currentDetail.titleEnglish ?: currentDetail.titleRomaji ?: currentDetail.title,
-                                        episodeNum = epNum,
-                                        onStreamsUpdated = { updated ->
-                                            availableStreams = updated
-                                        }
-                                    )
-                                    availableStreams = finalStreams
-                                } finally {
-                                    isSearchingStreams = false
-                                }
+                        onMediaUpdated = { updated ->
+                            selectedAnimeDetail = updated
+                            watchingList = watchingList.map { if (it.mediaId == updated.mediaId) updated else it }
+                            allUserLists = allUserLists.mapValues { (_, list) ->
+                                list.map { if (it.mediaId == updated.mediaId) updated else it }
                             }
                         }
                     )
@@ -536,9 +531,11 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                             NavigationScreen.PROFILE -> {
                                 ProfileScreen(
                                     user = userProfile,
+                                    allLists = allUserLists,
                                     watchingCount = watchingList.size,
                                     completedCount = completedCount,
                                     planningCount = planningCount,
+                                    anilistToken = anilistToken,
                                     onLoginClick = {
                                         val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=49762&response_type=token"
                                         val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
@@ -550,78 +547,14 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                                             prefs.setAnilistUsername("")
                                             userProfile = null
                                             watchingList = emptyList()
-                                        }
-                                    }
-                                )
-                            }
-                            NavigationScreen.EXTENSIONS -> {
-                                ExtensionsScreen(
-                                    savedRepos = savedRepos,
-                                    installedCloudstream = installedCloudstream,
-                                    installedAniyomi = installedAniyomi,
-                                    onAddCloudstreamRepo = { repoInput ->
-                                        scope.launch {
-                                            isGlobalLoading = true
-                                            try {
-                                                Toast.makeText(context, "Fetching repository...", Toast.LENGTH_SHORT).show()
-                                                val repo = withContext(Dispatchers.IO) { csRepoClient.fetchRepo(repoInput) }
-                                                val currentRepos = savedRepos.toMutableList()
-                                                if (currentRepos.none { it.url == repo.url }) {
-                                                    currentRepos.add(repo)
-                                                    savedRepos = currentRepos
-                                                    prefs.setCloudstreamRepos(currentRepos.map { it.url }.toSet())
-                                                }
-                                                Toast.makeText(context, "Added ${repo.name} (${repo.plugins.size} extensions available)", Toast.LENGTH_SHORT).show()
-                                            } catch (e: Exception) {
-                                                Toast.makeText(context, "Failed to load repo: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
-                                            } finally {
-                                                isGlobalLoading = false
-                                            }
+                                            allUserLists = emptyMap()
                                         }
                                     },
-                                    onRemoveCloudstreamRepo = { repo ->
-                                        scope.launch {
-                                            val currentRepos = savedRepos.filter { it.url != repo.url }
-                                            savedRepos = currentRepos
-                                            prefs.setCloudstreamRepos(currentRepos.map { it.url }.toSet())
-                                            Toast.makeText(context, "Removed ${repo.name}", Toast.LENGTH_SHORT).show()
-                                        }
-                                    },
-                                    onInstallCloudstreamPlugin = { plugin ->
-                                        scope.launch {
-                                            isGlobalLoading = true
-                                            try {
-                                                Toast.makeText(context, "Installing ${plugin.name}...", Toast.LENGTH_SHORT).show()
-                                                withContext(Dispatchers.IO) { csRepoClient.downloadPlugin(plugin) }
-                                                refreshInstalledCloudstream()
-                                                Toast.makeText(context, "Installed ${plugin.name}!", Toast.LENGTH_SHORT).show()
-                                            } catch (e: Exception) {
-                                                Toast.makeText(context, "Install failed: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
-                                            } finally {
-                                                isGlobalLoading = false
-                                            }
-                                        }
-                                    },
-                                    onDeleteCloudstreamPlugin = { internalName ->
-                                        csRepoClient.deletePlugin(internalName)
-                                        refreshInstalledCloudstream()
-                                        Toast.makeText(context, "Uninstalled $internalName", Toast.LENGTH_SHORT).show()
-                                    },
-                                    stremioAddons = stremioAddons,
-                                    onAddStremioAddon = { addonUrl ->
-                                        scope.launch {
-                                            val current = stremioAddons.toMutableSet()
-                                            current.add(addonUrl)
-                                            prefs.setStremioAddons(current)
-                                            Toast.makeText(context, "Added Stremio Addon!", Toast.LENGTH_SHORT).show()
-                                        }
-                                    },
-                                    onRemoveStremioAddon = { addonUrl ->
-                                        scope.launch {
-                                            val current = stremioAddons.toMutableSet()
-                                            current.remove(addonUrl)
-                                            prefs.setStremioAddons(current)
-                                            Toast.makeText(context, "Removed Addon", Toast.LENGTH_SHORT).show()
+                                    onAnimeClick = { selectedAnimeDetail = it },
+                                    onMediaUpdated = { updated ->
+                                        watchingList = watchingList.map { if (it.mediaId == updated.mediaId) updated else it }
+                                        allUserLists = allUserLists.mapValues { (_, list) ->
+                                            list.map { if (it.mediaId == updated.mediaId) updated else it }
                                         }
                                     }
                                 )
@@ -1012,3 +945,5 @@ private fun DrawerItemRow(
         }
     }
 }
+
+

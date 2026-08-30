@@ -1,4 +1,4 @@
-﻿package io.maru.manime.extensions
+package io.maru.manime.extensions
 
 import android.content.Context
 import com.lagradost.cloudstream3.AnimeLoadResponse
@@ -20,7 +20,7 @@ class CloudstreamExtensionLoader(private val context: Context) {
 
     fun loadPluginSources(jarFile: File): List<ExtensionSource> {
         return try {
-            val optDir = File(context.cacheDir, "cs_opt").apply { mkdirs() }
+            val optDir = File(context.codeCacheDir, "cs_opt").apply { mkdirs() }
             val classLoader = DexClassLoader(
                 jarFile.absolutePath,
                 optDir.absolutePath,
@@ -37,7 +37,11 @@ class CloudstreamExtensionLoader(private val context: Context) {
                     if (entry != null) {
                         val content = zip.getInputStream(entry).bufferedReader().use { it.readText() }
                         val json = JSONObject(content)
-                        val pluginClassName = json.optString("pluginClassName")
+                        val pluginClassName = json.optString("pluginClassName").ifEmpty {
+                            json.optString("entryClass").ifEmpty {
+                                json.optString("mainClass")
+                            }
+                        }
                         if (pluginClassName.isNotEmpty()) {
                             android.util.Log.d("CloudstreamLoader", "Found manifest entryClass: $pluginClassName in ${jarFile.name}")
                             try {

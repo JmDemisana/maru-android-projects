@@ -1,4 +1,5 @@
-﻿package com.lagradost.cloudstream3
+@file:JvmName("MainAPIKt")
+package com.lagradost.cloudstream3
 
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.SubtitleFile
@@ -13,7 +14,31 @@ enum class TvType {
     Documentary,
     LiveStream,
     NSFW,
-    Others
+    Others,
+    AsianDrama,
+    Torrent,
+    Music,
+    Audio,
+    AudioBook,
+    Podcast,
+    Custom
+}
+
+enum class VPNStatus {
+    None,
+    Torrent,
+    MightBeNeeded,
+    Custom
+}
+
+enum class ProviderType {
+    All,
+    Anime,
+    Movie,
+    TvSeries,
+    Cartoon,
+    Documentary,
+    Custom
 }
 
 enum class DubStatus {
@@ -166,6 +191,11 @@ abstract class MainAPI {
     open val supportedTypes: Set<TvType> = setOf(TvType.Anime, TvType.Movie, TvType.TvSeries)
     open var hasMainPage: Boolean = false
     open var hasQuickSearch: Boolean = false
+    open var hasChromecastSupport: Boolean = true
+    open var hasDownloadSupport: Boolean = true
+    open var usesWebView: Boolean = false
+    open var vpnStatus: VPNStatus = VPNStatus.None
+    open var providerType: ProviderType = ProviderType.All
     open var mainPage: List<MainPageData> = emptyList()
 
     open suspend fun search(query: String): List<SearchResponse> = emptyList()
@@ -188,7 +218,6 @@ fun mainPageOf(vararg elements: Pair<String, String>): List<MainPageData> {
     return elements.map { MainPageData(it.second, it.first) }
 }
 
-// Top-level extension functions in MainAPI.kt -> Generates MainAPIKt class!
 fun MainAPI.newAnimeSearchResponse(
     name: String,
     url: String,
