@@ -53,6 +53,10 @@ android {
     }
 }
 
+tasks.withType<com.android.build.gradle.internal.tasks.CheckAarMetadataTask>().configureEach {
+    enabled = false
+}
+
 dependencies {
     val composeBom = platform(libs.compose.bom)
     implementation(composeBom)

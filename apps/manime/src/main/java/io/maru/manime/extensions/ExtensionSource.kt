@@ -1,4 +1,4 @@
-﻿package io.maru.manime.extensions
+package io.maru.manime.extensions
 
 data class SearchResult(
     val id: String,
@@ -23,9 +23,14 @@ data class SubtitleTrack(
 
 data class StreamLink(
     val url: String,               // Direct HTTP URL (mp4/m3u8) or magnet: link
-    val quality: String,           // e.g. "1080p", "720p", "Auto", "Torrent"
+    val quality: String,           // e.g. "1080p", "720p", "4K", "Auto", "Torrent"
     val sourceName: String,
     val isTorrent: Boolean = false,
+    val audioType: String = "SUB", // "SUB" | "DUB" | "DUAL_AUDIO"
+    val methodType: String = "TORRENT", // "TORRENT" | "STREMIO" | "CLOUDSTREAM" | "ANIYOMI"
+    val seeders: Int? = null,
+    val filename: String? = null,
+    val formatBadge: String? = null, // "MKV (Soft Subs)", "HLS", "MP4"
     val headers: Map<String, String> = emptyMap(),
     val subtitles: List<SubtitleTrack> = emptyList(),
     val sizeBytes: Long? = null

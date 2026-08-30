@@ -4,6 +4,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
+import java.io.File
+import java.io.FileOutputStream
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -25,6 +27,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -105,11 +108,48 @@ class MainActivity : ComponentActivity() {
         insetsController.isAppearanceLightNavigationBars = false
 
         handleIntent(intent)
+
+        try {
+            val filter = android.content.IntentFilter("io.maru.manime.TEST_SEARCH")
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(debugReceiver, filter, android.content.Context.RECEIVER_EXPORTED)
+            } else {
+                registerReceiver(debugReceiver, filter)
+            }
+        } catch (_: Exception) {}
+
         setContent {
             MaterialTheme {
                 MainAppScreen(prefs)
             }
         }
+    }
+
+    private val debugReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            if (intent?.action == "io.maru.manime.TEST_SEARCH") {
+                val title = intent.getStringExtra("title") ?: "Bleach"
+                val episode = intent.getIntExtra("episode", 1)
+                android.util.Log.i("MAnimeDebug", "=== START DEBUG SEARCH FOR: $title EP: $episode ===")
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val router = ExtensionRouter(this@MainActivity, prefs)
+                    val streams = router.resolveStreamsForEpisode(title, episode) { liveList ->
+                        android.util.Log.i("MAnimeDebug", "Progressive update: ${liveList.size} streams found so far")
+                    }
+                    android.util.Log.i("MAnimeDebug", "=== COMPLETED DEBUG SEARCH: ${streams.size} TOTAL STREAMS ===")
+                    for (s in streams) {
+                        android.util.Log.i("MAnimeDebug", "-> [${s.methodType}] ${s.sourceName} | ${s.quality} | ${s.audioType} | ${s.url}")
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        try {
+            unregisterReceiver(debugReceiver)
+        } catch (_: Exception) {}
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -119,8 +159,13 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIntent(intent: Intent?) {
         val data: Uri? = intent?.data
-        if (data != null && data.scheme == "manime" && data.host == "auth") {
-            val token = data.getQueryParameter("access_token") ?: data.getQueryParameter("token")
+        if (data != null && data.scheme == "manime") {
+            var token = data.getQueryParameter("access_token") ?: data.getQueryParameter("token")
+            if (token.isNullOrBlank() && data.fragment?.contains("access_token=") == true) {
+                val match = Regex("access_token=([^&]+)").find(data.fragment ?: "")
+                token = match?.groupValues?.getOrNull(1)
+            }
+
             if (!token.isNullOrBlank()) {
                 lifecycleScope.launch {
                     prefs.setAnilistToken(token)
@@ -155,6 +200,7 @@ fun MainAppScreen(prefs: MAnimePrefs) {
     var selectedScreen by remember { mutableStateOf(NavigationScreen.DASHBOARD) }
     var selectedAnimeDetail by remember { mutableStateOf<AnimeMedia?>(null) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    var isGlobalLoading by remember { mutableStateOf(false) }
 
     // Data States
     var userProfile by remember { mutableStateOf<AniListUser?>(null) }
@@ -168,19 +214,42 @@ fun MainAppScreen(prefs: MAnimePrefs) {
     var isSearching by remember { mutableStateOf(false) }
 
     var recommendations by remember { mutableStateOf<List<AnimeMedia>>(emptyList()) }
-    var selectedRecCategory by remember { mutableStateOf("All") }
+    var selectedRecCategory by remember { mutableStateOf("For You") }
     var isRecLoading by remember { mutableStateOf(false) }
+    var activitiesList by remember { mutableStateOf<List<AniListActivity>>(emptyList()) }
 
     // Cloudstream Extensions State
     val csRepoClient = remember { CloudstreamRepoClient(context) }
+    val aniyomiLoader = remember { io.maru.manime.extensions.AniyomiExtensionLoader(context) }
     var savedRepos by remember { mutableStateOf<List<io.maru.manime.extensions.CloudstreamRepo>>(emptyList()) }
     var installedCloudstream by remember { mutableStateOf<List<String>>(emptyList()) }
+    var installedAniyomi by remember { mutableStateOf<List<io.maru.manime.extensions.AniyomiExtensionInfo>>(emptyList()) }
 
     fun refreshInstalledCloudstream() {
         installedCloudstream = csRepoClient.getInstalledPlugins().map { it.nameWithoutExtension }
+        installedAniyomi = aniyomiLoader.getInstalledExtensions()
     }
 
     LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            try {
+                val pluginsDir = File(context.filesDir, "cloudstream_plugins")
+                if (!pluginsDir.exists()) pluginsDir.mkdirs()
+                val assetList = context.assets.list("cloudstream_plugins") ?: emptyArray()
+                for (assetName in assetList) {
+                    val destFile = File(pluginsDir, assetName)
+                    try {
+                        if (destFile.exists()) destFile.setWritable(true)
+                        context.assets.open("cloudstream_plugins/$assetName").use { input ->
+                            FileOutputStream(destFile).use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                        destFile.setReadOnly()
+                    } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
+        }
         refreshInstalledCloudstream()
     }
 
@@ -208,17 +277,23 @@ fun MainAppScreen(prefs: MAnimePrefs) {
 
     // Stream picker sheet
     var availableStreams by remember { mutableStateOf<List<StreamLink>>(emptyList()) }
+    var isSearchingStreams by remember { mutableStateOf(false) }
     var showQualityPicker by remember { mutableStateOf(false) }
 
     val extensionRouter = remember { ExtensionRouter(context, prefs) }
 
-    // Refresh Dashboard Data
+    // Refresh Dashboard Data & AniList Activity Feed
     val refreshDashboard: () -> Unit = {
         scope.launch {
             isDashboardLoading = true
             try {
                 val trending = withContext(Dispatchers.IO) { AniListClient.getTrending(25) }
                 trendingList = trending
+
+                val activities = withContext(Dispatchers.IO) {
+                    AniListClient.getActivities(1, 25, isFollowing = anilistToken.isNotBlank(), token = anilistToken.ifEmpty { null })
+                }
+                activitiesList = activities
 
                 if (anilistToken.isNotBlank()) {
                     val user = withContext(Dispatchers.IO) { AniListClient.getViewer(anilistToken) }
@@ -241,15 +316,22 @@ fun MainAppScreen(prefs: MAnimePrefs) {
         }
     }
 
-    // Refresh Recommendations
+    // Refresh Recommendations (Personalized & Categories)
     val loadCategoryRecs: (String) -> Unit = { cat ->
         selectedRecCategory = cat
         scope.launch {
             isRecLoading = true
             try {
                 val results = withContext(Dispatchers.IO) {
-                    if (cat == "All") {
-                        AniListClient.getTrending(30)
+                    if (cat == "For You") {
+                        if (anilistToken.isNotBlank() && (watchingList.isNotEmpty() || completedCount > 0)) {
+                            val userIds = (watchingList.map { it.mediaId } + listOfNotNull(watchingList.firstOrNull()?.mediaId)).distinct().take(15)
+                            val recs = AniListClient.getRecommendations(userIds)
+                            if (recs.isNotEmpty()) recs else AniListClient.getTrending(30)
+                        } else {
+                            // Curated taste profile (CGDCT, Slice of life, Music)
+                            AniListClient.browseCategory(genre = "Slice of Life", perPage = 30)
+                        }
                     } else {
                         AniListClient.browseCategory(genre = cat, perPage = 30)
                     }
@@ -263,7 +345,7 @@ fun MainAppScreen(prefs: MAnimePrefs) {
 
     LaunchedEffect(anilistToken) {
         refreshDashboard()
-        loadCategoryRecs("All")
+        loadCategoryRecs("For You")
     }
 
     // Back button handling
@@ -365,17 +447,27 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                         media = selectedAnimeDetail!!,
                         onBack = { selectedAnimeDetail = null },
                         onWatchEpisode = { epNum ->
+                            val currentDetail = selectedAnimeDetail ?: return@AnimeDetailScreen
+                            activePlayerTitle = currentDetail.title
+                            activePlayerEpisode = epNum
+                            activePlayerMediaId = currentDetail.mediaId
+                            availableStreams = emptyList()
+                            isSearchingStreams = true
+                            showQualityPicker = true
+
                             scope.launch {
-                                val currentDetail = selectedAnimeDetail ?: return@launch
-                                val streams = extensionRouter.resolveStreamsForEpisode(
-                                    animeTitle = currentDetail.title,
-                                    episodeNum = epNum
-                                )
-                                availableStreams = streams
-                                activePlayerTitle = currentDetail.title
-                                activePlayerEpisode = epNum
-                                activePlayerMediaId = currentDetail.mediaId
-                                showQualityPicker = true
+                                try {
+                                    val finalStreams = extensionRouter.resolveStreamsForEpisode(
+                                        animeTitle = currentDetail.titleEnglish ?: currentDetail.titleRomaji ?: currentDetail.title,
+                                        episodeNum = epNum,
+                                        onStreamsUpdated = { updated ->
+                                            availableStreams = updated
+                                        }
+                                    )
+                                    availableStreams = finalStreams
+                                } finally {
+                                    isSearchingStreams = false
+                                }
                             }
                         }
                     )
@@ -395,6 +487,7 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                                 DashboardScreen(
                                     watchingList = watchingList,
                                     trendingList = trendingList,
+                                    activitiesList = activitiesList,
                                     isLoading = isDashboardLoading,
                                     onRefresh = refreshDashboard,
                                     onAnimeClick = { selectedAnimeDetail = it }
@@ -428,8 +521,15 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                                 RecommendationsScreen(
                                     recommendations = recommendations,
                                     isLoading = isRecLoading,
+                                    isLoggedIn = anilistToken.isNotBlank(),
+                                    username = anilistUsername,
                                     selectedCategory = selectedRecCategory,
                                     onSelectCategory = loadCategoryRecs,
+                                    onLoginClick = {
+                                        val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=49762&response_type=token"
+                                        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
+                                        context.startActivity(browserIntent)
+                                    },
                                     onAnimeClick = { selectedAnimeDetail = it }
                                 )
                             }
@@ -440,8 +540,7 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                                     completedCount = completedCount,
                                     planningCount = planningCount,
                                     onLoginClick = {
-                                        // Open AniList OAuth authorize URL using the site's redirect
-                                        val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=45845&response_type=token&redirect_uri=https://maruchansquigle.vercel.app/manime-auth.html"
+                                        val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=49762&response_type=token"
                                         val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
                                         context.startActivity(browserIntent)
                                     },
@@ -459,8 +558,10 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                                 ExtensionsScreen(
                                     savedRepos = savedRepos,
                                     installedCloudstream = installedCloudstream,
+                                    installedAniyomi = installedAniyomi,
                                     onAddCloudstreamRepo = { repoInput ->
                                         scope.launch {
+                                            isGlobalLoading = true
                                             try {
                                                 Toast.makeText(context, "Fetching repository...", Toast.LENGTH_SHORT).show()
                                                 val repo = withContext(Dispatchers.IO) { csRepoClient.fetchRepo(repoInput) }
@@ -473,6 +574,8 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                                                 Toast.makeText(context, "Added ${repo.name} (${repo.plugins.size} extensions available)", Toast.LENGTH_SHORT).show()
                                             } catch (e: Exception) {
                                                 Toast.makeText(context, "Failed to load repo: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                            } finally {
+                                                isGlobalLoading = false
                                             }
                                         }
                                     },
@@ -486,6 +589,7 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                                     },
                                     onInstallCloudstreamPlugin = { plugin ->
                                         scope.launch {
+                                            isGlobalLoading = true
                                             try {
                                                 Toast.makeText(context, "Installing ${plugin.name}...", Toast.LENGTH_SHORT).show()
                                                 withContext(Dispatchers.IO) { csRepoClient.downloadPlugin(plugin) }
@@ -493,6 +597,8 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                                                 Toast.makeText(context, "Installed ${plugin.name}!", Toast.LENGTH_SHORT).show()
                                             } catch (e: Exception) {
                                                 Toast.makeText(context, "Install failed: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                            } finally {
+                                                isGlobalLoading = false
                                             }
                                         }
                                     },
@@ -536,6 +642,81 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                 if (showQualityPicker) {
                     QualityPickerSheet(
                         streams = availableStreams,
+                        animeTitle = selectedAnimeDetail?.titleEnglish ?: selectedAnimeDetail?.titleRomaji ?: selectedAnimeDetail?.title ?: "",
+                        isSearching = isSearchingStreams,
+                        onSearchCloudstream = { title ->
+                            showQualityPicker = false
+                            try {
+                                val pm = context.packageManager
+                                val candidatePackages = listOf(
+                                    "com.lagradost.cloudstream3",
+                                    "com.lagradost.cloudstream3.prerelease",
+                                    "com.lagradost.cloudstream3.debug",
+                                    "com.lagradost.cloudstream3.test"
+                                )
+
+                                var targetPkg: String? = null
+                                for (pkg in candidatePackages) {
+                                    try {
+                                        pm.getPackageInfo(pkg, 0)
+                                        targetPkg = pkg
+                                        break
+                                    } catch (_: Exception) {}
+                                }
+
+                                if (targetPkg == null) {
+                                    val allApps = pm.getInstalledApplications(android.content.pm.PackageManager.GET_META_DATA)
+                                    targetPkg = allApps.firstOrNull { it.packageName.contains("cloudstream") }?.packageName
+                                }
+
+                                if (targetPkg != null) {
+                                    // 1. Try deep link intent first
+                                    try {
+                                        val deepLinkIntent = Intent(Intent.ACTION_VIEW, Uri.parse("cloudstream3://search?query=${Uri.encode(title)}")).apply {
+                                            setPackage(targetPkg)
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        if (deepLinkIntent.resolveActivity(pm) != null) {
+                                            context.startActivity(deepLinkIntent)
+                                            return@QualityPickerSheet
+                                        }
+                                    } catch (_: Exception) {}
+
+                                    // 2. Try standard search intent
+                                    try {
+                                        val searchIntent = Intent(Intent.ACTION_SEARCH).apply {
+                                            setPackage(targetPkg)
+                                            putExtra(android.app.SearchManager.QUERY, title)
+                                            putExtra("query", title)
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        if (searchIntent.resolveActivity(pm) != null) {
+                                            context.startActivity(searchIntent)
+                                            return@QualityPickerSheet
+                                        }
+                                    } catch (_: Exception) {}
+
+                                    // 3. Fallback to launch intent
+                                    val launchIntent = pm.getLaunchIntentForPackage(targetPkg)?.apply {
+                                        putExtra(android.app.SearchManager.QUERY, title)
+                                        putExtra("query", title)
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    if (launchIntent != null) {
+                                        context.startActivity(launchIntent)
+                                        return@QualityPickerSheet
+                                    }
+                                }
+
+                                // Try generic deep link
+                                val genericIntent = Intent(Intent.ACTION_VIEW, Uri.parse("cloudstream3://search?query=${Uri.encode(title)}")).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(genericIntent)
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Could not open Cloudstream app: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        },
                         onSelectStream = { stream ->
                             showQualityPicker = false
                             if (stream.isTorrent) {
@@ -549,6 +730,32 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                         onDismiss = { showQualityPicker = false }
                     )
                 }
+            }
+        }
+    }
+
+    // Global Loading Overlay
+    if (isGlobalLoading) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.5f))
+                // Intercept touches
+                .pointerInput(Unit) {},
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator(
+                    color = MaruAccentPink,
+                    strokeWidth = 4.dp,
+                    modifier = Modifier.size(50.dp)
+                )
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    "Working...",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = Color.White
+                )
             }
         }
     }
@@ -706,10 +913,10 @@ fun GlassNavigationDrawer(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    painter = painterResource(id = R.drawable.ic_maru_heart),
+                    imageVector = Icons.Default.AutoAwesome,
                     contentDescription = null,
                     modifier = Modifier.size(28.dp),
-                    tint = Color.Unspecified
+                    tint = MaruAccentPink
                 )
                 Spacer(Modifier.width(12.dp))
                 Column {

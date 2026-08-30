@@ -47,7 +47,6 @@ class CloudstreamRepoClient(private val context: Context) {
         if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
             return@withContext trimmed
         }
-        // Shortcode expansion (Cutt.ly or common cloudstream shortener format)
         val shortcodeUrl = "https://cutt.ly/$trimmed"
         try {
             val req = Request.Builder().url(shortcodeUrl).head().build()
@@ -75,11 +74,9 @@ class CloudstreamRepoClient(private val context: Context) {
                 pluginLists.add(rawLists.getString(i))
             }
         } else if (json.has("plugins")) {
-            // Some repos inline plugins
             pluginLists.add(finalUrl)
         }
 
-        // Fetch each plugin list
         val allPlugins = mutableListOf<CloudstreamPluginInfo>()
         for (pListUrl in pluginLists) {
             try {
@@ -113,9 +110,7 @@ class CloudstreamRepoClient(private val context: Context) {
                         )
                     }
                 }
-            } catch (e: Exception) {
-                // Ignore failure of individual plugin lists
-            }
+            } catch (_: Exception) {}
         }
 
         CloudstreamRepo(
@@ -129,20 +124,43 @@ class CloudstreamRepoClient(private val context: Context) {
 
     suspend fun downloadPlugin(plugin: CloudstreamPluginInfo): File = withContext(Dispatchers.IO) {
         val targetFile = File(pluginsDir, "${plugin.internalName}.jar")
+        if (targetFile.exists()) {
+            try {
+                targetFile.setWritable(true)
+            } catch (_: Exception) {}
+        }
         val req = Request.Builder().url(plugin.url).build()
         val resp = client.newCall(req).execute()
         val bytes = resp.body?.bytes() ?: throw Exception("Failed to download plugin bytes")
 
         FileOutputStream(targetFile).use { it.write(bytes) }
+        try {
+            targetFile.setReadOnly()
+        } catch (_: Exception) {}
         targetFile
     }
 
     fun getInstalledPlugins(): List<File> {
-        return pluginsDir.listFiles { _, name -> name.endsWith(".jar") }?.toList() ?: emptyList()
+        val files = pluginsDir.listFiles { _, name -> name.endsWith(".jar") || name.endsWith(".cs3") }?.toList() ?: emptyList()
+        // Ensure all installed plugins are marked read-only for Android 14/15 DCL security
+        for (f in files) {
+            try {
+                if (f.exists() && f.canWrite()) {
+                    f.setReadOnly()
+                }
+            } catch (_: Exception) {}
+        }
+        return files
     }
 
     fun deletePlugin(internalName: String): Boolean {
         val f = File(pluginsDir, "$internalName.jar")
-        return f.exists() && f.delete()
+        if (f.exists()) {
+            try {
+                f.setWritable(true)
+            } catch (_: Exception) {}
+            return f.delete()
+        }
+        return false
     }
 }

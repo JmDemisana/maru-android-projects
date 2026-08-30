@@ -13,6 +13,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -216,6 +217,125 @@ fun AnimeDetailScreen(
                         color = MaruAccentPink,
                         modifier = Modifier.padding(top = 4.dp)
                     )
+                }
+            }
+        }
+
+        // IsThisDubbed Applet Card
+        item(key = "is_this_dubbed_card") {
+            var dubDetails by remember { mutableStateOf<DubDetails?>(null) }
+            var isDubLoading by remember { mutableStateOf(true) }
+
+            LaunchedEffect(media.mediaId) {
+                isDubLoading = true
+                try {
+                    dubDetails = AniListClient.getDubDetails(media.mediaId)
+                } catch (_: Exception) {} finally {
+                    isDubLoading = false
+                }
+            }
+
+            GlassCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        GlassSectionHeader(
+                            title = "IS THIS DUBBED? APPLET",
+                            icon = Icons.Default.AutoAwesome,
+                            color = MaruAccentGreen
+                        )
+
+                        val isConfirmed = dubDetails?.isDubbed == true
+                        Surface(
+                            color = if (isConfirmed) Color(0x334ADE80) else Color(0x33FF5252),
+                            shape = MaruPillShape,
+                            border = BorderStroke(1.dp, if (isConfirmed) MaruAccentGreen else MaruDanger)
+                        ) {
+                            Text(
+                                text = if (isConfirmed) "ENGLISH DUBBED" else "SUB ONLY",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 9.5.sp
+                                ),
+                                color = if (isConfirmed) MaruAccentGreen else MaruDanger,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    if (isDubLoading) {
+                        Text(text = "Scanning voice cast & dub registers...", fontSize = 12.sp, color = MaruTextMuted)
+                    } else if (dubDetails?.isDubbed == true) {
+                        if (dubDetails?.streamingPlatforms?.isNotEmpty() == true) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            ) {
+                                dubDetails!!.streamingPlatforms.forEach { platform ->
+                                    Surface(
+                                        shape = MaruPillShape,
+                                        color = Color(0x2260E2FF),
+                                        border = BorderStroke(1.dp, MaruAccentBlue.copy(alpha = 0.5f))
+                                    ) {
+                                        Text(
+                                            text = platform,
+                                            fontSize = 9.5.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaruAccentBlue,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        if (dubDetails?.englishCast?.isNotEmpty() == true) {
+                            Text(
+                                text = "ENGLISH VOICE CAST",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaruTextMuted,
+                                modifier = Modifier.padding(bottom = 6.dp)
+                            )
+
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                dubDetails!!.englishCast.take(4).forEach { role ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = role.characterName,
+                                            fontSize = 12.sp,
+                                            color = MaruTextStrong,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                        Text(
+                                            text = role.voiceActor?.name ?: "English VA",
+                                            fontSize = 11.5.sp,
+                                            color = MaruAccentPink
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        Text(
+                            text = "No official English dub found for this anime. Japanese audio with soft subs will be streamed.",
+                            fontSize = 12.sp,
+                            color = MaruTextMuted
+                        )
+                    }
                 }
             }
         }

@@ -31,6 +31,10 @@ class MAnimePrefs(private val context: Context) {
             "https://torrentio.strem.fun/manifest.json",
             "https://animekitsu.strem.fun/manifest.json"
         )
+        val DEFAULT_CS_REPOS = setOf(
+            "https://raw.githubusercontent.com/recloudstream/cloudstream-extensions-multilingual/builds/repo.json",
+            "https://raw.githubusercontent.com/phisher98/cloudstream-extensions-phisher/refs/heads/builds/repo.json"
+        )
     }
 
     // --- Flows ---
@@ -39,7 +43,7 @@ class MAnimePrefs(private val context: Context) {
     val extensionType: Flow<String> = context.dataStore.data.map { it[KEY_EXT_TYPE] ?: EXT_STREMIO }
     val stremioUrl: Flow<String> = context.dataStore.data.map { it[KEY_STREMIO_URL] ?: DEFAULT_STREMIO_URL }
     val stremioAddons: Flow<Set<String>> = context.dataStore.data.map { it[KEY_STREMIO_ADDONS] ?: DEFAULT_STREMIO_ADDONS }
-    val cloudstreamRepos: Flow<Set<String>> = context.dataStore.data.map { it[KEY_CS_REPOS] ?: emptySet() }
+    val cloudstreamRepos: Flow<Set<String>> = context.dataStore.data.map { it[KEY_CS_REPOS] ?: DEFAULT_CS_REPOS }
     val cloudstreamInstalled: Flow<Set<String>> = context.dataStore.data.map { it[KEY_CS_INSTALLED] ?: emptySet() }
     val reportProgress: Flow<Boolean> = context.dataStore.data.map { it[KEY_REPORT_PROGRESS] ?: true }
     val rememberPosition: Flow<Boolean> = context.dataStore.data.map { it[KEY_REMEMBER_POSITION] ?: true }

@@ -1,4 +1,4 @@
-﻿package io.maru.manime
+package io.maru.manime
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -61,10 +61,40 @@ data class ExternalLink(
         language?.uppercase() == "ENGLISH" && type.uppercase() == "STREAMING"
 }
 
-data class SearchPage(
-    val results: List<AnimeMedia>,
-    val hasNextPage: Boolean,
-    val total: Int?
+data class VoiceActor(
+    val id: Int,
+    val name: String,
+    val image: String?,
+    val language: String
+)
+
+data class CharacterRole(
+    val characterName: String,
+    val characterImage: String?,
+    val voiceActor: VoiceActor?
+)
+
+data class DubDetails(
+    val isDubbed: Boolean,
+    val dubConfidence: String, // "CONFIRMED" | "PARTIAL" | "SUB_ONLY"
+    val englishCast: List<CharacterRole>,
+    val streamingPlatforms: List<String>
+)
+
+data class AniListActivity(
+    val id: Int,
+    val userId: Int,
+    val userName: String,
+    val userAvatar: String?,
+    val type: String, // "TEXT" | "ANIME_LIST" | "MESSAGE"
+    val status: String?,
+    val progress: String?,
+    val text: String?,
+    val mediaTitle: String?,
+    val mediaCover: String?,
+    val replyCount: Int,
+    val likeCount: Int,
+    val createdAt: Long
 )
 
 // ---------------------------------------------------------------------------
@@ -137,9 +167,9 @@ object AniListClient {
         val rawGenres = obj.optJSONArray("genres")
         if (rawGenres != null) for (i in 0 until rawGenres.length()) genres += rawGenres.getString(i)
 
-        val titlePref = title?.optString("userPreferred").orEmpty()
-            .ifEmpty { title?.optString("english").orEmpty() }
+        val titlePref = title?.optString("english").orEmpty()
             .ifEmpty { title?.optString("romaji").orEmpty() }
+            .ifEmpty { title?.optString("userPreferred").orEmpty() }
 
         return AnimeMedia(
             mediaId       = obj.getInt("id"),
@@ -350,6 +380,197 @@ object AniListClient {
             mutation (${'$'}id: Int!) { DeleteMediaListEntry(id: ${'$'}id) { deleted } }
         """, mapOf("id" to entryId), token)
         return data.getJSONObject("DeleteMediaListEntry").optBoolean("deleted")
+    }
+
+data class SearchPage(
+    val results: List<AnimeMedia>,
+    val hasNextPage: Boolean,
+    val total: Int?
+)
+
+    // -----------------------------------------------------------------------
+    // AniList Activity Feed (Community Posts & List Updates)
+    // -----------------------------------------------------------------------
+    suspend fun getActivities(page: Int = 1, perPage: Int = 25, isFollowing: Boolean = false, token: String? = null): List<AniListActivity> {
+        val data = query("""
+            query (${'$'}page: Int, ${'$'}perPage: Int, ${'$'}isFollowing: Boolean) {
+              Page(page: ${'$'}page, perPage: ${'$'}perPage) {
+                activities(isFollowing: ${'$'}isFollowing, sort: ID_DESC) {
+                  ... on TextActivity {
+                    id userId text replyCount likeCount createdAt
+                    user { name avatar { medium } }
+                  }
+                  ... on ListActivity {
+                    id userId status progress replyCount likeCount createdAt
+                    user { name avatar { medium } }
+                    media {
+                      title { userPreferred english romaji }
+                      coverImage { medium }
+                    }
+                  }
+                  ... on MessageActivity {
+                    id recipientId message replyCount likeCount createdAt
+                    messenger { name avatar { medium } }
+                  }
+                }
+              }
+            }
+        """, mapOf("page" to page, "perPage" to perPage, "isFollowing" to isFollowing), token)
+
+        val pageObj = data.optJSONObject("Page") ?: return emptyList()
+        val activitiesArr = pageObj.optJSONArray("activities") ?: return emptyList()
+        val list = mutableListOf<AniListActivity>()
+
+        for (i in 0 until activitiesArr.length()) {
+            val act = activitiesArr.optJSONObject(i) ?: continue
+            val id = act.optInt("id")
+            val userObj = act.optJSONObject("user") ?: act.optJSONObject("messenger")
+            val userName = userObj?.optString("name", "User") ?: "User"
+            val userAvatar = userObj?.optJSONObject("avatar")?.optString("medium")
+            val replyCount = act.optInt("replyCount", 0)
+            val likeCount = act.optInt("likeCount", 0)
+            val createdAt = act.optLong("createdAt", 0L)
+
+            if (act.has("text")) {
+                list.add(
+                    AniListActivity(
+                        id = id,
+                        userId = act.optInt("userId"),
+                        userName = userName,
+                        userAvatar = userAvatar,
+                        type = "TEXT",
+                        status = null,
+                        progress = null,
+                        text = act.optString("text"),
+                        mediaTitle = null,
+                        mediaCover = null,
+                        replyCount = replyCount,
+                        likeCount = likeCount,
+                        createdAt = createdAt
+                    )
+                )
+            } else if (act.has("status")) {
+                val mediaObj = act.optJSONObject("media")
+                val titleObj = mediaObj?.optJSONObject("title")
+                val mediaTitle = titleObj?.optString("english")?.ifEmpty { null }
+                    ?: titleObj?.optString("romaji")?.ifEmpty { null }
+                    ?: titleObj?.optString("userPreferred")
+                val mediaCover = mediaObj?.optJSONObject("coverImage")?.optString("medium")
+
+                list.add(
+                    AniListActivity(
+                        id = id,
+                        userId = act.optInt("userId"),
+                        userName = userName,
+                        userAvatar = userAvatar,
+                        type = "ANIME_LIST",
+                        status = act.optString("status"),
+                        progress = act.optString("progress").ifEmpty { null },
+                        text = null,
+                        mediaTitle = mediaTitle,
+                        mediaCover = mediaCover,
+                        replyCount = replyCount,
+                        likeCount = likeCount,
+                        createdAt = createdAt
+                    )
+                )
+            } else if (act.has("message")) {
+                list.add(
+                    AniListActivity(
+                        id = id,
+                        userId = act.optInt("recipientId"),
+                        userName = userName,
+                        userAvatar = userAvatar,
+                        type = "MESSAGE",
+                        status = null,
+                        progress = null,
+                        text = act.optString("message"),
+                        mediaTitle = null,
+                        mediaCover = null,
+                        replyCount = replyCount,
+                        likeCount = likeCount,
+                        createdAt = createdAt
+                    )
+                )
+            }
+        }
+        return list
+    }
+
+    // -----------------------------------------------------------------------
+    // IsThisDubbed — Query English Voice Cast & Dub Status
+    // -----------------------------------------------------------------------
+    suspend fun getDubDetails(mediaId: Int): DubDetails {
+        val data = query("""
+            query (${'$'}id: Int) {
+              Media(id: ${'$'}id, type: ANIME) {
+                externalLinks { site type language }
+                characters(sort: [ROLE, RELEVANCE], perPage: 12) {
+                  edges {
+                    node { name { full } image { medium } }
+                    voiceActors(language: ENGLISH) {
+                      id name { full } image { medium } languageV2
+                    }
+                  }
+                }
+              }
+            }
+        """, mapOf("id" to mediaId))
+
+        val media = data.optJSONObject("Media") ?: return DubDetails(false, "SUB_ONLY", emptyList(), emptyList())
+        val extLinks = media.optJSONArray("externalLinks")
+        val platforms = mutableListOf<String>()
+        var hasExplicitDubLink = false
+
+        if (extLinks != null) {
+            for (i in 0 until extLinks.length()) {
+                val l = extLinks.getJSONObject(i)
+                val site = l.optString("site")
+                val lang = l.optString("language")
+                if (lang.equals("English", ignoreCase = true) || site.contains("Dub", ignoreCase = true)) {
+                    hasExplicitDubLink = true
+                    if (!platforms.contains(site)) platforms.add(site)
+                }
+            }
+        }
+
+        val charEdges = media.optJSONObject("characters")?.optJSONArray("edges")
+        val castList = mutableListOf<CharacterRole>()
+
+        if (charEdges != null) {
+            for (i in 0 until charEdges.length()) {
+                val edge = charEdges.getJSONObject(i)
+                val charNode = edge.optJSONObject("node")
+                val charName = charNode?.optJSONObject("name")?.optString("full", "Character") ?: "Character"
+                val charImg = charNode?.optJSONObject("image")?.optString("medium")
+
+                val vaArr = edge.optJSONArray("voiceActors")
+                var va: VoiceActor? = null
+                if (vaArr != null && vaArr.length() > 0) {
+                    val vaObj = vaArr.getJSONObject(0)
+                    va = VoiceActor(
+                        id = vaObj.optInt("id"),
+                        name = vaObj.optJSONObject("name")?.optString("full", "Voice Actor") ?: "Voice Actor",
+                        image = vaObj.optJSONObject("image")?.optString("medium"),
+                        language = vaObj.optString("languageV2", "English")
+                    )
+                }
+
+                if (va != null) {
+                    castList.add(CharacterRole(charName, charImg, va))
+                }
+            }
+        }
+
+        val isDubbed = castList.isNotEmpty() || hasExplicitDubLink
+        val confidence = if (castList.size >= 3 || hasExplicitDubLink) "CONFIRMED" else if (castList.isNotEmpty()) "PARTIAL" else "SUB_ONLY"
+
+        return DubDetails(
+            isDubbed = isDubbed,
+            dubConfidence = confidence,
+            englishCast = castList,
+            streamingPlatforms = platforms
+        )
     }
 
     // -----------------------------------------------------------------------

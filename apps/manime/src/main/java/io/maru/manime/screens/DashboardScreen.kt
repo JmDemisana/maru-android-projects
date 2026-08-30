@@ -12,7 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -27,8 +27,12 @@ import coil.compose.AsyncImage
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.automirrored.filled.LastPage
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.ChatBubble
+import androidx.compose.material.icons.filled.ThumbUp
 import io.maru.manime.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -36,60 +40,213 @@ import io.maru.manime.*
 fun DashboardScreen(
     watchingList: List<AnimeMedia>,
     trendingList: List<AnimeMedia>,
+    activitiesList: List<AniListActivity>,
     isLoading: Boolean,
     onRefresh: () -> Unit,
     onAnimeClick: (AnimeMedia) -> Unit
 ) {
-    PullToRefreshBox(
-        isRefreshing = isLoading,
-        onRefresh = onRefresh,
-        modifier = Modifier.fillMaxSize()
-    ) {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(top = 12.dp, bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+    var selectedSubTab by remember { mutableIntStateOf(0) } // 0: Discovery, 1: AniList Feed
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // MAudio Pills Sub-Tab Bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Continue Watching Rail (if user is logged in and has items)
-            if (watchingList.isNotEmpty()) {
-                item(key = "continue_watching") {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        GlassSectionHeader(
-                            title = "CONTINUE WATCHING",
-                            icon = Icons.Default.AutoAwesome,
-                            color = MaruAccentPink
+            listOf("Discovery Feed", "AniList Community").forEachIndexed { index, title ->
+                val isSelected = selectedSubTab == index
+                Surface(
+                    onClick = { selectedSubTab = index },
+                    shape = MaruPillShape,
+                    color = if (isSelected) Color(0x33E85D9F) else MaruGlassSubtleBg,
+                    border = BorderStroke(1.dp, if (isSelected) MaruAccentPink else MaruGlassBorderSoft),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(modifier = Modifier.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = title.uppercase(),
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.sp,
+                                letterSpacing = 0.6.sp
+                            ),
+                            color = if (isSelected) MaruAccentPink else MaruTextMuted
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            watchingList.forEach { media ->
-                                WatchingCard(media = media, onClick = { onAnimeClick(media) })
+                    }
+                }
+            }
+        }
+
+        PullToRefreshBox(
+            isRefreshing = isLoading,
+            onRefresh = onRefresh,
+            modifier = Modifier.fillMaxSize()
+        ) {
+            if (selectedSubTab == 0) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(top = 8.dp, bottom = 32.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    // Continue Watching Rail (if user is logged in and has items)
+                    if (watchingList.isNotEmpty()) {
+                        item(key = "continue_watching") {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                GlassSectionHeader(
+                                    title = "CONTINUE WATCHING",
+                                    icon = Icons.Default.AutoAwesome,
+                                    color = MaruAccentPink
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState())
+                                        .padding(horizontal = 16.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    watchingList.forEach { media ->
+                                        WatchingCard(media = media, onClick = { onAnimeClick(media) })
+                                    }
+                                }
                             }
+                        }
+                    }
+
+                    // Trending This Season
+                    item(key = "trending_header") {
+                        GlassSectionHeader(
+                            title = "TRENDING THIS SEASON",
+                            icon = Icons.Default.AutoAwesome,
+                            color = MaruAccentBlue
+                        )
+                    }
+
+                    items(trendingList, key = { "trending_${it.mediaId}" }) { media ->
+                        AnimeListItemCard(
+                            media = media,
+                            onClick = { onAnimeClick(media) },
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+                    }
+                }
+            } else {
+                // AniList Community Activity Feed
+                if (activitiesList.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = if (isLoading) "Loading community posts..." else "No recent community activity found.",
+                            color = MaruTextMuted,
+                            fontSize = 13.sp
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(activitiesList, key = { "act_${it.id}" }) { act ->
+                            ActivityCard(activity = act)
                         }
                     }
                 }
             }
+        }
+    }
+}
 
-            // Trending This Season
-            item(key = "trending_header") {
-                GlassSectionHeader(
-                    title = "TRENDING THIS SEASON",
-                    icon = Icons.Default.AutoAwesome,
-                    color = MaruAccentBlue
+@Composable
+fun ActivityCard(activity: AniListActivity) {
+    GlassCard(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                AsyncImage(
+                    model = activity.userAvatar,
+                    contentDescription = activity.userName,
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = activity.userName,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        color = MaruAccentPink
+                    )
+                    val actionText = if (activity.type == "ANIME_LIST") {
+                        "${activity.status ?: "Updated"} ${activity.progress ?: ""}".trim()
+                    } else "Posted"
+                    Text(
+                        text = actionText,
+                        fontSize = 11.sp,
+                        color = MaruTextMuted
+                    )
+                }
+            }
+
+            if (!activity.text.isNullOrEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = activity.text,
+                    fontSize = 13.sp,
+                    color = MaruTextStrong,
+                    lineHeight = 18.sp
                 )
             }
 
-            items(trendingList, key = { "trending_${it.mediaId}" }) { media ->
-                AnimeListItemCard(
-                    media = media,
-                    onClick = { onAnimeClick(media) },
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
+            if (!activity.mediaTitle.isNullOrEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Surface(
+                    shape = MaruInputShape,
+                    color = Color(0x33000000),
+                    border = BorderStroke(1.dp, MaruGlassBorderSoft),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        AsyncImage(
+                            model = activity.mediaCover,
+                            contentDescription = activity.mediaTitle,
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(6.dp)),
+                            contentScale = ContentScale.Crop
+                        )
+                        Text(
+                            text = activity.mediaTitle,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 12.5.sp,
+                            color = MaruAccentBlue,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Icon(Icons.Default.ThumbUp, contentDescription = null, tint = MaruAccentPink, modifier = Modifier.size(14.dp))
+                    Text(text = "${activity.likeCount}", fontSize = 11.sp, color = MaruTextMuted)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Icon(Icons.Default.ChatBubble, contentDescription = null, tint = MaruAccentBlue, modifier = Modifier.size(14.dp))
+                    Text(text = "${activity.replyCount}", fontSize = 11.sp, color = MaruTextMuted)
+                }
             }
         }
     }

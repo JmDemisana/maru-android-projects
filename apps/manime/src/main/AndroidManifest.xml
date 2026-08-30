@@ -13,10 +13,25 @@
         android:maxSdkVersion="32" />
 
     <queries>
-        <!-- Detect installed Aniyomi/Cloudstream extensions -->
+        <!-- Detect installed Cloudstream app variants and Aniyomi extensions -->
+        <package android:name="com.lagradost.cloudstream3" />
+        <package android:name="com.lagradost.cloudstream3.prerelease" />
+        <package android:name="com.lagradost.cloudstream3.debug" />
+        <package android:name="com.lagradost.cloudstream3.test" />
+        <intent>
+            <action android:name="android.intent.action.SEARCH" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="cloudstream" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="cloudstream3" />
         </intent>
     </queries>
 

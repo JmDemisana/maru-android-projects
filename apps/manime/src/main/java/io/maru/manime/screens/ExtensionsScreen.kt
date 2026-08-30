@@ -19,6 +19,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.maru.manime.*
+import io.maru.manime.extensions.AniyomiExtensionInfo
 import io.maru.manime.extensions.CloudstreamPluginInfo
 import io.maru.manime.extensions.CloudstreamRepo
 import io.maru.manime.extensions.StremioManifest
@@ -27,6 +28,7 @@ import io.maru.manime.extensions.StremioManifest
 fun ExtensionsScreen(
     savedRepos: List<CloudstreamRepo>,
     installedCloudstream: List<String>,
+    installedAniyomi: List<AniyomiExtensionInfo> = emptyList(),
     onAddCloudstreamRepo: (String) -> Unit,
     onRemoveCloudstreamRepo: (CloudstreamRepo) -> Unit,
     onInstallCloudstreamPlugin: (CloudstreamPluginInfo) -> Unit,
@@ -93,7 +95,7 @@ fun ExtensionsScreen(
                 onAddAddon = onAddStremioAddon,
                 onRemoveAddon = onRemoveStremioAddon
             )
-            2 -> AniyomiTab()
+            2 -> AniyomiTab(installed = installedAniyomi)
         }
     }
 }
@@ -482,29 +484,94 @@ private fun StremioTab(
 }
 
 @Composable
-private fun AniyomiTab() {
-    Column(
+private fun AniyomiTab(installed: List<AniyomiExtensionInfo>) {
+    LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+        contentPadding = PaddingValues(bottom = 32.dp)
     ) {
-        GlassCard(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                GlassSectionHeader(
-                    title = "ANIYOMI EXTENSION BRIDGE",
-                    icon = Icons.Default.Extension,
-                    color = MaruAccentGreen
-                )
-                Text(
-                    text = "MAnime automatically scans and detects all Aniyomi anime extension APKs installed on your device via PackageManager.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaruTextMuted,
-                    lineHeight = 18.sp
-                )
+        item(key = "aniyomi_header") {
+            GlassCard(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    GlassSectionHeader(
+                        title = "ANIYOMI EXTENSION BRIDGE",
+                        icon = Icons.Default.Extension,
+                        color = MaruAccentGreen
+                    )
+                    Text(
+                        text = "MAnime automatically scans and detects all Aniyomi anime extension APKs installed on your device via Android PackageManager.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaruTextMuted,
+                        lineHeight = 18.sp
+                    )
+                }
+            }
+        }
+
+        item(key = "aniyomi_installed_header") {
+            GlassSectionHeader(
+                title = "DETECTED EXTENSIONS (${installed.size})",
+                icon = Icons.Default.CheckCircle,
+                color = MaruAccentGreen
+            )
+        }
+
+        if (installed.isEmpty()) {
+            item(key = "aniyomi_empty") {
+                GlassCard(modifier = Modifier.fillMaxWidth()) {
+                    Box(modifier = Modifier.padding(24.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "No Aniyomi anime extensions detected.\nInstall any Tachiyomi/Aniyomi anime extension APK to use it automatically.",
+                            color = MaruTextMuted,
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                }
+            }
+        } else {
+            items(installed, key = { it.packageName }) { ext ->
+                GlassCard(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = ext.sourceName,
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                                color = MaruTextStrong
+                            )
+                            Text(
+                                text = "${ext.packageName} • v${ext.versionName}",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                color = MaruTextMuted
+                            )
+                        }
+
+                        Surface(
+                            shape = MaruPillShape,
+                            color = Color(0x334ADE80),
+                            border = BorderStroke(1.dp, MaruAccentGreen)
+                        ) {
+                            Text(
+                                text = "ACTIVE",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                color = MaruAccentGreen,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                }
             }
         }
     }

@@ -1,4 +1,4 @@
-﻿package io.maru.manime.player
+package io.maru.manime.player
 
 import android.app.Activity
 import android.content.Context
@@ -6,7 +6,6 @@ import android.content.pm.ActivityInfo
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
-import androidx.annotation.OptIn
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -42,7 +41,7 @@ import io.maru.manime.MAnimePrefs
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-@OptIn(UnstableApi::class)
+@OptIn(UnstableApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun PlayerScreen(
     videoUrl: String,
@@ -217,6 +216,99 @@ fun PlayerScreen(
                             color = Color(0xCCFFFFFF),
                             fontSize = 13.sp
                         )
+                    }
+
+                    var showSubtitleSheet by remember { mutableStateOf(false) }
+
+                    IconButton(onClick = { showSubtitleSheet = true }) {
+                        Icon(
+                            Icons.Default.ClosedCaption,
+                            contentDescription = "Subtitles",
+                            tint = Color.White
+                        )
+                    }
+
+                    if (showSubtitleSheet) {
+                        ModalBottomSheet(
+                            onDismissRequest = { showSubtitleSheet = false },
+                            containerColor = Color(0xFF100C19),
+                            contentColor = Color.White
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 20.dp, vertical = 12.dp)
+                                    .navigationBarsPadding()
+                            ) {
+                                Text(
+                                    text = "SOFT SUBTITLES & AUDIO TRACKS",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFE85D9F)
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                val tracks = exoPlayer.currentTracks.groups.filter { it.type == androidx.media3.common.C.TRACK_TYPE_TEXT }
+                                if (tracks.isEmpty()) {
+                                    Text(
+                                        text = "No soft subtitles detected in stream.",
+                                        fontSize = 13.sp,
+                                        color = Color(0x99FFFFFF),
+                                        modifier = Modifier.padding(vertical = 12.dp)
+                                    )
+                                } else {
+                                    // Option: Disable Subtitles
+                                    Surface(
+                                        onClick = {
+                                            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                                                .buildUpon()
+                                                .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true)
+                                                .build()
+                                            showSubtitleSheet = false
+                                        },
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = Color(0x22FFFFFF),
+                                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                    ) {
+                                        Text("Subtitles Off", color = Color.White, modifier = Modifier.padding(12.dp), fontSize = 14.sp)
+                                    }
+
+                                    tracks.forEach { group ->
+                                        for (i in 0 until group.length) {
+                                            val format = group.getTrackFormat(i)
+                                            val isSelected = group.isTrackSelected(i)
+                                            val trackName = format.label ?: format.language ?: "Subtitle Track ${i + 1}"
+
+                                            Surface(
+                                                onClick = {
+                                                    exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                                                        .buildUpon()
+                                                        .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, false)
+                                                        .setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, i))
+                                                        .build()
+                                                    showSubtitleSheet = false
+                                                },
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = if (isSelected) Color(0x33E85D9F) else Color(0x22FFFFFF),
+                                                border = if (isSelected) androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE85D9F)) else null,
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(12.dp),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text(trackName, color = Color.White, fontSize = 14.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal)
+                                                    if (isSelected) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, tint = Color(0xFFE85D9F), modifier = Modifier.size(18.dp))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
