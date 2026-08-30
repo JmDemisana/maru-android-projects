@@ -3,11 +3,14 @@
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,6 +22,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -94,22 +98,22 @@ fun ProfileScreen(
 
     val isLoggedIn = anilistToken.isNotBlank()
 
-    LazyColumn(
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(2),
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 12.dp, bottom = 32.dp),
+            .padding(horizontal = 14.dp),
+        contentPadding = PaddingValues(top = 10.dp, bottom = 36.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // User Header Card
-        item(key = "user_header") {
-            GlassCard(
-                modifier = Modifier.fillMaxWidth()
-            ) {
+        // User Profile Header Card (Full Span)
+        item(span = { GridItemSpan(2) }, key = "user_header") {
+            GlassCard(modifier = Modifier.fillMaxWidth()) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .padding(14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
@@ -119,7 +123,7 @@ fun ProfileScreen(
                             contentDescription = user.name,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
-                                .size(56.dp)
+                                .size(50.dp)
                                 .clip(CircleShape)
                         )
                     } else {
@@ -127,20 +131,20 @@ fun ProfileScreen(
                             Icons.Default.AccountCircle,
                             contentDescription = null,
                             tint = if (isLoggedIn) MaruAccentPurple else MaruAccentPink,
-                            modifier = Modifier.size(56.dp)
+                            modifier = Modifier.size(50.dp)
                         )
                     }
 
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = user?.name ?: if (isLoggedIn) "AniList Connected" else "Guest User",
-                            fontSize = 18.sp,
+                            fontSize = 17.sp,
                             fontWeight = FontWeight.Bold,
                             color = MaruTextStrong
                         )
                         Text(
                             text = if (isLoggedIn) "Synced with AniList" else "Sign in to sync your library",
-                            fontSize = 12.sp,
+                            fontSize = 11.5.sp,
                             color = if (isLoggedIn) MaruAccentGreen else MaruTextMuted
                         )
                     }
@@ -152,20 +156,20 @@ fun ProfileScreen(
                     } else {
                         GlassButton(
                             onClick = onLoginClick,
-                            modifier = Modifier.width(96.dp),
+                            modifier = Modifier.width(90.dp),
                             background = MaruAccentPink.copy(alpha = 0.2f),
                             borderColor = MaruAccentPink
                         ) {
-                            Text("LOGIN", color = MaruTextStrong, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text("LOGIN", color = MaruTextStrong, fontWeight = FontWeight.Bold, fontSize = 11.5.sp)
                         }
                     }
                 }
             }
         }
 
-        // Stats Row
+        // Stats Row (Full Span)
         if (isLoggedIn) {
-            item(key = "stats") {
+            item(span = { GridItemSpan(2) }, key = "stats") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -206,8 +210,8 @@ fun ProfileScreen(
                 }
             }
 
-            // Library Categories Scrollable Filter Bar
-            item(key = "categories_bar") {
+            // Library Categories Scrollable Filter Bar (Full Span)
+            item(span = { GridItemSpan(2) }, key = "categories_bar") {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -259,151 +263,175 @@ fun ProfileScreen(
                 }
             }
 
-            // Library items header
-            item(key = "library_header") {
-                GlassSectionHeader(
-                    title = "$selectedCategory (${currentList.size})",
-                    icon = Icons.Default.CollectionsBookmark,
-                    color = MaruAccentPink
-                )
+            // Category Title Header with Item Count (Full Span)
+            item(span = { GridItemSpan(2) }, key = "section_header") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp, bottom = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = selectedCategory,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaruTextStrong
+                    )
+                    Text(
+                        text = "(${currentList.size})",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaruTextMuted
+                    )
+                }
             }
 
             if (currentList.isEmpty()) {
-                item(key = "empty_list") {
+                item(span = { GridItemSpan(2) }, key = "empty_list") {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 32.dp),
+                            .padding(vertical = 48.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text("No anime in $selectedCategory.", color = MaruTextMuted, fontSize = 13.sp)
                     }
                 }
             } else {
-                items(currentList, key = { "media_${it.mediaId}" }) { item ->
-                    var itemMedia by remember(item) { mutableStateOf(item) }
-                    var isSyncing by remember { mutableStateOf(false) }
+                // 2-Column Poster Cards exactly matching the web reference
+                items(currentList, key = { "media_${it.mediaId}" }) { itemMedia ->
+                    PosterCard(
+                        media = itemMedia,
+                        onClick = { onAnimeClick(itemMedia) }
+                    )
+                }
+            }
+        }
+    }
+}
 
-                    GlassCard(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onAnimeClick(itemMedia) }
+@Composable
+fun PosterCard(
+    media: AnimeMedia,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFF140F22),
+        border = BorderStroke(1.dp, MaruGlassBorderSoft),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(240.dp)
+    ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            // Full Cover Background Image
+            AsyncImage(
+                model = media.coverUrl,
+                contentDescription = media.title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+
+            // Bottom Gradient Scrim Overlay
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color.Transparent,
+                                Color.Transparent,
+                                Color(0x88050507),
+                                Color(0xEE050507)
+                            )
+                        )
+                    )
+            )
+
+            // Top Badges (Dub / Score)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (media.score != null && media.score > 0) {
+                    Surface(
+                        color = Color(0xCC0E0A1A),
+                        shape = MaruPillShape,
+                        border = BorderStroke(1.dp, MaruAccentYellow.copy(alpha = 0.5f))
                     ) {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(10.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            AsyncImage(
-                                model = itemMedia.coverUrl,
-                                contentDescription = itemMedia.title,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier
-                                    .width(52.dp)
-                                    .height(74.dp)
-                                    .clip(MaruInputShape)
-                            )
-
-                            Column(
-                                modifier = Modifier.weight(1f),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(
-                                    text = itemMedia.title,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaruTextStrong,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    if (itemMedia.score != null && itemMedia.score!! > 0) {
-                                        Surface(
-                                            color = Color(0x22FBBF24),
-                                            shape = MaruPillShape,
-                                            border = BorderStroke(1.dp, MaruAccentYellow.copy(alpha = 0.3f))
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(2.dp)
-                                            ) {
-                                                Icon(Icons.Default.Star, contentDescription = null, tint = MaruAccentYellow, modifier = Modifier.size(10.dp))
-                                                Text(text = "${itemMedia.score}", fontSize = 10.sp, color = MaruAccentYellow, fontWeight = FontWeight.Bold)
-                                            }
-                                        }
-                                    }
-
-                                    Text(
-                                        text = "Ep ${itemMedia.progress} / ${itemMedia.episodes ?: "?"}",
-                                        fontSize = 11.5.sp,
-                                        color = MaruTextMuted
-                                    )
-                                }
-
-                                // Linear Progress bar
-                                if (itemMedia.episodes != null && itemMedia.episodes!! > 0) {
-                                    val progressFraction = (itemMedia.progress.toFloat() / itemMedia.episodes!!.toFloat()).coerceIn(0f, 1f)
-                                    LinearProgressIndicator(
-                                        progress = { progressFraction },
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(4.dp)
-                                            .clip(CircleShape),
-                                        color = MaruAccentPink,
-                                        trackColor = MaruGlassSubtleBg,
-                                    )
-                                }
-                            }
-
-                            // +1 Episode Quick Button
-                            Surface(
-                                onClick = {
-                                    if (anilistToken.isNotBlank() && !isSyncing) {
-                                        val newProgress = itemMedia.progress + 1
-                                        val resolvedStatus = if (itemMedia.episodes != null && newProgress >= itemMedia.episodes!!) "COMPLETED" else (itemMedia.listStatus ?: "CURRENT")
-                                        scope.launch {
-                                            isSyncing = true
-                                            try {
-                                                val updated = withContext(Dispatchers.IO) {
-                                                    AniListClient.saveEntry(
-                                                        mediaId = itemMedia.mediaId,
-                                                        status = resolvedStatus,
-                                                        progress = newProgress,
-                                                        score = itemMedia.score,
-                                                        notes = itemMedia.notes,
-                                                        isPrivate = itemMedia.isPrivate,
-                                                        token = anilistToken
-                                                    )
-                                                }
-                                                itemMedia = updated
-                                                onMediaUpdated(updated)
-                                                Toast.makeText(context, "+1 Ep (${updated.progress})", Toast.LENGTH_SHORT).show()
-                                            } catch (e: Exception) {
-                                                Toast.makeText(context, "Error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
-                                            } finally {
-                                                isSyncing = false
-                                            }
-                                        }
-                                    }
-                                },
-                                shape = CircleShape,
-                                color = MaruAccentPink.copy(alpha = 0.2f),
-                                border = BorderStroke(1.dp, MaruAccentPink),
-                                modifier = Modifier.size(34.dp),
-                                enabled = !isSyncing
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Text("+1", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, color = MaruAccentPink)
-                                }
-                            }
+                            Icon(Icons.Default.Star, contentDescription = null, tint = MaruAccentYellow, modifier = Modifier.size(10.dp))
+                            Text(text = "${media.score}", fontSize = 9.5.sp, color = MaruAccentYellow, fontWeight = FontWeight.Bold)
                         }
+                    }
+                } else {
+                    Spacer(modifier = Modifier.size(1.dp))
+                }
+
+                if (media.externalLinks.any { it.isEnglishDub }) {
+                    Surface(
+                        color = Color(0xCC0E0A1A),
+                        shape = CircleShape,
+                        border = BorderStroke(1.dp, MaruAccentGreen.copy(alpha = 0.5f)),
+                        modifier = Modifier.size(22.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(text = "D", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaruAccentGreen)
+                        }
+                    }
+                }
+            }
+
+            // Bottom Text Info (Title + Ep Progress + Season)
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Text(
+                    text = media.title,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    lineHeight = 16.sp
+                )
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "Ep ${media.progress}",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaruAccentPink
+                    )
+                    Text(
+                        text = "/ ${media.episodes ?: "?"}",
+                        fontSize = 11.sp,
+                        color = MaruTextMuted
+                    )
+                    if (media.seasonYear != null) {
+                        Text(
+                            text = "â€¢ ${media.season ?: ""} ${media.seasonYear}",
+                            fontSize = 10.sp,
+                            color = MaruTextMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
             }

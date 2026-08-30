@@ -431,6 +431,11 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                         modifier = Modifier
                             .background(Brush.verticalGradient(listOf(MaruCosmicTop.copy(alpha = 0.95f), Color.Transparent)))
                             .statusBarsPadding(),
+                        navigationIcon = {
+                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaruTextStrong)
+                            }
+                        },
                         title = {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -453,6 +458,9 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                             }
                         },
                         actions = {
+                            IconButton(onClick = { selectedScreen = NavigationScreen.SEARCH }) {
+                                Icon(Icons.Default.Search, contentDescription = "Search", tint = MaruTextMuted)
+                            }
                             IconButton(onClick = { selectedScreen = NavigationScreen.SETTINGS }) {
                                 Icon(
                                     Icons.Default.Settings,
@@ -466,60 +474,6 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                             titleContentColor = MaruTextStrong
                         )
                     )
-                }
-            },
-            bottomBar = {
-                if (selectedAnimeDetail == null) {
-                    Surface(
-                        color = Color(0xF20E0A1A),
-                        border = BorderStroke(1.dp, MaruGlassBorderSoft),
-                        shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        NavigationBar(
-                            containerColor = Color.Transparent,
-                            contentColor = MaruTextStrong,
-                            modifier = Modifier
-                                .navigationBarsPadding()
-                                .height(64.dp)
-                        ) {
-                            val navItems = listOf(
-                                NavigationScreen.PROFILE,
-                                NavigationScreen.DASHBOARD,
-                                NavigationScreen.SEARCH,
-                                NavigationScreen.RECOMMENDATIONS
-                            )
-                            navItems.forEach { screen ->
-                                val isSelected = selectedScreen == screen
-                                NavigationBarItem(
-                                    selected = isSelected,
-                                    onClick = {
-                                        selectedScreen = screen
-                                        selectedAnimeDetail = null
-                                    },
-                                    icon = {
-                                        Icon(
-                                            screen.icon,
-                                            contentDescription = screen.title,
-                                            tint = if (isSelected) MaruAccentPink else MaruTextMuted,
-                                            modifier = Modifier.size(22.dp)
-                                        )
-                                    },
-                                    label = {
-                                        Text(
-                                            text = screen.title,
-                                            fontSize = 10.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                            color = if (isSelected) MaruAccentPink else MaruTextMuted
-                                        )
-                                    },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        indicatorColor = MaruAccentPink.copy(alpha = 0.2f)
-                                    )
-                                )
-                            }
-                        }
-                    }
                 }
             },
             containerColor = Color.Transparent
@@ -1040,6 +994,7 @@ private fun DrawerItemRow(
         }
     }
 }
+
 
 
 
