@@ -1,4 +1,4 @@
-﻿package io.maru.manime.screens
+package io.maru.manime.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
@@ -49,8 +49,11 @@ fun RecommendationsScreen(
 
     val displayedRecs = remember(recommendations, dubbedOnlyFilter) {
         if (!dubbedOnlyFilter) recommendations
-        else recommendations.filter { media ->
-            media.externalLinks.any { it.isEnglishDub || it.site.contains("Dub", ignoreCase = true) }
+        else {
+            val filtered = recommendations.filter { media ->
+                media.externalLinks.any { it.isEnglishDub }
+            }
+            if (filtered.isNotEmpty()) filtered else recommendations
         }
     }
 

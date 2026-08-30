@@ -1,11 +1,8 @@
-package io.maru.manime.screens
+﻿package io.maru.manime.screens
 
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,8 +27,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -56,22 +51,71 @@ fun AnimeDetailScreen(
     var isSynopsisExpanded by remember { mutableStateOf(false) }
     var isUpdatingList by remember { mutableStateOf(false) }
     var showEditSheet by remember { mutableStateOf(false) }
-    var selectedTab by remember { mutableIntStateOf(0) } // 0: Episodes, 1: Overview & Cast
 
     var streamingEpisodes by remember { mutableStateOf<List<StreamingEpisode>>(emptyList()) }
     var isEpisodesLoading by remember { mutableStateOf(true) }
 
+    var castList by remember { mutableStateOf<List<CastMember>>(emptyList()) }
+    var isCastLoading by remember { mutableStateOf(true) }
+
+    var activeVoiceActor by remember { mutableStateOf<VoiceActor?>(null) }
+    var activeStaffWorks by remember { mutableStateOf<StaffWorks?>(null) }
+    var isStaffLoading by remember { mutableStateOf(false) }
+
     LaunchedEffect(currentMedia.mediaId) {
         isEpisodesLoading = true
-        try {
-            val eps = withContext(Dispatchers.IO) {
-                AniListClient.getStreamingEpisodes(currentMedia.mediaId)
+        isCastLoading = true
+        scope.launch {
+            try {
+                streamingEpisodes = withContext(Dispatchers.IO) {
+                    AniListClient.getStreamingEpisodes(currentMedia.mediaId)
+                }
+            } catch (_: Exception) {
+                streamingEpisodes = emptyList()
+            } finally {
+                isEpisodesLoading = false
             }
-            streamingEpisodes = eps
-        } catch (_: Exception) {
-            streamingEpisodes = emptyList()
-        } finally {
-            isEpisodesLoading = false
+        }
+        scope.launch {
+            try {
+                castList = withContext(Dispatchers.IO) {
+                    AniListClient.getCast(currentMedia.mediaId)
+                }
+            } catch (_: Exception) {
+                castList = emptyList()
+            } finally {
+                isCastLoading = false
+            }
+        }
+    }
+
+    // Dynamic tabs: if no streaming episodes, hide Episodes tab completely!
+    val availableTabs = remember(streamingEpisodes) {
+        if (streamingEpisodes.isNotEmpty()) {
+            listOf("Overview", "Episodes (${streamingEpisodes.size})", "Cast")
+        } else {
+            listOf("Overview", "Cast")
+        }
+    }
+
+    var selectedTabIndex by remember { mutableIntStateOf(0) }
+    val currentTabName = availableTabs.getOrElse(selectedTabIndex) { "Overview" }
+
+    fun openVoiceActorWorks(va: VoiceActor) {
+        activeVoiceActor = va
+        activeStaffWorks = null
+        isStaffLoading = true
+        scope.launch {
+            try {
+                val works = withContext(Dispatchers.IO) {
+                    AniListClient.getStaffWorks(va.id)
+                }
+                activeStaffWorks = works
+            } catch (_: Exception) {
+                activeStaffWorks = null
+            } finally {
+                isStaffLoading = false
+            }
         }
     }
 
@@ -88,7 +132,6 @@ fun AnimeDetailScreen(
         }
     }
 
-    val totalEpisodes = maxOf(currentMedia.episodes ?: 0, streamingEpisodes.size).takeIf { it > 0 } ?: 12
     val hasEnglishDub = currentMedia.externalLinks.any { it.isEnglishDub }
 
     fun updateProgress(newProgress: Int, newStatus: String? = null) {
@@ -105,7 +148,6 @@ fun AnimeDetailScreen(
             currentMedia.listStatus ?: "CURRENT"
         }
 
-        // Optimistic UI update
         val optimisticMedia = currentMedia.copy(
             progress = safeProgress,
             listStatus = resolvedStatus
@@ -141,7 +183,6 @@ fun AnimeDetailScreen(
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
-            // Quick Track Floating Glass Bar at Bottom
             Surface(
                 color = Color(0xEE0E0A1A),
                 border = BorderStroke(1.dp, MaruGlassBorderSoft),
@@ -156,7 +197,6 @@ fun AnimeDetailScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Status Badge
                     val statusText = currentMedia.listStatus ?: "ADD TO LIST"
                     Surface(
                         onClick = { showEditSheet = true },
@@ -193,7 +233,6 @@ fun AnimeDetailScreen(
                         }
                     }
 
-                    // Episode Stepper & Counter
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -251,7 +290,6 @@ fun AnimeDetailScreen(
                 .padding(bottom = innerPadding.calculateBottomPadding()),
             contentPadding = PaddingValues(bottom = 24.dp)
         ) {
-            // Immersive Hero Header
             item(key = "header") {
                 Box(
                     modifier = Modifier
@@ -279,7 +317,6 @@ fun AnimeDetailScreen(
                             )
                     )
 
-                    // Floating Glass Back Button
                     IconButton(
                         onClick = onBack,
                         modifier = Modifier
@@ -295,7 +332,6 @@ fun AnimeDetailScreen(
                         )
                     }
 
-                    // Poster + Title Row
                     Row(
                         modifier = Modifier
                             .align(Alignment.BottomStart)
@@ -324,23 +360,28 @@ fun AnimeDetailScreen(
                                     shape = MaruPillShape,
                                     border = BorderStroke(1.dp, MaruAccentGreen.copy(alpha = 0.4f))
                                 ) {
-                                    Text(
-                                        text = "ðŸŽ™ï¸ ENGLISH DUBBED",
-                                        color = MaruAccentGreen,
-                                        fontSize = 9.5.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(Icons.Default.Mic, contentDescription = null, tint = MaruAccentGreen, modifier = Modifier.size(12.dp))
+                                        Text(
+                                            text = "ENGLISH DUBBED",
+                                            color = MaruAccentGreen,
+                                            fontSize = 9.5.sp,
+                                            fontWeight = FontWeight.ExtraBold
+                                        )
+                                    }
                                 }
                             }
 
                             Text(
                                 text = currentMedia.title,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 17.sp,
+                                fontSize = 16.sp,
                                 color = MaruTextStrong,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
+                                lineHeight = 20.sp
                             )
 
                             if (!currentMedia.titleEnglish.isNullOrEmpty() && currentMedia.titleEnglish != currentMedia.title) {
@@ -348,8 +389,7 @@ fun AnimeDetailScreen(
                                     text = currentMedia.titleEnglish!!,
                                     fontSize = 11.5.sp,
                                     color = MaruTextMuted,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    lineHeight = 15.sp
                                 )
                             }
 
@@ -375,7 +415,7 @@ fun AnimeDetailScreen(
                                 }
                                 Text(text = "${currentMedia.episodes ?: "?"} eps", fontSize = 11.5.sp, color = MaruTextMuted)
                                 if (currentMedia.format != null) {
-                                    Text(text = "â€¢ ${currentMedia.format}", fontSize = 11.5.sp, color = MaruTextMuted)
+                                    Text(text = "${currentMedia.format}", fontSize = 11.5.sp, color = MaruTextMuted)
                                 }
                             }
                         }
@@ -383,7 +423,7 @@ fun AnimeDetailScreen(
                 }
             }
 
-            // Sub Navigation Tab Bar (Episodes vs Overview)
+            // Sub Navigation Tab Bar
             item(key = "sub_tabs") {
                 Row(
                     modifier = Modifier
@@ -391,10 +431,10 @@ fun AnimeDetailScreen(
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    listOf("Episodes (${totalEpisodes})", "Overview & Info").forEachIndexed { index, title ->
-                        val isSelected = selectedTab == index
+                    availableTabs.forEachIndexed { index, title ->
+                        val isSelected = selectedTabIndex == index
                         Surface(
-                            onClick = { selectedTab = index },
+                            onClick = { selectedTabIndex = index },
                             shape = MaruPillShape,
                             color = if (isSelected) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
                             border = BorderStroke(1.dp, if (isSelected) MaruAccentPink else MaruGlassBorderSoft),
@@ -406,7 +446,7 @@ fun AnimeDetailScreen(
                             ) {
                                 Text(
                                     text = title.uppercase(),
-                                    fontSize = 11.sp,
+                                    fontSize = 10.5.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = if (isSelected) MaruAccentPink else MaruTextMuted
                                 )
@@ -416,117 +456,8 @@ fun AnimeDetailScreen(
                 }
             }
 
-            if (selectedTab == 0) {
-                // ================= EPISODES TAB =================
-                items(totalEpisodes, key = { "ep_$it" }) { index ->
-                    val episodeNum = index + 1
-                    val isWatched = episodeNum <= currentMedia.progress
-                    val streamEp = streamingEpisodes.find { it.episodeNumber == episodeNum }
-                        ?: streamingEpisodes.getOrNull(index)
-
-                    // Extract title cleanly without duplicate Episode prefix
-                    val rawTitle = streamEp?.title?.trim()
-                    val cleanSubTitle = if (!rawTitle.isNullOrBlank()) {
-                        rawTitle.replaceFirst(Regex("^Episode\\s*\\d+\\s*[-:â€“\\.]\\s*", RegexOption.IGNORE_CASE), "").trim()
-                    } else ""
-
-                    val displayTitle = if (cleanSubTitle.isNotBlank()) cleanSubTitle else if (!rawTitle.isNullOrBlank()) rawTitle else "Episode $episodeNum"
-
-                    GlassCard(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp)
-                            .clickable { updateProgress(episodeNum) }
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(10.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // Episode Thumbnail Preview with Checkmark Overlay
-                            Box(
-                                modifier = Modifier
-                                    .width(112.dp)
-                                    .height(66.dp)
-                                    .clip(MaruInputShape)
-                                    .background(Color(0x33000000)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                if (!streamEp?.thumbnail.isNullOrBlank()) {
-                                    AsyncImage(
-                                        model = streamEp!!.thumbnail,
-                                        contentDescription = displayTitle,
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier.fillMaxSize()
-                                    )
-                                    if (isWatched) {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxSize()
-                                                .background(Color(0x66000000))
-                                        )
-                                    }
-                                }
-
-                                // Episode Number or Watched Check Badge
-                                Surface(
-                                    color = if (isWatched) Color(0xDD4ADE80) else Color(0xCC0E0A1A),
-                                    shape = CircleShape,
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        if (isWatched) {
-                                            Icon(
-                                                Icons.Default.Check,
-                                                contentDescription = "Watched",
-                                                tint = Color(0xFF0E0A1A),
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                        } else {
-                                            Text(
-                                                text = "$episodeNum",
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.ExtraBold,
-                                                color = MaruTextStrong
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Episode Title (Full text, wrapped naturally, no ellipsis cutoff)
-                            Column(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .padding(vertical = 2.dp),
-                                verticalArrangement = Arrangement.spacedBy(3.dp)
-                            ) {
-                                Text(
-                                    text = "Episode $episodeNum",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 10.5.sp,
-                                        letterSpacing = 0.5.sp
-                                    ),
-                                    color = if (isWatched) MaruAccentGreen else MaruAccentBlue
-                                )
-
-                                Text(
-                                    text = displayTitle,
-                                    fontSize = 13.5.sp,
-                                    fontWeight = if (isWatched) FontWeight.SemiBold else FontWeight.Normal,
-                                    color = if (isWatched) MaruTextStrong else MaruTextStrong.copy(alpha = 0.9f),
-                                    lineHeight = 18.sp
-                                )
-                            }
-                        }
-                    }
-                }
-            } else {
-                // ================= OVERVIEW & CAST TAB =================
-                // Genres Row
+            if (currentTabName.startsWith("Overview", ignoreCase = true)) {
+                // ================= OVERVIEW TAB =================
                 item(key = "genres_row") {
                     if (currentMedia.genres.isNotEmpty()) {
                         Row(
@@ -555,7 +486,6 @@ fun AnimeDetailScreen(
                     }
                 }
 
-                // Synopsis Card
                 item(key = "synopsis") {
                     GlassCard(
                         modifier = Modifier
@@ -578,8 +508,7 @@ fun AnimeDetailScreen(
                                 fontSize = 13.sp,
                                 color = MaruTextStrong.copy(alpha = 0.9f),
                                 lineHeight = 18.sp,
-                                maxLines = if (isSynopsisExpanded) Int.MAX_VALUE else 3,
-                                overflow = TextOverflow.Ellipsis
+                                maxLines = if (isSynopsisExpanded) Int.MAX_VALUE else 3
                             )
                             Text(
                                 text = if (isSynopsisExpanded) "Show less" else "Read more...",
@@ -591,7 +520,6 @@ fun AnimeDetailScreen(
                     }
                 }
 
-                // IsThisDubbed Applet Card
                 item(key = "is_this_dubbed_card") {
                     var dubDetails by remember { mutableStateOf<DubDetails?>(null) }
                     var isDubLoading by remember { mutableStateOf(true) }
@@ -670,7 +598,7 @@ fun AnimeDetailScreen(
 
                                 if (dubDetails?.englishCast?.isNotEmpty() == true) {
                                     Text(
-                                        text = "ENGLISH VOICE CAST",
+                                        text = "FEATURED ENGLISH CAST",
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = MaruTextMuted,
@@ -678,9 +606,11 @@ fun AnimeDetailScreen(
                                     )
 
                                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        dubDetails!!.englishCast.take(6).forEach { role ->
+                                        dubDetails!!.englishCast.take(4).forEach { role ->
                                             Row(
-                                                modifier = Modifier.fillMaxWidth(),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable { role.voiceActor?.let { openVoiceActorWorks(it) } },
                                                 horizontalArrangement = Arrangement.SpaceBetween,
                                                 verticalAlignment = Alignment.CenterVertically
                                             ) {
@@ -710,7 +640,6 @@ fun AnimeDetailScreen(
                     }
                 }
 
-                // External Links Row
                 if (currentMedia.externalLinks.isNotEmpty()) {
                     item(key = "ext_links") {
                         Column(
@@ -759,11 +688,440 @@ fun AnimeDetailScreen(
                         }
                     }
                 }
+            } else if (currentTabName.startsWith("Episodes", ignoreCase = true)) {
+                // ================= EPISODES TAB =================
+                items(streamingEpisodes, key = { "stream_ep_${it.episodeNumber}" }) { streamEp ->
+                    val episodeNum = streamEp.episodeNumber
+                    val isWatched = episodeNum <= currentMedia.progress
+
+                    val rawTitle = streamEp.title?.trim()
+                    val cleanSubTitle = if (!rawTitle.isNullOrBlank()) {
+                        rawTitle.replaceFirst(Regex("^Episode\\s*\\d+\\s*[-:\\.]\\s*", RegexOption.IGNORE_CASE), "").trim()
+                    } else ""
+
+                    val displayTitle = if (cleanSubTitle.isNotBlank()) cleanSubTitle else if (!rawTitle.isNullOrBlank()) rawTitle else "Episode $episodeNum"
+
+                    GlassCard(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                            .clickable { updateProgress(episodeNum) }
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(112.dp)
+                                    .height(66.dp)
+                                    .clip(MaruInputShape)
+                                    .background(Color(0x33000000)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (!streamEp.thumbnail.isNullOrBlank()) {
+                                    AsyncImage(
+                                        model = streamEp.thumbnail,
+                                        contentDescription = displayTitle,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    if (isWatched) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .background(Color(0x66000000))
+                                        )
+                                    }
+                                }
+
+                                Surface(
+                                    color = if (isWatched) Color(0xDD4ADE80) else Color(0xCC0E0A1A),
+                                    shape = CircleShape,
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        if (isWatched) {
+                                            Icon(
+                                                Icons.Default.Check,
+                                                contentDescription = "Watched",
+                                                tint = Color(0xFF0E0A1A),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        } else {
+                                            Text(
+                                                text = "$episodeNum",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = MaruTextStrong
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(vertical = 2.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Text(
+                                    text = "Episode $episodeNum",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.5.sp,
+                                        letterSpacing = 0.5.sp
+                                    ),
+                                    color = if (isWatched) MaruAccentGreen else MaruAccentBlue
+                                )
+
+                                Text(
+                                    text = displayTitle,
+                                    fontSize = 13.5.sp,
+                                    fontWeight = if (isWatched) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = if (isWatched) MaruTextStrong else MaruTextStrong.copy(alpha = 0.9f),
+                                    lineHeight = 18.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                // ================= CAST TAB =================
+                if (isCastLoading) {
+                    item(key = "cast_loading") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 48.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(color = MaruAccentPink)
+                        }
+                    }
+                } else if (castList.isEmpty()) {
+                    item(key = "cast_empty") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 48.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("No cast information found.", color = MaruTextMuted, fontSize = 13.sp)
+                        }
+                    }
+                } else {
+                    items(castList, key = { "char_${it.characterId}" }) { cast ->
+                        GlassCard(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 5.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    if (cast.characterImage != null) {
+                                        AsyncImage(
+                                            model = cast.characterImage,
+                                            contentDescription = cast.characterName,
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier
+                                                .size(46.dp)
+                                                .clip(CircleShape)
+                                                .border(BorderStroke(1.dp, MaruGlassBorderSoft), CircleShape)
+                                        )
+                                    }
+
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = cast.characterName,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaruTextStrong
+                                        )
+                                        if (!cast.characterNameNative.isNullOrBlank()) {
+                                            Text(
+                                                text = cast.characterNameNative,
+                                                fontSize = 11.sp,
+                                                color = MaruTextMuted
+                                            )
+                                        }
+                                    }
+
+                                    if (cast.role != null) {
+                                        Surface(
+                                            color = if (cast.role.equals("MAIN", ignoreCase = true)) Color(0x33E85D9F) else MaruGlassSubtleBg,
+                                            shape = MaruPillShape,
+                                            border = BorderStroke(1.dp, if (cast.role.equals("MAIN", ignoreCase = true)) MaruAccentPink else MaruGlassBorderSoft)
+                                        ) {
+                                            Text(
+                                                text = cast.role.uppercase(),
+                                                fontSize = 9.5.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (cast.role.equals("MAIN", ignoreCase = true)) MaruAccentPink else MaruTextMuted,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    if (cast.japaneseVa != null) {
+                                        Surface(
+                                            onClick = { openVoiceActorWorks(cast.japaneseVa) },
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = Color(0x2218122B),
+                                            border = BorderStroke(1.dp, MaruAccentPurple.copy(alpha = 0.4f)),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                if (cast.japaneseVa.image != null) {
+                                                    AsyncImage(
+                                                        model = cast.japaneseVa.image,
+                                                        contentDescription = cast.japaneseVa.name,
+                                                        contentScale = ContentScale.Crop,
+                                                        modifier = Modifier
+                                                            .size(32.dp)
+                                                            .clip(CircleShape)
+                                                    )
+                                                }
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = "JAPANESE",
+                                                        fontSize = 8.5.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = MaruAccentPurple
+                                                    )
+                                                    Text(
+                                                        text = cast.japaneseVa.name,
+                                                        fontSize = 11.5.sp,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = MaruTextStrong,
+                                                        lineHeight = 14.sp
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if (cast.englishVa != null) {
+                                        Surface(
+                                            onClick = { openVoiceActorWorks(cast.englishVa) },
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = Color(0x2218122B),
+                                            border = BorderStroke(1.dp, MaruAccentGreen.copy(alpha = 0.4f)),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                if (cast.englishVa.image != null) {
+                                                    AsyncImage(
+                                                        model = cast.englishVa.image,
+                                                        contentDescription = cast.englishVa.name,
+                                                        contentScale = ContentScale.Crop,
+                                                        modifier = Modifier
+                                                            .size(32.dp)
+                                                            .clip(CircleShape)
+                                                    )
+                                                }
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = "ENGLISH",
+                                                        fontSize = 8.5.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = MaruAccentGreen
+                                                    )
+                                                    Text(
+                                                        text = cast.englishVa.name,
+                                                        fontSize = 11.5.sp,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = MaruTextStrong,
+                                                        lineHeight = 14.sp
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    // Modern ModalBottomSheet for Status & Score Editing
+    if (activeVoiceActor != null) {
+        ModalBottomSheet(
+            onDismissRequest = { activeVoiceActor = null },
+            containerColor = Color(0xFF140E24),
+            contentColor = MaruTextStrong
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    if (activeVoiceActor?.image != null) {
+                        AsyncImage(
+                            model = activeVoiceActor!!.image,
+                            contentDescription = activeVoiceActor!!.name,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .border(BorderStroke(2.dp, MaruAccentPink), CircleShape)
+                        )
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = activeVoiceActor!!.name,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaruTextStrong
+                        )
+                        if (!activeStaffWorks?.nameNative.isNullOrBlank()) {
+                            Text(
+                                text = activeStaffWorks!!.nameNative!!,
+                                fontSize = 12.sp,
+                                color = MaruTextMuted
+                            )
+                        }
+                        Text(
+                            text = "${activeVoiceActor!!.language} Voice Actor",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaruAccentPink
+                        )
+                    }
+                }
+
+                HorizontalDivider(color = MaruGlassBorderSoft, thickness = 1.dp)
+
+                Text(
+                    text = "OTHER ROLES & WORKS",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.8.sp
+                    ),
+                    color = MaruAccentBlue
+                )
+
+                if (isStaffLoading) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(200.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(color = MaruAccentPink)
+                    }
+                } else if (activeStaffWorks?.works.isNullOrEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(150.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("No other works cataloged.", color = MaruTextMuted, fontSize = 13.sp)
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        activeStaffWorks!!.works.forEach { workMedia ->
+                            Surface(
+                                onClick = {
+                                    activeVoiceActor = null
+                                    currentMedia = workMedia
+                                    onMediaUpdated(workMedia)
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color(0xFF1B1430),
+                                border = BorderStroke(1.dp, MaruGlassBorderSoft),
+                                modifier = Modifier
+                                    .width(110.dp)
+                                    .height(175.dp)
+                            ) {
+                                Box(modifier = Modifier.fillMaxSize()) {
+                                    AsyncImage(
+                                        model = workMedia.coverUrl,
+                                        contentDescription = workMedia.title,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(
+                                                Brush.verticalGradient(
+                                                    listOf(Color.Transparent, Color(0x99000000), Color(0xF5000000))
+                                                )
+                                            )
+                                    )
+                                    Column(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomStart)
+                                            .padding(6.dp)
+                                    ) {
+                                        Text(
+                                            text = workMedia.title,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White,
+                                            lineHeight = 14.sp
+                                        )
+                                        if (workMedia.averageScore != null) {
+                                            Text(
+                                                text = "â˜… ${workMedia.averageScore}%",
+                                                fontSize = 9.5.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaruAccentYellow
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if (showEditSheet) {
         var selectedStatus by remember { mutableStateOf(currentMedia.listStatus ?: "CURRENT") }
         var selectedScore by remember { mutableStateOf(currentMedia.score?.toString() ?: "") }
@@ -788,7 +1146,6 @@ fun AnimeDetailScreen(
                     color = MaruTextStrong
                 )
 
-                // Status Chips
                 Text("STATUS", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold), color = MaruTextMuted)
                 Row(
                     modifier = Modifier
@@ -815,7 +1172,6 @@ fun AnimeDetailScreen(
                     }
                 }
 
-                // Progress & Score Inputs
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -849,7 +1205,6 @@ fun AnimeDetailScreen(
                     )
                 }
 
-                // Save Button
                 Button(
                     onClick = {
                         showEditSheet = false

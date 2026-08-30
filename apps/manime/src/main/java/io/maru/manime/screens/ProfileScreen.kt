@@ -1,4 +1,4 @@
-﻿package io.maru.manime.screens
+package io.maru.manime.screens
 
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
@@ -40,6 +40,7 @@ fun ProfileScreen(
     completedCount: Int,
     planningCount: Int,
     anilistToken: String,
+    isLoading: Boolean = false,
     onLoginClick: () -> Unit,
     onLogoutClick: () -> Unit,
     onAnimeClick: (AnimeMedia) -> Unit,
@@ -192,7 +193,11 @@ fun ProfileScreen(
                         .padding(vertical = 48.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("No anime in $selectedCategory.", color = MaruTextMuted, fontSize = 13.sp)
+                    if (isLoading) {
+                        CircularProgressIndicator(color = MaruAccentPink)
+                    } else {
+                        Text("No anime in $selectedCategory.", color = MaruTextMuted, fontSize = 13.sp)
+                    }
                 }
             }
         } else {
@@ -297,12 +302,10 @@ fun PosterCard(
             ) {
                 Text(
                     text = media.title,
-                    fontSize = 13.sp,
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    lineHeight = 16.sp
+                    lineHeight = 15.sp
                 )
 
                 Row(

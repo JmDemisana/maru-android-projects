@@ -1,4 +1,4 @@
-package io.maru.manime
+﻿package io.maru.manime
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -8,10 +8,6 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
-
-// ---------------------------------------------------------------------------
-// Data models
-// ---------------------------------------------------------------------------
 
 data class AniListUser(
     val id: Int,
@@ -40,7 +36,6 @@ data class AnimeMedia(
     val nextEpisode: Int?,
     val nextEpisodeAt: Long?,
     val externalLinks: List<ExternalLink>,
-    // List entry fields (null if not on user's list)
     val listEntryId: Int?,
     val listStatus: String?,
     val progress: Int,
@@ -58,7 +53,14 @@ data class ExternalLink(
     val language: String?
 ) {
     val isEnglishDub: Boolean get() =
-        language?.uppercase() == "ENGLISH" && type.uppercase() == "STREAMING"
+        language?.equals("ENGLISH", ignoreCase = true) == true ||
+        site.contains("Dub", ignoreCase = true) ||
+        url.contains("dub", ignoreCase = true) ||
+        site.contains("Funimation", ignoreCase = true) ||
+        site.contains("Crunchyroll", ignoreCase = true) ||
+        site.contains("HIDIVE", ignoreCase = true) ||
+        site.contains("Netflix", ignoreCase = true) ||
+        site.contains("Hulu", ignoreCase = true)
 }
 
 data class VoiceActor(
@@ -66,6 +68,25 @@ data class VoiceActor(
     val name: String,
     val image: String?,
     val language: String
+)
+
+data class CastMember(
+    val characterId: Int,
+    val characterName: String,
+    val characterNameNative: String?,
+    val characterImage: String?,
+    val role: String?,
+    val japaneseVa: VoiceActor?,
+    val englishVa: VoiceActor?
+)
+
+data class StaffWorks(
+    val staffId: Int,
+    val name: String,
+    val nameNative: String?,
+    val image: String?,
+    val language: String?,
+    val works: List<AnimeMedia>
 )
 
 data class CharacterRole(
@@ -76,7 +97,7 @@ data class CharacterRole(
 
 data class DubDetails(
     val isDubbed: Boolean,
-    val dubConfidence: String, // "CONFIRMED" | "PARTIAL" | "SUB_ONLY"
+    val dubConfidence: String,
     val englishCast: List<CharacterRole>,
     val streamingPlatforms: List<String>
 )
@@ -86,7 +107,7 @@ data class AniListActivity(
     val userId: Int,
     val userName: String,
     val userAvatar: String?,
-    val type: String, // "TEXT" | "ANIME_LIST" | "MESSAGE"
+    val type: String,
     val status: String?,
     val progress: String?,
     val text: String?,
@@ -98,17 +119,18 @@ data class AniListActivity(
 )
 
 data class StreamingEpisode(
-    val episodeNumber: Int,    // 1-based, inferred from position
-    val title: String?,        // may be null for some shows
+    val episodeNumber: Int,
+    val title: String?,
     val thumbnail: String?,
     val site: String?,
     val url: String?
 )
 
-// ---------------------------------------------------------------------------
-// AniList GraphQL Client — direct calls to https://graphql.anilist.co
-// Queries mirror those in IsThisDubbed.tsx on the site.
-// ---------------------------------------------------------------------------
+data class SearchPage(
+    val results: List<AnimeMedia>,
+    val hasNextPage: Boolean,
+    val total: Int?
+)
 
 object AniListClient {
     private const val ENDPOINT = "https://graphql.anilist.co"
@@ -120,9 +142,12 @@ object AniListClient {
 
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
-    // -----------------------------------------------------------------------
-    // Core request helper
-    // -----------------------------------------------------------------------
+    private fun JSONObject?.optNullableString(name: String): String? {
+        if (this == null || isNull(name)) return null
+        val s = optString(name, "").trim()
+        return if (s.isEmpty() || s.equals("null", ignoreCase = true)) null else s
+    }
+
     private suspend fun query(
         gql: String,
         variables: Map<String, Any?> = emptyMap(),
@@ -149,9 +174,6 @@ object AniListClient {
         json.getJSONObject("data")
     }
 
-    // -----------------------------------------------------------------------
-    // Mappers
-    // -----------------------------------------------------------------------
     private fun mapMedia(obj: JSONObject, listEntry: JSONObject? = null): AnimeMedia {
         val title = obj.optJSONObject("title")
         val cover = obj.optJSONObject("coverImage")
@@ -164,47 +186,53 @@ object AniListClient {
             val l = rawLinks.getJSONObject(i)
             links += ExternalLink(
                 id = l.optInt("id"),
-                url = l.optString("url"),
-                site = l.optString("site"),
-                type = l.optString("type"),
-                language = l.optString("language").ifEmpty { null }
+                url = l.optString("url", ""),
+                site = l.optString("site", ""),
+                type = l.optString("type", ""),
+                language = l.optNullableString("language")
             )
         }
 
         val genres = mutableListOf<String>()
         val rawGenres = obj.optJSONArray("genres")
-        if (rawGenres != null) for (i in 0 until rawGenres.length()) genres += rawGenres.getString(i)
+        if (rawGenres != null) for (i in 0 until rawGenres.length()) {
+            val g = rawGenres.optString(i, "").trim()
+            if (g.isNotEmpty() && !g.equals("null", ignoreCase = true)) genres += g
+        }
 
-        val titlePref = title?.optString("english").orEmpty()
-            .ifEmpty { title?.optString("romaji").orEmpty() }
-            .ifEmpty { title?.optString("userPreferred").orEmpty() }
+        val titleEng = title?.optNullableString("english")
+        val titleRom = title?.optNullableString("romaji")
+        val titlePref = title?.optNullableString("userPreferred")
+        val titleNative = title?.optNullableString("native")
+
+        val displayTitle = titleEng ?: titleRom ?: titlePref ?: titleNative ?: "Untitled"
 
         return AnimeMedia(
             mediaId       = obj.getInt("id"),
-            title         = titlePref.ifEmpty { "Untitled" },
-            titleEnglish  = title?.optString("english")?.ifEmpty { null },
-            titleRomaji   = title?.optString("romaji")?.ifEmpty { null },
-            coverUrl      = cover?.optString("large")?.ifEmpty { null },
-            bannerUrl     = obj.optString("bannerImage").ifEmpty { null },
-            accentColor   = cover?.optString("color")?.ifEmpty { null },
+            title         = displayTitle,
+            titleEnglish  = titleEng,
+            titleRomaji   = titleRom,
+            coverUrl      = cover?.optNullableString("large") ?: cover?.optNullableString("medium"),
+            bannerUrl     = obj.optNullableString("bannerImage"),
+            accentColor   = cover?.optNullableString("color"),
             episodes      = obj.optInt("episodes").takeIf { it > 0 },
-            format        = obj.optString("format").ifEmpty { null },
-            status        = obj.optString("status").ifEmpty { null },
-            season        = obj.optString("season").ifEmpty { null },
+            format        = obj.optNullableString("format"),
+            status        = obj.optNullableString("status"),
+            season        = obj.optNullableString("season"),
             seasonYear    = obj.optInt("seasonYear").takeIf { it > 0 },
             averageScore  = obj.optInt("averageScore").takeIf { it > 0 },
             genres        = genres,
-            description   = obj.optString("description").ifEmpty { null },
-            siteUrl       = obj.optString("siteUrl").ifEmpty { null },
+            description   = obj.optNullableString("description"),
+            siteUrl       = obj.optNullableString("siteUrl"),
             isAdult       = obj.optBoolean("isAdult"),
             nextEpisode   = nextAir?.optInt("episode")?.takeIf { it > 0 },
             nextEpisodeAt = nextAir?.optLong("airingAt")?.takeIf { it > 0 },
             externalLinks = links,
             listEntryId   = le?.optInt("id")?.takeIf { it > 0 },
-            listStatus    = le?.optString("status")?.ifEmpty { null },
+            listStatus    = le?.optNullableString("status"),
             progress      = le?.optInt("progress") ?: 0,
             score         = le?.optDouble("score")?.takeIf { it > 0 },
-            notes         = le?.optString("notes")?.ifEmpty { null },
+            notes         = le?.optNullableString("notes"),
             isPrivate     = le?.optBoolean("private") ?: false,
             updatedAt     = le?.optLong("updatedAt")?.takeIf { it > 0 }
         )
@@ -221,9 +249,6 @@ object AniListClient {
         mediaListEntry { id status score progress private notes updatedAt }
     """.trimIndent()
 
-    // -----------------------------------------------------------------------
-    // Viewer (auth check)
-    // -----------------------------------------------------------------------
     suspend fun getViewer(token: String): AniListUser {
         val data = query("""
             query { Viewer { id name avatar { medium } } }
@@ -236,10 +261,33 @@ object AniListClient {
         )
     }
 
-    // -----------------------------------------------------------------------
-    // User list (currently watching, planning, etc.)
-    // -----------------------------------------------------------------------
-    suspend fun getUserList(username: String, token: String? = null): Map<String, List<AnimeMedia>> {
+    fun parseUserListJson(data: JSONObject): Map<String, List<AnimeMedia>> {
+        val result = mutableMapOf<String, MutableList<AnimeMedia>>()
+        val collection = data.optJSONObject("MediaListCollection") ?: return emptyMap()
+        val lists = collection.optJSONArray("lists") ?: return emptyMap()
+        for (i in 0 until lists.length()) {
+            val list = lists.getJSONObject(i)
+            val listName = list.optString("name", "List")
+            val entries = list.optJSONArray("entries") ?: continue
+            val bucket = result.getOrPut(listName) { mutableListOf() }
+            for (j in 0 until entries.length()) {
+                val entry = entries.getJSONObject(j)
+                val media = entry.optJSONObject("media") ?: continue
+                bucket += mapMedia(media, entry)
+            }
+        }
+        return result
+    }
+
+    fun parseUserListJsonString(jsonStr: String): Map<String, List<AnimeMedia>> {
+        return try {
+            parseUserListJson(JSONObject(jsonStr))
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    suspend fun getUserListRawJson(username: String, token: String? = null): Pair<String, Map<String, List<AnimeMedia>>> {
         val data = query("""
             query (${'$'}name: String) {
               MediaListCollection(userName: ${'$'}name, type: ANIME) {
@@ -253,26 +301,13 @@ object AniListClient {
               }
             }
         """, mapOf("name" to username), token)
-
-        val result = mutableMapOf<String, MutableList<AnimeMedia>>()
-        val lists = data.getJSONObject("MediaListCollection").getJSONArray("lists")
-        for (i in 0 until lists.length()) {
-            val list = lists.getJSONObject(i)
-            val listName = list.getString("name")
-            val entries = list.getJSONArray("entries")
-            val bucket = result.getOrPut(listName) { mutableListOf() }
-            for (j in 0 until entries.length()) {
-                val entry = entries.getJSONObject(j)
-                val media = entry.optJSONObject("media") ?: continue
-                bucket += mapMedia(media, entry)
-            }
-        }
-        return result
+        return Pair(data.toString(), parseUserListJson(data))
     }
 
-    // -----------------------------------------------------------------------
-    // Trending / Dashboard
-    // -----------------------------------------------------------------------
+    suspend fun getUserList(username: String, token: String? = null): Map<String, List<AnimeMedia>> {
+        return getUserListRawJson(username, token).second
+    }
+
     suspend fun getTrending(perPage: Int = 20): List<AnimeMedia> {
         val data = query("""
             query {
@@ -284,18 +319,21 @@ object AniListClient {
         return parsePageMedia(data)
     }
 
-    // -----------------------------------------------------------------------
-    // Search
-    // -----------------------------------------------------------------------
-    suspend fun search(q: String, page: Int = 1, perPage: Int = 20, token: String? = null): SearchPage {
+    suspend fun search(
+        queryStr: String,
+        page: Int = 1,
+        perPage: Int = 20,
+        token: String? = null
+    ): SearchPage {
         val data = query("""
             query (${'$'}search: String, ${'$'}page: Int, ${'$'}perPage: Int) {
               Page(page: ${'$'}page, perPage: ${'$'}perPage) {
-                pageInfo { hasNextPage total }
-                media(search: ${'$'}search, type: ANIME) { ${mediaFields()} }
+                pageInfo { total hasNextPage }
+                media(search: ${'$'}search, type: ANIME, sort: [SEARCH_MATCH, POPULARITY_DESC]) { ${mediaFields()} }
               }
             }
-        """, mapOf("search" to q, "page" to page, "perPage" to perPage), token)
+        """, mapOf("search" to queryStr, "page" to page, "perPage" to perPage), token)
+
         val page0 = data.getJSONObject("Page")
         val info = page0.optJSONObject("pageInfo")
         return SearchPage(
@@ -305,9 +343,6 @@ object AniListClient {
         )
     }
 
-    // -----------------------------------------------------------------------
-    // Category browse (genre / tag)
-    // -----------------------------------------------------------------------
     suspend fun browseCategory(genre: String? = null, tag: String? = null, perPage: Int = 40): List<AnimeMedia> {
         val vars = mutableMapOf<String, Any?>()
         val genreFilter = if (genre != null) ", genre: \$genre" else ""
@@ -324,12 +359,9 @@ object AniListClient {
         return parsePageMedia(data)
     }
 
-    // -----------------------------------------------------------------------
-    // Recommendations from a set of media IDs
-    // -----------------------------------------------------------------------
     suspend fun getRecommendations(mediaIds: List<Int>): List<AnimeMedia> {
         if (mediaIds.isEmpty()) return emptyList()
-        val ids = mediaIds.take(20) // limit to avoid oversized query
+        val ids = mediaIds.take(20)
         val data = query("""
             query (${'$'}ids: [Int]) {
               Page(page: 1, perPage: 50) {
@@ -358,9 +390,6 @@ object AniListClient {
         return results
     }
 
-    // -----------------------------------------------------------------------
-    // Save / Delete list entry (requires token)
-    // -----------------------------------------------------------------------
     suspend fun saveEntry(
         mediaId: Int, status: String, progress: Int?,
         score: Double?, notes: String?, isPrivate: Boolean,
@@ -390,40 +419,51 @@ object AniListClient {
         return data.getJSONObject("DeleteMediaListEntry").optBoolean("deleted")
     }
 
-data class SearchPage(
-    val results: List<AnimeMedia>,
-    val hasNextPage: Boolean,
-    val total: Int?
-)
-
-    // -----------------------------------------------------------------------
-    // AniList Activity Feed (Community Posts & List Updates)
-    // -----------------------------------------------------------------------
     suspend fun getActivities(page: Int = 1, perPage: Int = 25, isFollowing: Boolean = false, token: String? = null): List<AniListActivity> {
-        val data = query("""
-            query (${'$'}page: Int, ${'$'}perPage: Int, ${'$'}isFollowing: Boolean) {
-              Page(page: ${'$'}page, perPage: ${'$'}perPage) {
-                activities(isFollowing: ${'$'}isFollowing, sort: ID_DESC) {
-                  ... on TextActivity {
-                    id userId text replyCount likeCount createdAt
-                    user { name avatar { medium } }
-                  }
-                  ... on ListActivity {
-                    id userId status progress replyCount likeCount createdAt
-                    user { name avatar { medium } }
-                    media {
-                      title { userPreferred english romaji }
-                      coverImage { medium }
+        val isFollow = if (isFollowing && !token.isNullOrBlank()) true else false
+        val data = try {
+            query("""
+                query (${'$'}page: Int, ${'$'}perPage: Int, ${'$'}isFollowing: Boolean) {
+                  Page(page: ${'$'}page, perPage: ${'$'}perPage) {
+                    activities(isFollowing: ${'$'}isFollowing, type_in: [TEXT, ANIME_LIST], sort: ID_DESC) {
+                      ... on TextActivity {
+                        id userId text replyCount likeCount createdAt
+                        user { name avatar { medium } }
+                      }
+                      ... on ListActivity {
+                        id userId status progress replyCount likeCount createdAt
+                        user { name avatar { medium } }
+                        media {
+                          title { userPreferred english romaji }
+                          coverImage { medium }
+                        }
+                      }
                     }
                   }
-                  ... on MessageActivity {
-                    id recipientId message replyCount likeCount createdAt
-                    messenger { name avatar { medium } }
+                }
+            """, mapOf("page" to page, "perPage" to perPage, "isFollowing" to isFollow), token)
+        } catch (_: Exception) {
+            query("""
+                query (${'$'}page: Int, ${'$'}perPage: Int) {
+                  Page(page: ${'$'}page, perPage: ${'$'}perPage) {
+                    activities(sort: ID_DESC) {
+                      ... on TextActivity {
+                        id userId text replyCount likeCount createdAt
+                        user { name avatar { medium } }
+                      }
+                      ... on ListActivity {
+                        id userId status progress replyCount likeCount createdAt
+                        user { name avatar { medium } }
+                        media {
+                          title { userPreferred english romaji }
+                          coverImage { medium }
+                        }
+                      }
+                    }
                   }
                 }
-              }
-            }
-        """, mapOf("page" to page, "perPage" to perPage, "isFollowing" to isFollowing), token)
+            """, mapOf("page" to page, "perPage" to perPage))
+        }
 
         val pageObj = data.optJSONObject("Page") ?: return emptyList()
         val activitiesArr = pageObj.optJSONArray("activities") ?: return emptyList()
@@ -432,7 +472,7 @@ data class SearchPage(
         for (i in 0 until activitiesArr.length()) {
             val act = activitiesArr.optJSONObject(i) ?: continue
             val id = act.optInt("id")
-            val userObj = act.optJSONObject("user") ?: act.optJSONObject("messenger")
+            val userObj = act.optJSONObject("user")
             val userName = userObj?.optString("name", "User") ?: "User"
             val userAvatar = userObj?.optJSONObject("avatar")?.optString("medium")
             val replyCount = act.optInt("replyCount", 0)
@@ -482,32 +522,40 @@ data class SearchPage(
                         createdAt = createdAt
                     )
                 )
-            } else if (act.has("message")) {
-                list.add(
-                    AniListActivity(
-                        id = id,
-                        userId = act.optInt("recipientId"),
-                        userName = userName,
-                        userAvatar = userAvatar,
-                        type = "MESSAGE",
-                        status = null,
-                        progress = null,
-                        text = act.optString("message"),
-                        mediaTitle = null,
-                        mediaCover = null,
-                        replyCount = replyCount,
-                        likeCount = likeCount,
-                        createdAt = createdAt
-                    )
-                )
             }
         }
         return list
     }
 
-    // -----------------------------------------------------------------------
-    // IsThisDubbed — Query English Voice Cast & Dub Status
-    // -----------------------------------------------------------------------
+    suspend fun postTextActivity(text: String, token: String): AniListActivity {
+        val data = query("""
+            mutation (${'$'}text: String!) {
+              SaveTextActivity(text: ${'$'}text) {
+                id userId text replyCount likeCount createdAt
+                user { name avatar { medium } }
+              }
+            }
+        """, mapOf("text" to text), token)
+
+        val act = data.getJSONObject("SaveTextActivity")
+        val userObj = act.optJSONObject("user")
+        return AniListActivity(
+            id = act.getInt("id"),
+            userId = act.optInt("userId"),
+            userName = userObj?.optString("name", "You") ?: "You",
+            userAvatar = userObj?.optJSONObject("avatar")?.optString("medium"),
+            type = "TEXT",
+            status = null,
+            progress = null,
+            text = act.optString("text"),
+            mediaTitle = null,
+            mediaCover = null,
+            replyCount = 0,
+            likeCount = 0,
+            createdAt = act.optLong("createdAt", System.currentTimeMillis() / 1000)
+        )
+    }
+
     suspend fun getDubDetails(mediaId: Int): DubDetails {
         val data = query("""
             query (${'$'}id: Int) {
@@ -516,74 +564,69 @@ data class SearchPage(
                 characters(sort: [ROLE, RELEVANCE], perPage: 12) {
                   edges {
                     node { name { full } image { medium } }
-                    voiceActors(language: ENGLISH) {
-                      id name { full } image { medium } languageV2
-                    }
+                    voiceActors(language: ENGLISH) { name { full } image { medium } }
                   }
                 }
               }
             }
         """, mapOf("id" to mediaId))
 
-        val media = data.optJSONObject("Media") ?: return DubDetails(false, "SUB_ONLY", emptyList(), emptyList())
-        val extLinks = media.optJSONArray("externalLinks")
+        val media = data.getJSONObject("Media")
+        val linksArr = media.optJSONArray("externalLinks")
         val platforms = mutableListOf<String>()
-        var hasExplicitDubLink = false
+        var isDubbed = false
 
-        if (extLinks != null) {
-            for (i in 0 until extLinks.length()) {
-                val l = extLinks.getJSONObject(i)
-                val site = l.optString("site")
-                val lang = l.optString("language")
-                if (lang.equals("English", ignoreCase = true) || site.contains("Dub", ignoreCase = true)) {
-                    hasExplicitDubLink = true
-                    if (!platforms.contains(site)) platforms.add(site)
+        if (linksArr != null) {
+            for (i in 0 until linksArr.length()) {
+                val l = linksArr.getJSONObject(i)
+                val lang = l.optString("language", "")
+                val site = l.optString("site", "")
+                val type = l.optString("type", "")
+                if (lang.equals("English", ignoreCase = true) && type.equals("STREAMING", ignoreCase = true)) {
+                    isDubbed = true
+                    if (site.isNotBlank() && site !in platforms) platforms += site
                 }
             }
         }
 
+        val cast = mutableListOf<CharacterRole>()
         val charEdges = media.optJSONObject("characters")?.optJSONArray("edges")
-        val castList = mutableListOf<CharacterRole>()
-
         if (charEdges != null) {
             for (i in 0 until charEdges.length()) {
                 val edge = charEdges.getJSONObject(i)
-                val charNode = edge.optJSONObject("node")
-                val charName = charNode?.optJSONObject("name")?.optString("full", "Character") ?: "Character"
-                val charImg = charNode?.optJSONObject("image")?.optString("medium")
-
+                val charNode = edge.optJSONObject("node") ?: continue
+                val charName = charNode.optJSONObject("name")?.optString("full", "Character") ?: "Character"
+                val charImg = charNode.optJSONObject("image")?.optString("medium")
                 val vaArr = edge.optJSONArray("voiceActors")
-                var va: VoiceActor? = null
-                if (vaArr != null && vaArr.length() > 0) {
-                    val vaObj = vaArr.getJSONObject(0)
-                    va = VoiceActor(
-                        id = vaObj.optInt("id"),
-                        name = vaObj.optJSONObject("name")?.optString("full", "Voice Actor") ?: "Voice Actor",
-                        image = vaObj.optJSONObject("image")?.optString("medium"),
-                        language = vaObj.optString("languageV2", "English")
+                val vaNode = vaArr?.optJSONObject(0)
+                val va = if (vaNode != null) {
+                    VoiceActor(
+                        id = vaNode.optInt("id", 0),
+                        name = vaNode.optJSONObject("name")?.optString("full", "Voice Actor") ?: "Voice Actor",
+                        image = vaNode.optJSONObject("image")?.optString("medium"),
+                        language = "English"
                     )
-                }
+                } else null
 
-                if (va != null) {
-                    castList.add(CharacterRole(charName, charImg, va))
-                }
+                if (va != null) isDubbed = true
+
+                cast += CharacterRole(
+                    characterName  = charName,
+                    characterImage = charImg,
+                    voiceActor     = va
+                )
             }
         }
 
-        val isDubbed = castList.isNotEmpty() || hasExplicitDubLink
-        val confidence = if (castList.size >= 3 || hasExplicitDubLink) "CONFIRMED" else if (castList.isNotEmpty()) "PARTIAL" else "SUB_ONLY"
-
+        val confidence = if (isDubbed) "CONFIRMED" else "SUB_ONLY"
         return DubDetails(
-            isDubbed = isDubbed,
-            dubConfidence = confidence,
-            englishCast = castList,
+            isDubbed           = isDubbed,
+            dubConfidence      = confidence,
+            englishCast        = cast,
             streamingPlatforms = platforms
         )
     }
 
-    // -----------------------------------------------------------------------
-    // Streaming Episodes (titles + thumbnails from AniList)
-    // -----------------------------------------------------------------------
     suspend fun getStreamingEpisodes(mediaId: Int): List<StreamingEpisode> {
         val data = query("""
             query (${'$'}id: Int) {
@@ -613,9 +656,131 @@ data class SearchPage(
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Private parse helpers
-    // -----------------------------------------------------------------------
+    suspend fun getCast(mediaId: Int): List<CastMember> {
+        val data = query("""
+            query (${'$'}id: Int) {
+              Media(id: ${'$'}id, type: ANIME) {
+                characters(sort: [ROLE, RELEVANCE], perPage: 30) {
+                  edges {
+                    role
+                    node {
+                      id
+                      name { full native }
+                      image { medium }
+                    }
+                    voiceActors {
+                      id
+                      name { full native }
+                      image { medium }
+                      languageV2
+                    }
+                  }
+                }
+              }
+            }
+        """, mapOf("id" to mediaId))
+
+        val media = data.optJSONObject("Media") ?: return emptyList()
+        val edges = media.optJSONObject("characters")?.optJSONArray("edges") ?: return emptyList()
+        val castList = mutableListOf<CastMember>()
+
+        for (i in 0 until edges.length()) {
+            val edge = edges.getJSONObject(i)
+            val role = edge.optString("role")
+            val charNode = edge.optJSONObject("node") ?: continue
+            val charId = charNode.optInt("id")
+            val nameObj = charNode.optJSONObject("name")
+            val charName = nameObj?.optString("full", "Character") ?: "Character"
+            val charNameNative = nameObj?.optString("native")?.ifEmpty { null }
+            val charImg = charNode.optJSONObject("image")?.optString("medium")
+
+            val vaArr = edge.optJSONArray("voiceActors")
+            var jpVa: VoiceActor? = null
+            var enVa: VoiceActor? = null
+
+            if (vaArr != null) {
+                for (j in 0 until vaArr.length()) {
+                    val vaObj = vaArr.getJSONObject(j)
+                    val lang = vaObj.optString("languageV2", "")
+                    val vaId = vaObj.optInt("id")
+                    val vaNameObj = vaObj.optJSONObject("name")
+                    val vaName = vaNameObj?.optString("full", "Voice Actor") ?: "Voice Actor"
+                    val vaImg = vaObj.optJSONObject("image")?.optString("medium")
+
+                    if (lang.equals("Japanese", ignoreCase = true) && jpVa == null) {
+                        jpVa = VoiceActor(vaId, vaName, vaImg, "Japanese")
+                    } else if (lang.equals("English", ignoreCase = true) && enVa == null) {
+                        enVa = VoiceActor(vaId, vaName, vaImg, "English")
+                    }
+                }
+            }
+
+            castList.add(
+                CastMember(
+                    characterId = charId,
+                    characterName = charName,
+                    characterNameNative = charNameNative,
+                    characterImage = charImg,
+                    role = role,
+                    japaneseVa = jpVa,
+                    englishVa = enVa
+                )
+            )
+        }
+        return castList
+    }
+
+    suspend fun getStaffWorks(staffId: Int): StaffWorks? {
+        val data = query("""
+            query (${'$'}id: Int) {
+              Staff(id: ${'$'}id) {
+                id
+                name { full native }
+                image { large }
+                languageV2
+                characterMedia(sort: [POPULARITY_DESC], perPage: 30) {
+                  nodes {
+                    id episodes format status season seasonYear meanScore averageScore isAdult siteUrl bannerImage
+                    title { userPreferred english romaji native }
+                    coverImage { large color }
+                    genres
+                  }
+                }
+              }
+            }
+        """, mapOf("id" to staffId))
+
+        val staff = data.optJSONObject("Staff") ?: return null
+        val nameObj = staff.optJSONObject("name")
+        val name = nameObj?.optString("full", "Staff") ?: "Staff"
+        val nameNative = nameObj?.optString("native")?.ifEmpty { null }
+        val image = staff.optJSONObject("image")?.optString("large")
+        val lang = staff.optString("languageV2")
+
+        val mediaNodes = staff.optJSONObject("characterMedia")?.optJSONArray("nodes")
+        val works = mutableListOf<AnimeMedia>()
+        val seenIds = mutableSetOf<Int>()
+
+        if (mediaNodes != null) {
+            for (i in 0 until mediaNodes.length()) {
+                val node = mediaNodes.getJSONObject(i)
+                val id = node.optInt("id")
+                if (id > 0 && seenIds.add(id)) {
+                    works.add(mapMedia(node))
+                }
+            }
+        }
+
+        return StaffWorks(
+            staffId = staffId,
+            name = name,
+            nameNative = nameNative,
+            image = image,
+            language = lang,
+            works = works
+        )
+    }
+
     private fun parsePageMedia(data: JSONObject): List<AnimeMedia> =
         parseMediaArray(data.getJSONObject("Page").optJSONArray("media"))
 
