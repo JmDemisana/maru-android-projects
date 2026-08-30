@@ -1,4 +1,4 @@
-﻿package io.maru.manime.screens
+package io.maru.manime.screens
 
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
@@ -48,7 +48,8 @@ fun DashboardScreen(
     isLoading: Boolean,
     onRefresh: () -> Unit,
     onPostCreated: (AniListActivity) -> Unit = {},
-    onAnimeClick: (AnimeMedia) -> Unit
+    onAnimeClick: (AnimeMedia) -> Unit,
+    onUserClick: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -61,21 +62,21 @@ fun DashboardScreen(
     var isPosting by remember { mutableStateOf(false) }
 
     fun submitPost() {
+        if (postText.isBlank()) return
         if (anilistToken.isBlank()) {
-            Toast.makeText(context, "Please log in to post to AniList!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Sign in with AniList to post!", Toast.LENGTH_SHORT).show()
             return
         }
-        if (postText.isBlank()) return
-
+        val textToPost = postText.trim()
+        isPosting = true
         scope.launch {
-            isPosting = true
             try {
-                val newActivity = withContext(Dispatchers.IO) {
-                    AniListClient.postTextActivity(postText.trim(), anilistToken)
+                val created = withContext(Dispatchers.IO) {
+                    AniListClient.postTextActivity(textToPost, anilistToken)
                 }
-                onPostCreated(newActivity)
                 postText = ""
-                Toast.makeText(context, "Posted to AniList Community!", Toast.LENGTH_SHORT).show()
+                onPostCreated(created)
+                Toast.makeText(context, "Posted to AniList!", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Toast.makeText(context, "Failed to post: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
             } finally {
@@ -84,58 +85,72 @@ fun DashboardScreen(
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        // Sub-Tab Bar: [AniList Community] [Discovery]
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            listOf("AniList Community", "Discovery").forEachIndexed { index, title ->
-                val isSelected = selectedSubTab == index
+    PullToRefreshBox(
+        isRefreshing = isLoading,
+        onRefresh = onRefresh,
+        modifier = Modifier.fillMaxSize()
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Sub Tabs: [ANILIST COMMUNITY] [DISCOVERY]
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 Surface(
-                    onClick = { selectedSubTab = index },
+                    onClick = { selectedSubTab = 0 },
                     shape = MaruPillShape,
-                    color = if (isSelected) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
-                    border = BorderStroke(1.dp, if (isSelected) MaruAccentPink else MaruGlassBorderSoft),
+                    color = if (selectedSubTab == 0) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
+                    border = BorderStroke(1.dp, if (selectedSubTab == 0) MaruAccentPink else MaruGlassBorderSoft),
                     modifier = Modifier.weight(1f)
                 ) {
                     Box(modifier = Modifier.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
                         Text(
-                            text = title.uppercase(),
-                            fontSize = 11.sp,
+                            "ANILIST COMMUNITY",
+                            fontSize = 10.5.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (isSelected) MaruAccentPink else MaruTextMuted
+                            color = if (selectedSubTab == 0) MaruAccentPink else MaruTextMuted
+                        )
+                    }
+                }
+
+                Surface(
+                    onClick = { selectedSubTab = 1 },
+                    shape = MaruPillShape,
+                    color = if (selectedSubTab == 1) MaruAccentBlue.copy(alpha = 0.25f) else MaruGlassSubtleBg,
+                    border = BorderStroke(1.dp, if (selectedSubTab == 1) MaruAccentBlue else MaruGlassBorderSoft),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(modifier = Modifier.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            "DISCOVERY",
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (selectedSubTab == 1) MaruAccentBlue else MaruTextMuted
                         )
                     }
                 }
             }
-        }
 
-        PullToRefreshBox(
-            isRefreshing = isLoading,
-            onRefresh = onRefresh,
-            modifier = Modifier.fillMaxSize()
-        ) {
+            HorizontalDivider(color = MaruGlassBorderSoft, thickness = 1.dp)
+
             if (selectedSubTab == 0) {
-                // ================= TAB 0: ANILIST COMMUNITY FEED =================
+                // ================= ANILIST COMMUNITY FEED =================
                 LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 36.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 14.dp),
+                    contentPadding = PaddingValues(top = 10.dp, bottom = 36.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // Compose Post Box
-                    item(key = "compose_post") {
+                    // Create Post Box
+                    item(key = "create_post_box") {
                         GlassCard(modifier = Modifier.fillMaxWidth()) {
-                            Column(
-                                modifier = Modifier.padding(14.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
                                 Row(
-                                    modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     if (user?.avatarUrl != null) {
                                         AsyncImage(
@@ -143,59 +158,38 @@ fun DashboardScreen(
                                             contentDescription = user.name,
                                             contentScale = ContentScale.Crop,
                                             modifier = Modifier
-                                                .size(36.dp)
+                                                .size(32.dp)
                                                 .clip(CircleShape)
-                                                .border(BorderStroke(1.dp, MaruAccentPink), CircleShape)
                                         )
                                     } else {
-                                        Surface(
-                                            shape = CircleShape,
-                                            color = MaruGlassSubtleBg,
-                                            modifier = Modifier.size(36.dp)
-                                        ) {
-                                            Box(contentAlignment = Alignment.Center) {
-                                                Icon(Icons.Default.Person, contentDescription = null, tint = MaruTextMuted, modifier = Modifier.size(20.dp))
-                                            }
-                                        }
+                                        Icon(Icons.Default.AccountCircle, contentDescription = null, tint = MaruAccentPink, modifier = Modifier.size(32.dp))
                                     }
 
                                     OutlinedTextField(
                                         value = postText,
                                         onValueChange = { postText = it },
-                                        placeholder = { Text("What's on your mind? Share a thought with AniList...", color = MaruTextMuted.copy(alpha = 0.6f), fontSize = 12.5.sp) },
+                                        placeholder = { Text("Share your anime thoughts...", color = MaruTextMuted.copy(alpha = 0.6f), fontSize = 12.5.sp) },
                                         singleLine = false,
-                                        maxLines = 4,
+                                        maxLines = 3,
                                         modifier = Modifier.weight(1f),
                                         colors = OutlinedTextFieldDefaults.colors(
-                                            focusedTextColor = MaruTextStrong,
-                                            unfocusedTextColor = MaruTextStrong,
                                             focusedBorderColor = MaruAccentPink,
-                                            unfocusedBorderColor = MaruGlassBorderSoft
+                                            unfocusedBorderColor = MaruGlassBorderSoft,
+                                            focusedTextColor = MaruTextStrong,
+                                            unfocusedTextColor = MaruTextStrong
                                         )
                                     )
-                                }
 
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
                                     Button(
                                         onClick = { submitPost() },
-                                        enabled = postText.isNotBlank() && !isPosting,
-                                        shape = MaruPillShape,
-                                        colors = ButtonDefaults.buttonColors(containerColor = MaruAccentPink)
+                                        enabled = !isPosting && postText.isNotBlank(),
+                                        colors = ButtonDefaults.buttonColors(containerColor = MaruAccentPink),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                                     ) {
                                         if (isPosting) {
                                             CircularProgressIndicator(color = Color.White, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                                         } else {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                            ) {
-                                                Icon(Icons.Default.Send, contentDescription = "Post", modifier = Modifier.size(14.dp), tint = Color.White)
-                                                Text("POST TO ANILIST", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                                            }
+                                            Icon(Icons.Default.Send, contentDescription = "Post", modifier = Modifier.size(16.dp))
                                         }
                                     }
                                 }
@@ -203,26 +197,22 @@ fun DashboardScreen(
                         }
                     }
 
-                    if (activitiesList.isEmpty()) {
-                        item(key = "empty_activities") {
+                    if (activitiesList.isEmpty() && !isLoading) {
+                        item(key = "empty_feed") {
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 48.dp),
+                                    .padding(vertical = 32.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = if (isLoading) "Loading community posts..." else "No recent community activity found.",
-                                    color = MaruTextMuted,
-                                    fontSize = 13.sp
-                                )
+                                Text("No recent community activity found.", color = MaruTextMuted, fontSize = 13.sp)
                             }
                         }
                     } else {
                         items(activitiesList, key = { "act_${it.id}" }) { act ->
                             GlassCard(modifier = Modifier.fillMaxWidth()) {
                                 Column(
-                                    modifier = Modifier.padding(14.dp),
+                                    modifier = Modifier.padding(12.dp),
                                     verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     Row(
@@ -238,20 +228,36 @@ fun DashboardScreen(
                                                 modifier = Modifier
                                                     .size(34.dp)
                                                     .clip(CircleShape)
+                                                    .border(BorderStroke(1.dp, MaruAccentPink), CircleShape)
+                                                    .clickable { onUserClick(act.userName) }
                                             )
+                                        } else {
+                                            Surface(
+                                                shape = CircleShape,
+                                                color = MaruGlassSubtleBg,
+                                                modifier = Modifier
+                                                    .size(34.dp)
+                                                    .clickable { onUserClick(act.userName) }
+                                            ) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Icon(Icons.Default.Person, contentDescription = null, tint = MaruTextMuted)
+                                                }
+                                            }
                                         }
 
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
                                                 text = act.userName,
-                                                fontSize = 13.5.sp,
+                                                fontSize = 13.sp,
                                                 fontWeight = FontWeight.Bold,
-                                                color = MaruTextStrong
+                                                color = MaruTextStrong,
+                                                modifier = Modifier.clickable { onUserClick(act.userName) }
                                             )
-                                            if (act.status != null) {
-                                                val statusDesc = if (act.progress != null) "${act.status.lowercase()} ep ${act.progress} of" else act.status.lowercase()
+                                            if (act.type == "ANIME_LIST" && act.status != null) {
+                                                val prog = act.progress?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                                                val statusStr = if (prog != null) "${act.status.lowercase()} ep $prog" else act.status.lowercase()
                                                 Text(
-                                                    text = statusDesc,
+                                                    text = statusStr,
                                                     fontSize = 11.sp,
                                                     color = MaruAccentPink
                                                 )
@@ -263,60 +269,51 @@ fun DashboardScreen(
                                         Text(
                                             text = act.text,
                                             fontSize = 13.sp,
-                                            color = MaruTextStrong.copy(alpha = 0.9f),
+                                            color = MaruTextStrong,
                                             lineHeight = 18.sp
                                         )
                                     }
 
-                                    if (!act.mediaTitle.isNullOrBlank()) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(Color(0x33000000))
-                                                .padding(8.dp),
-                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                            verticalAlignment = Alignment.CenterVertically
+                                    if (act.mediaTitle != null) {
+                                        Surface(
+                                            onClick = {
+                                                if (act.rawMedia != null) {
+                                                    onAnimeClick(act.rawMedia)
+                                                }
+                                            },
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = Color(0x33000000),
+                                            border = BorderStroke(1.dp, MaruGlassBorderSoft),
+                                            modifier = Modifier.fillMaxWidth()
                                         ) {
-                                            if (act.mediaCover != null) {
-                                                AsyncImage(
-                                                    model = act.mediaCover,
-                                                    contentDescription = act.mediaTitle,
-                                                    contentScale = ContentScale.Crop,
-                                                    modifier = Modifier
-                                                        .size(36.dp)
-                                                        .clip(RoundedCornerShape(6.dp))
-                                                )
+                                            Row(
+                                                modifier = Modifier.padding(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                if (act.mediaCover != null) {
+                                                    AsyncImage(
+                                                        model = act.mediaCover,
+                                                        contentDescription = act.mediaTitle,
+                                                        contentScale = ContentScale.Crop,
+                                                        modifier = Modifier
+                                                            .size(36.dp)
+                                                            .clip(RoundedCornerShape(4.dp))
+                                                    )
+                                                }
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = act.mediaTitle,
+                                                        fontSize = 12.sp,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = MaruTextStrong,
+                                                        maxLines = 1
+                                                    )
+                                                }
+                                                if (act.rawMedia != null) {
+                                                    Icon(Icons.Default.ChevronRight, contentDescription = "View Anime", tint = MaruAccentPink, modifier = Modifier.size(16.dp))
+                                                }
                                             }
-                                            Text(
-                                                text = act.mediaTitle,
-                                                fontSize = 12.5.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = MaruTextStrong,
-                                                lineHeight = 16.sp
-                                            )
-                                        }
-                                    }
-
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.End,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                        ) {
-                                            Icon(Icons.Default.Favorite, contentDescription = null, tint = MaruAccentPink, modifier = Modifier.size(13.dp))
-                                            Text(text = "${act.likeCount}", fontSize = 11.sp, color = MaruTextMuted)
-                                        }
-                                        Spacer(modifier = Modifier.width(12.dp))
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                        ) {
-                                            Icon(Icons.Default.ChatBubble, contentDescription = null, tint = MaruAccentBlue, modifier = Modifier.size(13.dp))
-                                            Text(text = "${act.replyCount}", fontSize = 11.sp, color = MaruTextMuted)
                                         }
                                     }
                                 }
@@ -325,59 +322,52 @@ fun DashboardScreen(
                     }
                 }
             } else {
-                // ================= TAB 1: DISCOVERY =================
+                // ================= DISCOVERY FEED =================
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(horizontal = 14.dp),
-                    contentPadding = PaddingValues(top = 8.dp, bottom = 36.dp),
+                    contentPadding = PaddingValues(top = 10.dp, bottom = 36.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    // Continue Watching Rail
                     if (watchingList.isNotEmpty()) {
-                        item(span = { GridItemSpan(2) }, key = "continue_watching") {
-                            Column(modifier = Modifier.fillMaxWidth()) {
-                                GlassSectionHeader(
-                                    title = "CONTINUE WATCHING",
-                                    icon = Icons.Default.AutoAwesome,
-                                    color = MaruAccentPink
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .horizontalScroll(rememberScrollState()),
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                                ) {
-                                    watchingList.forEach { media ->
-                                        WatchingCard(media = media, onClick = { onAnimeClick(media) })
-                                    }
+                        item(span = { GridItemSpan(2) }, key = "watching_rail_header") {
+                            GlassSectionHeader(
+                                title = "CONTINUE WATCHING",
+                                icon = Icons.Default.PlayCircle,
+                                color = MaruAccentPink
+                            )
+                        }
+
+                        item(span = { GridItemSpan(2) }, key = "watching_rail") {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                watchingList.forEach { anime ->
+                                    WatchingCard(media = anime, onClick = { onAnimeClick(anime) })
                                 }
                             }
                         }
                     }
 
-                    // Trending Header
                     item(span = { GridItemSpan(2) }, key = "trending_header") {
                         GlassSectionHeader(
-                            title = "TRENDING THIS SEASON",
-                            icon = Icons.Default.AutoAwesome,
+                            title = "TRENDING & POPULAR ANIME",
+                            icon = Icons.Default.TrendingUp,
                             color = MaruAccentBlue
                         )
                     }
 
-                    // 2-Column Poster Cards
-                    items(trendingList, key = { "trending_${it.mediaId}" }) { media ->
-                        PosterCard(
-                            media = media,
-                            onClick = { onAnimeClick(media) }
-                        )
+                    items(trendingList, key = { "trend_${it.mediaId}" }) { anime ->
+                        PosterCard(media = anime, onClick = { onAnimeClick(anime) })
                     }
                 }
             }
         }
     }
 }
-

@@ -42,7 +42,8 @@ fun AnimeDetailScreen(
     media: AnimeMedia,
     anilistToken: String,
     onBack: () -> Unit,
-    onMediaUpdated: (AnimeMedia) -> Unit = {}
+    onMediaUpdated: (AnimeMedia) -> Unit = {},
+    onUserClick: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -214,6 +215,9 @@ fun AnimeDetailScreen(
         }
     }
 
+    val isReleasing = currentMedia.status?.equals("RELEASING", ignoreCase = true) == true
+    val latestAiredEp = currentMedia.latestAiredEpisode
+
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
@@ -285,9 +289,14 @@ fun AnimeDetailScreen(
                         }
 
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            val epCounterText = if (isReleasing && latestAiredEp != null) {
+                                "EP ${currentMedia.progress} / $latestAiredEp rel"
+                            } else {
+                                "EP ${currentMedia.progress} / ${currentMedia.episodes ?: "?"}"
+                            }
                             Text(
-                                text = "EP ${currentMedia.progress} / ${currentMedia.episodes ?: "?"}",
-                                fontSize = 14.sp,
+                                text = epCounterText,
+                                fontSize = 13.5.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = MaruTextStrong
                             )
@@ -388,24 +397,51 @@ fun AnimeDetailScreen(
                             modifier = Modifier.weight(1f),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            if (hasEnglishDub) {
-                                Surface(
-                                    color = Color(0x334ADE80),
-                                    shape = MaruPillShape,
-                                    border = BorderStroke(1.dp, MaruAccentGreen.copy(alpha = 0.4f))
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (isReleasing && latestAiredEp != null) {
+                                    Surface(
+                                        color = Color(0x3360E2FF),
+                                        shape = MaruPillShape,
+                                        border = BorderStroke(1.dp, MaruAccentBlue.copy(alpha = 0.5f))
                                     ) {
-                                        Icon(Icons.Default.Mic, contentDescription = null, tint = MaruAccentGreen, modifier = Modifier.size(12.dp))
-                                        Text(
-                                            text = "ENGLISH DUBBED",
-                                            color = MaruAccentGreen,
-                                            fontSize = 9.5.sp,
-                                            fontWeight = FontWeight.ExtraBold
-                                        )
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Box(modifier = Modifier.size(6.dp).background(MaruAccentBlue, CircleShape))
+                                            Text(
+                                                text = "EP $latestAiredEp RELEASED",
+                                                color = MaruAccentBlue,
+                                                fontSize = 9.5.sp,
+                                                fontWeight = FontWeight.ExtraBold
+                                            )
+                                        }
+                                    }
+                                }
+
+                                if (hasEnglishDub) {
+                                    Surface(
+                                        color = Color(0x334ADE80),
+                                        shape = MaruPillShape,
+                                        border = BorderStroke(1.dp, MaruAccentGreen.copy(alpha = 0.4f))
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Icon(Icons.Default.Mic, contentDescription = null, tint = MaruAccentGreen, modifier = Modifier.size(12.dp))
+                                            Text(
+                                                text = "ENGLISH DUB",
+                                                color = MaruAccentGreen,
+                                                fontSize = 9.5.sp,
+                                                fontWeight = FontWeight.ExtraBold
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -431,7 +467,7 @@ fun AnimeDetailScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                if (currentMedia.averageScore != null) {
+                                if (currentMedia.averageScore != null && currentMedia.averageScore!! > 0) {
                                     Surface(
                                         color = Color(0x22FBBF24),
                                         shape = MaruPillShape,
@@ -448,7 +484,7 @@ fun AnimeDetailScreen(
                                     }
                                 }
                                 Text(text = "${currentMedia.episodes ?: "?"} eps", fontSize = 11.5.sp, color = MaruTextMuted)
-                                if (currentMedia.format != null) {
+                                if (!currentMedia.format.isNullOrBlank() && !currentMedia.format.equals("null", ignoreCase = true)) {
                                     Text(text = "${currentMedia.format}", fontSize = 11.5.sp, color = MaruTextMuted)
                                 }
                             }
@@ -554,7 +590,7 @@ fun AnimeDetailScreen(
                     }
                 }
 
-                // Friends' Status Section
+                // Friends' & Community Status Section (Accurate status text without "episode ep" or "null")
                 item(key = "friends_status_section") {
                     GlassCard(
                         modifier = Modifier
@@ -575,9 +611,11 @@ fun AnimeDetailScreen(
                                 Text("No recent friends or community activity recorded for this anime.", fontSize = 12.sp, color = MaruTextMuted)
                             } else {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    friendsStatus.take(5).forEach { friend ->
+                                    friendsStatus.take(6).forEach { friend ->
                                         Row(
-                                            modifier = Modifier.fillMaxWidth(),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { onUserClick(friend.userName) },
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
@@ -587,7 +625,7 @@ fun AnimeDetailScreen(
                                                     contentDescription = friend.userName,
                                                     contentScale = ContentScale.Crop,
                                                     modifier = Modifier
-                                                        .size(30.dp)
+                                                        .size(32.dp)
                                                         .clip(CircleShape)
                                                         .border(BorderStroke(1.dp, MaruAccentPurple), CircleShape)
                                                 )
@@ -595,7 +633,7 @@ fun AnimeDetailScreen(
                                                 Surface(
                                                     shape = CircleShape,
                                                     color = MaruGlassSubtleBg,
-                                                    modifier = Modifier.size(30.dp)
+                                                    modifier = Modifier.size(32.dp)
                                                 ) {
                                                     Box(contentAlignment = Alignment.Center) {
                                                         Icon(Icons.Default.Person, contentDescription = null, tint = MaruTextMuted, modifier = Modifier.size(16.dp))
@@ -610,17 +648,28 @@ fun AnimeDetailScreen(
                                                     fontWeight = FontWeight.Bold,
                                                     color = MaruTextStrong
                                                 )
-                                                val statusText = if (!friend.progress.isNullOrBlank()) {
-                                                    "${friend.status.lowercase()} ep ${friend.progress}"
-                                                } else {
-                                                    friend.status.lowercase()
+
+                                                val cleanProgress = friend.progress?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                                                val rawStatus = friend.status.lowercase().trim()
+                                                val statusText = when {
+                                                    rawStatus.contains("watched episode") && cleanProgress != null -> "watched ep $cleanProgress"
+                                                    rawStatus.contains("watched episode") -> "watched an episode"
+                                                    rawStatus.contains("plans to watch") || rawStatus.contains("planning") -> "plans to watch"
+                                                    rawStatus.contains("completed") -> "completed"
+                                                    rawStatus.contains("dropped") -> "dropped"
+                                                    rawStatus.contains("paused") -> "paused"
+                                                    cleanProgress != null -> "$rawStatus ep $cleanProgress"
+                                                    else -> rawStatus
                                                 }
+
                                                 Text(
                                                     text = statusText,
                                                     fontSize = 11.sp,
                                                     color = MaruAccentPink
                                                 )
                                             }
+
+                                            Icon(Icons.Default.ChevronRight, contentDescription = "View Profile", tint = MaruTextMuted.copy(alpha = 0.5f), modifier = Modifier.size(16.dp))
                                         }
                                     }
                                 }
@@ -629,7 +678,7 @@ fun AnimeDetailScreen(
                     }
                 }
 
-                // Similar Anime & Relations Section
+                // Similar Anime & Relations Section (Strict Anime Only!)
                 item(key = "similar_anime_section") {
                     Column(
                         modifier = Modifier
@@ -1097,7 +1146,7 @@ fun AnimeDetailScreen(
                             .height(150.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("No other works cataloged.", color = MaruTextMuted, fontSize = 13.sp)
+                        Text("No other anime works cataloged.", color = MaruTextMuted, fontSize = 13.sp)
                     }
                 } else {
                     Row(

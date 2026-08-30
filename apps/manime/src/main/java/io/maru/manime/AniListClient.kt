@@ -15,6 +15,19 @@ data class AniListUser(
     val avatarUrl: String?
 )
 
+data class AniListProfile(
+    val id: Int,
+    val name: String,
+    val avatar: String?,
+    val banner: String?,
+    val about: String?,
+    val animeCount: Int,
+    val minutesWatched: Int,
+    val meanScore: Double,
+    val isFollowing: Boolean = false,
+    val userLists: Map<String, List<AnimeMedia>> = emptyMap()
+)
+
 data class AnimeMedia(
     val mediaId: Int,
     val title: String,
@@ -43,7 +56,14 @@ data class AnimeMedia(
     val notes: String?,
     val isPrivate: Boolean,
     val updatedAt: Long?
-)
+) {
+    val isReleasing: Boolean get() = status.equals("RELEASING", ignoreCase = true)
+
+    val latestAiredEpisode: Int? get() {
+        if (!isReleasing) return episodes
+        return if (nextEpisode != null && nextEpisode > 1) nextEpisode - 1 else null
+    }
+}
 
 data class ExternalLink(
     val id: Int,
@@ -109,6 +129,7 @@ data class AniListActivity(
     val text: String?,
     val mediaTitle: String?,
     val mediaCover: String?,
+    val rawMedia: AnimeMedia?,
     val replyCount: Int,
     val likeCount: Int,
     val createdAt: Long
@@ -138,7 +159,7 @@ object AniListClient {
 
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
-    private fun JSONObject?.optNullableString(name: String): String? {
+    fun JSONObject?.optNullableString(name: String): String? {
         if (this == null || isNull(name)) return null
         val s = optString(name, "").trim()
         return if (s.isEmpty() || s.equals("null", ignoreCase = true)) null else s
@@ -170,7 +191,16 @@ object AniListClient {
         json.getJSONObject("data")
     }
 
-    private fun mapMedia(obj: JSONObject, listEntry: JSONObject? = null): AnimeMedia {
+    fun isMangaOrNovel(obj: JSONObject): Boolean {
+        val type = obj.optNullableString("type")
+        val format = obj.optNullableString("format")
+        return type.equals("MANGA", ignoreCase = true) ||
+               format.equals("MANGA", ignoreCase = true) ||
+               format.equals("NOVEL", ignoreCase = true) ||
+               format.equals("ONE_SHOT", ignoreCase = true)
+    }
+
+    fun mapMedia(obj: JSONObject, listEntry: JSONObject? = null): AnimeMedia {
         val title = obj.optJSONObject("title")
         val cover = obj.optJSONObject("coverImage")
         val nextAir = obj.optJSONObject("nextAiringEpisode")
@@ -253,7 +283,7 @@ object AniListClient {
         return AniListUser(
             id        = v.getInt("id"),
             name      = v.getString("name"),
-            avatarUrl = v.optJSONObject("avatar")?.optString("medium")?.ifEmpty { null }
+            avatarUrl = v.optJSONObject("avatar")?.optNullableString("medium")
         )
     }
 
@@ -269,7 +299,9 @@ object AniListClient {
             for (j in 0 until entries.length()) {
                 val entry = entries.getJSONObject(j)
                 val media = entry.optJSONObject("media") ?: continue
-                bucket += mapMedia(media, entry)
+                if (!isMangaOrNovel(media)) {
+                    bucket += mapMedia(media, entry)
+                }
             }
         }
         return result
@@ -302,6 +334,172 @@ object AniListClient {
 
     suspend fun getUserList(username: String, token: String? = null): Map<String, List<AnimeMedia>> {
         return getUserListRawJson(username, token).second
+    }
+
+    suspend fun getUserProfile(username: String, token: String? = null): AniListProfile? {
+        return try {
+            val data = query("""
+                query (${'$'}name: String) {
+                  User(name: ${'$'}name) {
+                    id name bannerImage about(asHtml: false)
+                    avatar { large medium }
+                    isFollowing
+                    statistics {
+                      anime {
+                        count
+                        minutesWatched
+                        meanScore
+                      }
+                    }
+                  }
+                }
+            """, mapOf("name" to username), token)
+
+            val u = data.optJSONObject("User") ?: return null
+            val stats = u.optJSONObject("statistics")?.optJSONObject("anime")
+            val avatarObj = u.optJSONObject("avatar")
+
+            val (_, lists) = getUserListRawJson(username, token)
+
+            AniListProfile(
+                id = u.getInt("id"),
+                name = u.getString("name"),
+                avatar = avatarObj?.optNullableString("large") ?: avatarObj?.optNullableString("medium"),
+                banner = u.optNullableString("bannerImage"),
+                about = u.optNullableString("about"),
+                animeCount = stats?.optInt("count") ?: 0,
+                minutesWatched = stats?.optInt("minutesWatched") ?: 0,
+                meanScore = stats?.optDouble("meanScore") ?: 0.0,
+                isFollowing = u.optBoolean("isFollowing"),
+                userLists = lists
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    suspend fun searchUsers(queryStr: String, page: Int = 1, token: String? = null): List<AniListProfile> {
+        val data = query("""
+            query (${'$'}search: String, ${'$'}page: Int) {
+              Page(page: ${'$'}page, perPage: 20) {
+                users(search: ${'$'}search) {
+                  id name bannerImage
+                  avatar { large medium }
+                  isFollowing
+                  statistics {
+                    anime { count minutesWatched meanScore }
+                  }
+                }
+              }
+            }
+        """, mapOf("search" to queryStr, "page" to page), token)
+
+        val arr = data.optJSONObject("Page")?.optJSONArray("users") ?: return emptyList()
+        val list = mutableListOf<AniListProfile>()
+        for (i in 0 until arr.length()) {
+            val u = arr.getJSONObject(i)
+            val stats = u.optJSONObject("statistics")?.optJSONObject("anime")
+            val avatarObj = u.optJSONObject("avatar")
+            list.add(
+                AniListProfile(
+                    id = u.getInt("id"),
+                    name = u.getString("name"),
+                    avatar = avatarObj?.optNullableString("large") ?: avatarObj?.optNullableString("medium"),
+                    banner = u.optNullableString("bannerImage"),
+                    about = null,
+                    animeCount = stats?.optInt("count") ?: 0,
+                    minutesWatched = stats?.optInt("minutesWatched") ?: 0,
+                    meanScore = stats?.optDouble("meanScore") ?: 0.0,
+                    isFollowing = u.optBoolean("isFollowing")
+                )
+            )
+        }
+        return list
+    }
+
+    suspend fun getUserFollowers(userId: Int, page: Int = 1, token: String? = null): List<AniListProfile> {
+        val data = query("""
+            query (${'$'}userId: Int, ${'$'}page: Int) {
+              Page(page: ${'$'}page, perPage: 25) {
+                followers(userId: ${'$'}userId) {
+                  id name bannerImage
+                  avatar { large medium }
+                  isFollowing
+                  statistics { anime { count minutesWatched meanScore } }
+                }
+              }
+            }
+        """, mapOf("userId" to userId, "page" to page), token)
+
+        val arr = data.optJSONObject("Page")?.optJSONArray("followers") ?: return emptyList()
+        val list = mutableListOf<AniListProfile>()
+        for (i in 0 until arr.length()) {
+            val u = arr.getJSONObject(i)
+            val stats = u.optJSONObject("statistics")?.optJSONObject("anime")
+            val avatarObj = u.optJSONObject("avatar")
+            list.add(
+                AniListProfile(
+                    id = u.getInt("id"),
+                    name = u.getString("name"),
+                    avatar = avatarObj?.optNullableString("large") ?: avatarObj?.optNullableString("medium"),
+                    banner = u.optNullableString("bannerImage"),
+                    about = null,
+                    animeCount = stats?.optInt("count") ?: 0,
+                    minutesWatched = stats?.optInt("minutesWatched") ?: 0,
+                    meanScore = stats?.optDouble("meanScore") ?: 0.0,
+                    isFollowing = u.optBoolean("isFollowing")
+                )
+            )
+        }
+        return list
+    }
+
+    suspend fun getUserFollowing(userId: Int, page: Int = 1, token: String? = null): List<AniListProfile> {
+        val data = query("""
+            query (${'$'}userId: Int, ${'$'}page: Int) {
+              Page(page: ${'$'}page, perPage: 25) {
+                following(userId: ${'$'}userId) {
+                  id name bannerImage
+                  avatar { large medium }
+                  isFollowing
+                  statistics { anime { count minutesWatched meanScore } }
+                }
+              }
+            }
+        """, mapOf("userId" to userId, "page" to page), token)
+
+        val arr = data.optJSONObject("Page")?.optJSONArray("following") ?: return emptyList()
+        val list = mutableListOf<AniListProfile>()
+        for (i in 0 until arr.length()) {
+            val u = arr.getJSONObject(i)
+            val stats = u.optJSONObject("statistics")?.optJSONObject("anime")
+            val avatarObj = u.optJSONObject("avatar")
+            list.add(
+                AniListProfile(
+                    id = u.getInt("id"),
+                    name = u.getString("name"),
+                    avatar = avatarObj?.optNullableString("large") ?: avatarObj?.optNullableString("medium"),
+                    banner = u.optNullableString("bannerImage"),
+                    about = null,
+                    animeCount = stats?.optInt("count") ?: 0,
+                    minutesWatched = stats?.optInt("minutesWatched") ?: 0,
+                    meanScore = stats?.optDouble("meanScore") ?: 0.0,
+                    isFollowing = u.optBoolean("isFollowing")
+                )
+            )
+        }
+        return list
+    }
+
+    suspend fun toggleFollow(userId: Int, token: String): Boolean {
+        val data = query("""
+            mutation (${'$'}userId: Int!) {
+              ToggleFollow(userId: ${'$'}userId) {
+                isFollowing
+              }
+            }
+        """, mapOf("userId" to userId), token)
+        return data.getJSONObject("ToggleFollow").optBoolean("isFollowing")
     }
 
     suspend fun getTrending(perPage: Int = 20): List<AnimeMedia> {
@@ -380,7 +578,7 @@ object AniListClient {
             for (j in 0 until recs.length()) {
                 val rec = recs.getJSONObject(j).optJSONObject("mediaRecommendation") ?: continue
                 val id = rec.optInt("id")
-                if (id > 0 && seen.add(id)) results += mapMedia(rec)
+                if (!isMangaOrNovel(rec) && id > 0 && seen.add(id)) results += mapMedia(rec)
             }
         }
         return results
@@ -393,12 +591,18 @@ object AniListClient {
                 relations {
                   edges {
                     relationType
-                    node { ${mediaFields()} }
+                    node {
+                      type
+                      ${mediaFields()}
+                    }
                   }
                 }
                 recommendations(sort: [RATING_DESC], perPage: 16) {
                   nodes {
-                    mediaRecommendation { ${mediaFields()} }
+                    mediaRecommendation {
+                      type
+                      ${mediaFields()}
+                    }
                   }
                 }
               }
@@ -414,7 +618,7 @@ object AniListClient {
             for (i in 0 until relEdges.length()) {
                 val node = relEdges.getJSONObject(i).optJSONObject("node") ?: continue
                 val id = node.optInt("id")
-                if (id > 0 && id != mediaId && seen.add(id)) {
+                if (!isMangaOrNovel(node) && id > 0 && id != mediaId && seen.add(id)) {
                     results.add(mapMedia(node))
                 }
             }
@@ -425,7 +629,7 @@ object AniListClient {
             for (i in 0 until recNodes.length()) {
                 val rec = recNodes.getJSONObject(i).optJSONObject("mediaRecommendation") ?: continue
                 val id = rec.optInt("id")
-                if (id > 0 && id != mediaId && seen.add(id)) {
+                if (!isMangaOrNovel(rec) && id > 0 && id != mediaId && seen.add(id)) {
                     results.add(mapMedia(rec))
                 }
             }
@@ -473,15 +677,18 @@ object AniListClient {
             val act = arr.optJSONObject(i) ?: continue
             val userObj = act.optJSONObject("user") ?: continue
             val uId = userObj.optInt("id")
+            val statusRaw = act.optNullableString("status") ?: "watched"
+            val progressRaw = act.optNullableString("progress")
+
             if (uId > 0 && seenUsers.add(uId)) {
                 list.add(
                     FriendAnimeStatus(
                         id = act.optInt("id"),
                         userId = uId,
-                        userName = userObj.optString("name", "Friend"),
-                        userAvatar = userObj.optJSONObject("avatar")?.optString("medium"),
-                        status = act.optString("status", "watched"),
-                        progress = act.optString("progress").ifEmpty { null },
+                        userName = userObj.optNullableString("name") ?: "Friend",
+                        userAvatar = userObj.optJSONObject("avatar")?.optNullableString("medium"),
+                        status = statusRaw,
+                        progress = progressRaw,
                         createdAt = act.optLong("createdAt", 0L)
                     )
                 )
@@ -534,8 +741,8 @@ object AniListClient {
                         id userId status progress replyCount likeCount createdAt
                         user { name avatar { medium } }
                         media {
-                          title { userPreferred english romaji }
-                          coverImage { medium }
+                          type
+                          ${mediaFields()}
                         }
                       }
                     }
@@ -555,8 +762,8 @@ object AniListClient {
                         id userId status progress replyCount likeCount createdAt
                         user { name avatar { medium } }
                         media {
-                          title { userPreferred english romaji }
-                          coverImage { medium }
+                          type
+                          ${mediaFields()}
                         }
                       }
                     }
@@ -573,8 +780,8 @@ object AniListClient {
             val act = activitiesArr.optJSONObject(i) ?: continue
             val id = act.optInt("id")
             val userObj = act.optJSONObject("user")
-            val userName = userObj?.optString("name", "User") ?: "User"
-            val userAvatar = userObj?.optJSONObject("avatar")?.optString("medium")
+            val userName = userObj?.optNullableString("name") ?: "User"
+            val userAvatar = userObj?.optJSONObject("avatar")?.optNullableString("medium")
             val replyCount = act.optInt("replyCount", 0)
             val likeCount = act.optInt("likeCount", 0)
             val createdAt = act.optLong("createdAt", 0L)
@@ -589,9 +796,10 @@ object AniListClient {
                         type = "TEXT",
                         status = null,
                         progress = null,
-                        text = act.optString("text"),
+                        text = act.optNullableString("text"),
                         mediaTitle = null,
                         mediaCover = null,
+                        rawMedia = null,
                         replyCount = replyCount,
                         likeCount = likeCount,
                         createdAt = createdAt
@@ -599,11 +807,16 @@ object AniListClient {
                 )
             } else if (act.has("status")) {
                 val mediaObj = act.optJSONObject("media")
+                if (mediaObj != null && isMangaOrNovel(mediaObj)) continue
+
+                val parsedMedia = if (mediaObj != null) runCatching { mapMedia(mediaObj) }.getOrNull() else null
                 val titleObj = mediaObj?.optJSONObject("title")
-                val mediaTitle = titleObj?.optString("english")?.ifEmpty { null }
-                    ?: titleObj?.optString("romaji")?.ifEmpty { null }
-                    ?: titleObj?.optString("userPreferred")
-                val mediaCover = mediaObj?.optJSONObject("coverImage")?.optString("medium")
+                val mediaTitle = titleObj?.optNullableString("english")
+                    ?: titleObj?.optNullableString("romaji")
+                    ?: titleObj?.optNullableString("userPreferred")
+                    ?: parsedMedia?.title
+                val mediaCover = mediaObj?.optJSONObject("coverImage")?.optNullableString("medium")
+                    ?: parsedMedia?.coverUrl
 
                 list.add(
                     AniListActivity(
@@ -612,11 +825,12 @@ object AniListClient {
                         userName = userName,
                         userAvatar = userAvatar,
                         type = "ANIME_LIST",
-                        status = act.optString("status"),
-                        progress = act.optString("progress").ifEmpty { null },
+                        status = act.optNullableString("status"),
+                        progress = act.optNullableString("progress"),
                         text = null,
                         mediaTitle = mediaTitle,
                         mediaCover = mediaCover,
+                        rawMedia = parsedMedia,
                         replyCount = replyCount,
                         likeCount = likeCount,
                         createdAt = createdAt
@@ -642,14 +856,15 @@ object AniListClient {
         return AniListActivity(
             id = act.getInt("id"),
             userId = act.optInt("userId"),
-            userName = userObj?.optString("name", "You") ?: "You",
-            userAvatar = userObj?.optJSONObject("avatar")?.optString("medium"),
+            userName = userObj?.optNullableString("name") ?: "You",
+            userAvatar = userObj?.optJSONObject("avatar")?.optNullableString("medium"),
             type = "TEXT",
             status = null,
             progress = null,
-            text = act.optString("text"),
+            text = act.optNullableString("text"),
             mediaTitle = null,
             mediaCover = null,
+            rawMedia = null,
             replyCount = 0,
             likeCount = 0,
             createdAt = act.optLong("createdAt", System.currentTimeMillis() / 1000)
@@ -677,10 +892,10 @@ object AniListClient {
             val ep = eps.getJSONObject(i)
             StreamingEpisode(
                 episodeNumber = i + 1,
-                title = ep.optString("title").ifEmpty { null },
-                thumbnail = ep.optString("thumbnail").ifEmpty { null },
-                site = ep.optString("site").ifEmpty { null },
-                url = ep.optString("url").ifEmpty { null }
+                title = ep.optNullableString("title"),
+                thumbnail = ep.optNullableString("thumbnail"),
+                site = ep.optNullableString("site"),
+                url = ep.optNullableString("url")
             )
         }
     }
@@ -715,13 +930,13 @@ object AniListClient {
 
         for (i in 0 until edges.length()) {
             val edge = edges.getJSONObject(i)
-            val role = edge.optString("role")
+            val role = edge.optNullableString("role")
             val charNode = edge.optJSONObject("node") ?: continue
             val charId = charNode.optInt("id")
             val nameObj = charNode.optJSONObject("name")
-            val charName = nameObj?.optString("full", "Character") ?: "Character"
-            val charNameNative = nameObj?.optString("native")?.ifEmpty { null }
-            val charImg = charNode.optJSONObject("image")?.optString("medium")
+            val charName = nameObj?.optNullableString("full") ?: "Character"
+            val charNameNative = nameObj?.optNullableString("native")
+            val charImg = charNode.optJSONObject("image")?.optNullableString("medium")
 
             val vaArr = edge.optJSONArray("voiceActors")
             var jpVa: VoiceActor? = null
@@ -733,8 +948,8 @@ object AniListClient {
                     val lang = vaObj.optString("languageV2", "")
                     val vaId = vaObj.optInt("id")
                     val vaNameObj = vaObj.optJSONObject("name")
-                    val vaName = vaNameObj?.optString("full", "Voice Actor") ?: "Voice Actor"
-                    val vaImg = vaObj.optJSONObject("image")?.optString("medium")
+                    val vaName = vaNameObj?.optNullableString("full") ?: "Voice Actor"
+                    val vaImg = vaObj.optJSONObject("image")?.optNullableString("medium")
 
                     if (lang.equals("Japanese", ignoreCase = true) && jpVa == null) {
                         jpVa = VoiceActor(vaId, vaName, vaImg, "Japanese")
@@ -767,7 +982,7 @@ object AniListClient {
                 name { full native }
                 image { large }
                 languageV2
-                characterMedia(sort: [POPULARITY_DESC], perPage: 30) {
+                characterMedia(type: ANIME, sort: [POPULARITY_DESC], perPage: 30) {
                   nodes {
                     id episodes format status season seasonYear meanScore averageScore isAdult siteUrl bannerImage
                     title { userPreferred english romaji native }
@@ -781,10 +996,10 @@ object AniListClient {
 
         val staff = data.optJSONObject("Staff") ?: return null
         val nameObj = staff.optJSONObject("name")
-        val name = nameObj?.optString("full", "Staff") ?: "Staff"
-        val nameNative = nameObj?.optString("native")?.ifEmpty { null }
-        val image = staff.optJSONObject("image")?.optString("large")
-        val lang = staff.optString("languageV2")
+        val name = nameObj?.optNullableString("full") ?: "Staff"
+        val nameNative = nameObj?.optNullableString("native")
+        val image = staff.optJSONObject("image")?.optNullableString("large")
+        val lang = staff.optNullableString("languageV2")
 
         val mediaNodes = staff.optJSONObject("characterMedia")?.optJSONArray("nodes")
         val works = mutableListOf<AnimeMedia>()
@@ -794,7 +1009,7 @@ object AniListClient {
             for (i in 0 until mediaNodes.length()) {
                 val node = mediaNodes.getJSONObject(i)
                 val id = node.optInt("id")
-                if (id > 0 && seenIds.add(id)) {
+                if (!isMangaOrNovel(node) && id > 0 && seenIds.add(id)) {
                     works.add(mapMedia(node))
                 }
             }
@@ -815,6 +1030,9 @@ object AniListClient {
 
     private fun parseMediaArray(arr: org.json.JSONArray?): List<AnimeMedia> {
         if (arr == null) return emptyList()
-        return (0 until arr.length()).mapNotNull { runCatching { mapMedia(arr.getJSONObject(it)) }.getOrNull() }
+        return (0 until arr.length()).mapNotNull { 
+            val obj = arr.getJSONObject(it)
+            if (!isMangaOrNovel(obj)) runCatching { mapMedia(obj) }.getOrNull() else null 
+        }
     }
 }
