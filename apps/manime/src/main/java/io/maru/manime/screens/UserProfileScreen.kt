@@ -199,7 +199,10 @@ fun UserProfileScreen(
                             val daysWatched = (u.minutesWatched / 1440.0)
                             Text(String.format("%.1f days", daysWatched), fontSize = 11.5.sp, color = MaruAccentBlue)
                             if (u.meanScore > 0) {
-                                Text("â˜… ${u.meanScore.toInt()}%", fontSize = 11.5.sp, color = MaruAccentYellow, fontWeight = FontWeight.Bold)
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+    Icon(Icons.Default.Star, contentDescription = null, tint = MaruAccentYellow, modifier = Modifier.size(12.dp))
+    Text("${u.meanScore.toInt()}%", fontSize = 11.5.sp, color = MaruAccentYellow, fontWeight = FontWeight.Bold)
+}
                             }
                         }
                     }
@@ -397,7 +400,10 @@ fun UserCardRow(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("${user.animeCount} anime", fontSize = 11.sp, color = MaruTextMuted)
                     if (user.meanScore > 0) {
-                        Text("â˜… ${user.meanScore.toInt()}%", fontSize = 11.sp, color = MaruAccentYellow, fontWeight = FontWeight.Bold)
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+    Icon(Icons.Default.Star, contentDescription = null, tint = MaruAccentYellow, modifier = Modifier.size(11.dp))
+    Text("${user.meanScore.toInt()}%", fontSize = 11.sp, color = MaruAccentYellow, fontWeight = FontWeight.Bold)
+}
                     }
                 }
             }
@@ -406,3 +412,4 @@ fun UserCardRow(
         }
     }
 }
+

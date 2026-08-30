@@ -301,12 +301,10 @@ fun AnimeDetailScreen(
                                 color = MaruTextStrong
                             )
                             if (currentMedia.score != null && currentMedia.score!! > 0) {
-                                Text(
-                                    text = "â˜… ${currentMedia.score}",
-                                    fontSize = 10.5.sp,
-                                    color = MaruAccentYellow,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+    Icon(Icons.Default.Star, contentDescription = null, tint = MaruAccentYellow, modifier = Modifier.size(11.dp))
+    Text(text = "${currentMedia.score}", fontSize = 10.5.sp, color = MaruAccentYellow, fontWeight = FontWeight.Bold)
+}
                             }
                         }
 
@@ -1336,3 +1334,4 @@ fun AnimeDetailScreen(
         }
     }
 }
+

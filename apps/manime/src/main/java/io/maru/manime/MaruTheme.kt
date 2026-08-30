@@ -6,6 +6,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -233,7 +235,7 @@ fun PosterCard(
                     maxLines = 2,
                     lineHeight = 15.sp
                 )
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(3.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -252,12 +254,23 @@ fun PosterCard(
                         fontWeight = if (isAiring) FontWeight.Bold else FontWeight.Normal
                     )
                     if (media.averageScore != null && media.averageScore > 0) {
-                        Text(
-                            text = "â˜… ${media.averageScore}%",
-                            fontSize = 9.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaruAccentYellow
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Star,
+                                contentDescription = null,
+                                tint = MaruAccentYellow,
+                                modifier = Modifier.size(11.dp)
+                            )
+                            Text(
+                                text = "${media.averageScore}%",
+                                fontSize = 9.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaruAccentYellow
+                            )
+                        }
                     }
                 }
             }
