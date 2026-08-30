@@ -88,6 +88,16 @@ data class StaffWorks(
     val works: List<AnimeMedia>
 )
 
+data class FriendAnimeStatus(
+    val id: Int,
+    val userId: Int,
+    val userName: String,
+    val userAvatar: String?,
+    val status: String,
+    val progress: String?,
+    val createdAt: Long
+)
+
 data class AniListActivity(
     val id: Int,
     val userId: Int,
@@ -374,6 +384,110 @@ object AniListClient {
             }
         }
         return results
+    }
+
+    suspend fun getSimilarAnime(mediaId: Int): List<AnimeMedia> {
+        val data = query("""
+            query (${'$'}id: Int) {
+              Media(id: ${'$'}id, type: ANIME) {
+                relations {
+                  edges {
+                    relationType
+                    node { ${mediaFields()} }
+                  }
+                }
+                recommendations(sort: [RATING_DESC], perPage: 16) {
+                  nodes {
+                    mediaRecommendation { ${mediaFields()} }
+                  }
+                }
+              }
+            }
+        """, mapOf("id" to mediaId))
+
+        val media = data.optJSONObject("Media") ?: return emptyList()
+        val results = mutableListOf<AnimeMedia>()
+        val seen = mutableSetOf<Int>()
+
+        val relEdges = media.optJSONObject("relations")?.optJSONArray("edges")
+        if (relEdges != null) {
+            for (i in 0 until relEdges.length()) {
+                val node = relEdges.getJSONObject(i).optJSONObject("node") ?: continue
+                val id = node.optInt("id")
+                if (id > 0 && id != mediaId && seen.add(id)) {
+                    results.add(mapMedia(node))
+                }
+            }
+        }
+
+        val recNodes = media.optJSONObject("recommendations")?.optJSONArray("nodes")
+        if (recNodes != null) {
+            for (i in 0 until recNodes.length()) {
+                val rec = recNodes.getJSONObject(i).optJSONObject("mediaRecommendation") ?: continue
+                val id = rec.optInt("id")
+                if (id > 0 && id != mediaId && seen.add(id)) {
+                    results.add(mapMedia(rec))
+                }
+            }
+        }
+
+        return results
+    }
+
+    suspend fun getFriendsMediaStatus(mediaId: Int, token: String? = null): List<FriendAnimeStatus> {
+        val isFollow = !token.isNullOrBlank()
+        val data = try {
+            query("""
+                query (${'$'}mediaId: Int, ${'$'}isFollowing: Boolean) {
+                  Page(page: 1, perPage: 15) {
+                    activities(mediaId: ${'$'}mediaId, isFollowing: ${'$'}isFollowing, type_in: [ANIME_LIST], sort: ID_DESC) {
+                      ... on ListActivity {
+                        id userId status progress createdAt
+                        user { id name avatar { medium } }
+                      }
+                    }
+                  }
+                }
+            """, mapOf("mediaId" to mediaId, "isFollowing" to isFollow), token)
+        } catch (_: Exception) {
+            query("""
+                query (${'$'}mediaId: Int) {
+                  Page(page: 1, perPage: 15) {
+                    activities(mediaId: ${'$'}mediaId, sort: ID_DESC) {
+                      ... on ListActivity {
+                        id userId status progress createdAt
+                        user { id name avatar { medium } }
+                      }
+                    }
+                  }
+                }
+            """, mapOf("mediaId" to mediaId))
+        }
+
+        val pageObj = data.optJSONObject("Page") ?: return emptyList()
+        val arr = pageObj.optJSONArray("activities") ?: return emptyList()
+        val list = mutableListOf<FriendAnimeStatus>()
+        val seenUsers = mutableSetOf<Int>()
+
+        for (i in 0 until arr.length()) {
+            val act = arr.optJSONObject(i) ?: continue
+            val userObj = act.optJSONObject("user") ?: continue
+            val uId = userObj.optInt("id")
+            if (uId > 0 && seenUsers.add(uId)) {
+                list.add(
+                    FriendAnimeStatus(
+                        id = act.optInt("id"),
+                        userId = uId,
+                        userName = userObj.optString("name", "Friend"),
+                        userAvatar = userObj.optJSONObject("avatar")?.optString("medium"),
+                        status = act.optString("status", "watched"),
+                        progress = act.optString("progress").ifEmpty { null },
+                        createdAt = act.optLong("createdAt", 0L)
+                    )
+                )
+            }
+        }
+        return list
     }
 
     suspend fun saveEntry(

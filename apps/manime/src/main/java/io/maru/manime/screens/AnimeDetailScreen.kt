@@ -58,6 +58,12 @@ fun AnimeDetailScreen(
     var castList by remember { mutableStateOf<List<CastMember>>(emptyList()) }
     var isCastLoading by remember { mutableStateOf(true) }
 
+    var similarAnime by remember { mutableStateOf<List<AnimeMedia>>(emptyList()) }
+    var isSimilarLoading by remember { mutableStateOf(true) }
+
+    var friendsStatus by remember { mutableStateOf<List<FriendAnimeStatus>>(emptyList()) }
+    var isFriendsLoading by remember { mutableStateOf(true) }
+
     var activeVoiceActor by remember { mutableStateOf<VoiceActor?>(null) }
     var activeStaffWorks by remember { mutableStateOf<StaffWorks?>(null) }
     var isStaffLoading by remember { mutableStateOf(false) }
@@ -65,6 +71,9 @@ fun AnimeDetailScreen(
     LaunchedEffect(currentMedia.mediaId) {
         isEpisodesLoading = true
         isCastLoading = true
+        isSimilarLoading = true
+        isFriendsLoading = true
+
         scope.launch {
             try {
                 streamingEpisodes = withContext(Dispatchers.IO) {
@@ -85,6 +94,28 @@ fun AnimeDetailScreen(
                 castList = emptyList()
             } finally {
                 isCastLoading = false
+            }
+        }
+        scope.launch {
+            try {
+                similarAnime = withContext(Dispatchers.IO) {
+                    AniListClient.getSimilarAnime(currentMedia.mediaId)
+                }
+            } catch (_: Exception) {
+                similarAnime = emptyList()
+            } finally {
+                isSimilarLoading = false
+            }
+        }
+        scope.launch {
+            try {
+                friendsStatus = withContext(Dispatchers.IO) {
+                    AniListClient.getFriendsMediaStatus(currentMedia.mediaId, anilistToken.ifEmpty { null })
+                }
+            } catch (_: Exception) {
+                friendsStatus = emptyList()
+            } finally {
+                isFriendsLoading = false
             }
         }
     }
@@ -519,6 +550,136 @@ fun AnimeDetailScreen(
                                 color = MaruAccentPink,
                                 modifier = Modifier.padding(top = 4.dp)
                             )
+                        }
+                    }
+                }
+
+                // Friends' Status Section
+                item(key = "friends_status_section") {
+                    GlassCard(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp)) {
+                            GlassSectionHeader(
+                                title = "FRIENDS & COMMUNITY STATUS",
+                                icon = Icons.Default.People,
+                                color = MaruAccentPurple
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            if (isFriendsLoading) {
+                                Text("Checking activity from your following feed...", fontSize = 12.sp, color = MaruTextMuted)
+                            } else if (friendsStatus.isEmpty()) {
+                                Text("No recent friends or community activity recorded for this anime.", fontSize = 12.sp, color = MaruTextMuted)
+                            } else {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    friendsStatus.take(5).forEach { friend ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            if (friend.userAvatar != null) {
+                                                AsyncImage(
+                                                    model = friend.userAvatar,
+                                                    contentDescription = friend.userName,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier
+                                                        .size(30.dp)
+                                                        .clip(CircleShape)
+                                                        .border(BorderStroke(1.dp, MaruAccentPurple), CircleShape)
+                                                )
+                                            } else {
+                                                Surface(
+                                                    shape = CircleShape,
+                                                    color = MaruGlassSubtleBg,
+                                                    modifier = Modifier.size(30.dp)
+                                                ) {
+                                                    Box(contentAlignment = Alignment.Center) {
+                                                        Icon(Icons.Default.Person, contentDescription = null, tint = MaruTextMuted, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            }
+
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = friend.userName,
+                                                    fontSize = 12.5.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaruTextStrong
+                                                )
+                                                val statusText = if (!friend.progress.isNullOrBlank()) {
+                                                    "${friend.status.lowercase()} ep ${friend.progress}"
+                                                } else {
+                                                    friend.status.lowercase()
+                                                }
+                                                Text(
+                                                    text = statusText,
+                                                    fontSize = 11.sp,
+                                                    color = MaruAccentPink
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Similar Anime & Relations Section
+                item(key = "similar_anime_section") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp)
+                    ) {
+                        Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+                            GlassSectionHeader(
+                                title = "SIMILAR & RELATED ANIME",
+                                icon = Icons.Default.AutoAwesome,
+                                color = MaruAccentPink
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        if (isSimilarLoading) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(180.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(color = MaruAccentPink)
+                            }
+                        } else if (similarAnime.isEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                            ) {
+                                Text("No similar or related anime found.", fontSize = 12.sp, color = MaruTextMuted)
+                            }
+                        } else {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(horizontal = 16.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                similarAnime.forEach { sim ->
+                                    WatchingCard(
+                                        media = sim,
+                                        onClick = {
+                                            currentMedia = sim
+                                            onMediaUpdated(sim)
+                                        }
+                                    )
+                                }
+                            }
                         }
                     }
                 }
