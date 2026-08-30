@@ -97,6 +97,14 @@ data class AniListActivity(
     val createdAt: Long
 )
 
+data class StreamingEpisode(
+    val episodeNumber: Int,    // 1-based, inferred from position
+    val title: String?,        // may be null for some shows
+    val thumbnail: String?,
+    val site: String?,
+    val url: String?
+)
+
 // ---------------------------------------------------------------------------
 // AniList GraphQL Client — direct calls to https://graphql.anilist.co
 // Queries mirror those in IsThisDubbed.tsx on the site.
@@ -571,6 +579,38 @@ data class SearchPage(
             englishCast = castList,
             streamingPlatforms = platforms
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming Episodes (titles + thumbnails from AniList)
+    // -----------------------------------------------------------------------
+    suspend fun getStreamingEpisodes(mediaId: Int): List<StreamingEpisode> {
+        val data = query("""
+            query (${'$'}id: Int) {
+              Media(id: ${'$'}id, type: ANIME) {
+                streamingEpisodes {
+                  title
+                  thumbnail
+                  url
+                  site
+                }
+              }
+            }
+        """, mapOf("id" to mediaId))
+
+        val eps = data.optJSONObject("Media")?.optJSONArray("streamingEpisodes")
+            ?: return emptyList()
+
+        return (0 until eps.length()).map { i ->
+            val ep = eps.getJSONObject(i)
+            StreamingEpisode(
+                episodeNumber = i + 1,
+                title = ep.optString("title").ifEmpty { null },
+                thumbnail = ep.optString("thumbnail").ifEmpty { null },
+                site = ep.optString("site").ifEmpty { null },
+                url = ep.optString("url").ifEmpty { null }
+            )
+        }
     }
 
     // -----------------------------------------------------------------------

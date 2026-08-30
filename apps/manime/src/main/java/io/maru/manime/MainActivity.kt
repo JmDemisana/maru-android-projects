@@ -84,14 +84,14 @@ enum class NavigationScreen(
     val icon: ImageVector,
     val group: NavigationGroup
 ) {
+    // Core Functionality Group
+    PROFILE("My Library", "Watching & Planning", Icons.Default.CollectionsBookmark, NavigationGroup.CORE_FUNCTIONALITY),
+    SEARCH("Search", "Anime, Genres & Cast", Icons.Default.Search, NavigationGroup.CORE_FUNCTIONALITY),
+    SETTINGS("Settings", "Theme & App Options", Icons.Default.Settings, NavigationGroup.CORE_FUNCTIONALITY),
+
     // Recommendation Engine Group
     DASHBOARD("Discovery", "Trending & Community Feed", Icons.Default.AutoAwesome, NavigationGroup.RECOMMENDATION_ENGINE),
-    SEARCH("Search", "Anime, Genres & Cast", Icons.Default.Search, NavigationGroup.RECOMMENDATION_ENGINE),
-    RECOMMENDATIONS("Recommendations", "Genre & Mood Browsing", Icons.Default.Stars, NavigationGroup.RECOMMENDATION_ENGINE),
-
-    // Core Functionality Group
-    PROFILE("My Library", "AniList Lists & Stats", Icons.Default.CollectionsBookmark, NavigationGroup.CORE_FUNCTIONALITY),
-    SETTINGS("Settings", "Theme & App Options", Icons.Default.Settings, NavigationGroup.CORE_FUNCTIONALITY)
+    RECOMMENDATIONS("Recommendations", "Genre & Mood Browsing", Icons.Default.Stars, NavigationGroup.RECOMMENDATION_ENGINE)
 }
 
 class MainActivity : ComponentActivity() {
@@ -196,7 +196,7 @@ fun MainAppScreen(prefs: MAnimePrefs) {
     val stremioAddons by prefs.stremioAddons.collectAsStateWithLifecycle(initialValue = MAnimePrefs.DEFAULT_STREMIO_ADDONS)
     val cloudstreamReposSet by prefs.cloudstreamRepos.collectAsStateWithLifecycle(initialValue = emptySet())
 
-    var selectedScreen by remember { mutableStateOf(NavigationScreen.DASHBOARD) }
+    var selectedScreen by remember { mutableStateOf(NavigationScreen.PROFILE) }
     var selectedAnimeDetail by remember { mutableStateOf<AnimeMedia?>(null) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     var isGlobalLoading by remember { mutableStateOf(false) }

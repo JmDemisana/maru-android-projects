@@ -1,4 +1,4 @@
-﻿package io.maru.manime.screens
+package io.maru.manime.screens
 
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
@@ -132,9 +132,30 @@ fun ProfileScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    StatBox(title = "WATCHING", value = "$watchingCount", color = MaruAccentBlue, modifier = Modifier.weight(1f))
-                    StatBox(title = "COMPLETED", value = "$completedCount", color = MaruAccentGreen, modifier = Modifier.weight(1f))
-                    StatBox(title = "PLANNING", value = "$planningCount", color = MaruAccentPurple, modifier = Modifier.weight(1f))
+                    StatBox(
+                        title = "WATCHING",
+                        value = "$watchingCount",
+                        color = MaruAccentBlue,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { selectedCategory = "Watching" }
+                    )
+                    StatBox(
+                        title = "PLANNING",
+                        value = "$planningCount",
+                        color = MaruAccentPurple,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { selectedCategory = "Planning" }
+                    )
+                    StatBox(
+                        title = "COMPLETED",
+                        value = "$completedCount",
+                        color = MaruAccentGreen,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { selectedCategory = "Completed" }
+                    )
                 }
             }
 

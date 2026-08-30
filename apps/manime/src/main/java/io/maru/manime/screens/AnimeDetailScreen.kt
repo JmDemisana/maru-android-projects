@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -50,6 +51,23 @@ fun AnimeDetailScreen(
     var isUpdatingList by remember { mutableStateOf(false) }
     var showEditDialog by remember { mutableStateOf(false) }
 
+    var streamingEpisodes by remember { mutableStateOf<List<StreamingEpisode>>(emptyList()) }
+    var isEpisodesLoading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(currentMedia.mediaId) {
+        isEpisodesLoading = true
+        try {
+            val eps = withContext(Dispatchers.IO) {
+                AniListClient.getStreamingEpisodes(currentMedia.mediaId)
+            }
+            streamingEpisodes = eps
+        } catch (_: Exception) {
+            streamingEpisodes = emptyList()
+        } finally {
+            isEpisodesLoading = false
+        }
+    }
+
     val rawDescription = currentMedia.description
     val cleanDescription: String = remember(rawDescription) {
         if (rawDescription.isNullOrBlank()) {
@@ -63,7 +81,7 @@ fun AnimeDetailScreen(
         }
     }
 
-    val totalEpisodes = currentMedia.episodes ?: 12
+    val totalEpisodes = maxOf(currentMedia.episodes ?: 0, streamingEpisodes.size).takeIf { it > 0 } ?: 12
     val hasEnglishDub = currentMedia.externalLinks.any { it.isEnglishDub }
 
     fun updateProgress(newProgress: Int, newStatus: String? = null) {
@@ -107,7 +125,7 @@ fun AnimeDetailScreen(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = 32.dp)
+        contentPadding = PaddingValues(bottom = 36.dp)
     ) {
         // Hero Banner Header
         item(key = "header") {
@@ -542,7 +560,7 @@ fun AnimeDetailScreen(
             }
         }
 
-        // Episodes Tracker List
+        // Episodes Tracker List Section Header
         item(key = "episodes_header") {
             Row(
                 modifier = Modifier
@@ -567,9 +585,22 @@ fun AnimeDetailScreen(
             }
         }
 
+        // Vertical List of Episodes with Titles & Thumbnails
         items(totalEpisodes, key = { "ep_$it" }) { index ->
             val episodeNum = index + 1
             val isWatched = episodeNum <= currentMedia.progress
+            val streamEp = streamingEpisodes.find { it.episodeNumber == episodeNum }
+                ?: streamingEpisodes.getOrNull(index)
+
+            // Extract title cleanly
+            val rawTitle = streamEp?.title
+            val displayTitle = if (!rawTitle.isNullOrBlank()) {
+                // If title starts with "Episode X - ", clean it up or display full
+                rawTitle
+            } else {
+                "Episode $episodeNum"
+            }
+
             GlassCard(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -577,49 +608,105 @@ fun AnimeDetailScreen(
                     .clickable { updateProgress(episodeNum) }
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    // Episode Thumbnail or Number Pill
+                    Box(
+                        modifier = Modifier
+                            .width(108.dp)
+                            .height(64.dp)
+                            .clip(MaruInputShape)
+                            .background(Color(0x33000000)),
+                        contentAlignment = Alignment.Center
                     ) {
+                        if (!streamEp?.thumbnail.isNullOrBlank()) {
+                            AsyncImage(
+                                model = streamEp!!.thumbnail,
+                                contentDescription = displayTitle,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            // Dim overlay if watched
+                            if (isWatched) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(Color(0x66000000))
+                                )
+                            }
+                        }
+
+                        // Episode badge on top of thumbnail
                         Surface(
-                            color = if (isWatched) Color(0x334ADE80) else Color(0x2260E2FF),
-                            shape = MaruPillShape,
-                            border = BorderStroke(1.dp, if (isWatched) MaruAccentGreen else MaruAccentBlue.copy(alpha = 0.3f)),
-                            modifier = Modifier.size(32.dp)
+                            color = if (isWatched) Color(0xDD4ADE80) else Color(0xCC0E0A1A),
+                            shape = CircleShape,
+                            modifier = Modifier.size(28.dp)
                         ) {
                             Box(contentAlignment = Alignment.Center) {
                                 if (isWatched) {
-                                    Icon(Icons.Default.Check, contentDescription = "Watched", tint = MaruAccentGreen, modifier = Modifier.size(16.dp))
+                                    Icon(
+                                        Icons.Default.Check,
+                                        contentDescription = "Watched",
+                                        tint = Color(0xFF0E0A1A),
+                                        modifier = Modifier.size(16.dp)
+                                    )
                                 } else {
                                     Text(
                                         text = "$episodeNum",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaruAccentBlue
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = MaruTextStrong
                                     )
                                 }
                             }
                         }
+                    }
 
+                    // Episode Number + Name Column
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         Text(
                             text = "Episode $episodeNum",
-                            fontSize = 14.sp,
-                            color = if (isWatched) MaruTextStrong else MaruTextStrong.copy(alpha = 0.85f),
-                            fontWeight = if (isWatched) FontWeight.Bold else FontWeight.Medium
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.sp,
+                                letterSpacing = 0.5.sp
+                            ),
+                            color = if (isWatched) MaruAccentGreen else MaruAccentBlue
+                        )
+
+                        Text(
+                            text = displayTitle,
+                            fontSize = 13.5.sp,
+                            fontWeight = if (isWatched) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isWatched) MaruTextStrong else MaruTextStrong.copy(alpha = 0.9f),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
-                    if (isWatched) {
-                        Text(
-                            text = "WATCHED",
-                            fontSize = 10.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaruAccentGreen
-                        )
+                    // Watched status indicator / button
+                    Surface(
+                        onClick = { updateProgress(episodeNum) },
+                        shape = CircleShape,
+                        color = if (isWatched) Color(0x224ADE80) else MaruGlassSubtleBg,
+                        border = BorderStroke(1.dp, if (isWatched) MaruAccentGreen.copy(alpha = 0.5f) else MaruGlassBorderSoft),
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                if (isWatched) Icons.Default.Check else Icons.Default.Add,
+                                contentDescription = if (isWatched) "Watched" else "Mark Watched",
+                                tint = if (isWatched) MaruAccentGreen else MaruTextMuted,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -726,4 +813,3 @@ fun AnimeDetailScreen(
         )
     }
 }
-
