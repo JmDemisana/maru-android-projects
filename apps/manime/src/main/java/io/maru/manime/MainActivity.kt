@@ -452,9 +452,13 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                                 )
                             }
                         },
-                        navigationIcon = {
-                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaruTextStrong)
+                        actions = {
+                            IconButton(onClick = { selectedScreen = NavigationScreen.SETTINGS }) {
+                                Icon(
+                                    Icons.Default.Settings,
+                                    contentDescription = "Settings",
+                                    tint = if (selectedScreen == NavigationScreen.SETTINGS) MaruAccentPink else MaruTextMuted
+                                )
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(
@@ -462,6 +466,60 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                             titleContentColor = MaruTextStrong
                         )
                     )
+                }
+            },
+            bottomBar = {
+                if (selectedAnimeDetail == null) {
+                    Surface(
+                        color = Color(0xF20E0A1A),
+                        border = BorderStroke(1.dp, MaruGlassBorderSoft),
+                        shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        NavigationBar(
+                            containerColor = Color.Transparent,
+                            contentColor = MaruTextStrong,
+                            modifier = Modifier
+                                .navigationBarsPadding()
+                                .height(64.dp)
+                        ) {
+                            val navItems = listOf(
+                                NavigationScreen.PROFILE,
+                                NavigationScreen.DASHBOARD,
+                                NavigationScreen.SEARCH,
+                                NavigationScreen.RECOMMENDATIONS
+                            )
+                            navItems.forEach { screen ->
+                                val isSelected = selectedScreen == screen
+                                NavigationBarItem(
+                                    selected = isSelected,
+                                    onClick = {
+                                        selectedScreen = screen
+                                        selectedAnimeDetail = null
+                                    },
+                                    icon = {
+                                        Icon(
+                                            screen.icon,
+                                            contentDescription = screen.title,
+                                            tint = if (isSelected) MaruAccentPink else MaruTextMuted,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = screen.title,
+                                            fontSize = 10.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                            color = if (isSelected) MaruAccentPink else MaruTextMuted
+                                        )
+                                    },
+                                    colors = NavigationBarItemDefaults.colors(
+                                        indicatorColor = MaruAccentPink.copy(alpha = 0.2f)
+                                    )
+                                )
+                            }
+                        }
+                    }
                 }
             },
             containerColor = Color.Transparent
@@ -472,119 +530,137 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                     .background(backgroundGradient)
                     .padding(if (selectedAnimeDetail != null) PaddingValues(0.dp) else innerPadding)
             ) {
-                if (selectedAnimeDetail != null) {
-                    AnimeDetailScreen(
-                        media = selectedAnimeDetail!!,
-                        anilistToken = anilistToken,
-                        onBack = { selectedAnimeDetail = null },
-                        onMediaUpdated = { updated ->
-                            selectedAnimeDetail = updated
-                            watchingList = watchingList.map { if (it.mediaId == updated.mediaId) updated else it }
-                            allUserLists = allUserLists.mapValues { (_, list) ->
-                                list.map { if (it.mediaId == updated.mediaId) updated else it }
-                            }
+                AnimatedContent(
+                    targetState = selectedAnimeDetail,
+                    transitionSpec = {
+                        if (targetState != null) {
+                            (slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(280, easing = FastOutSlowInEasing)) +
+                                    fadeIn(animationSpec = tween(280))) togetherWith
+                                    (slideOutHorizontally(targetOffsetX = { -it / 3 }, animationSpec = tween(240)) +
+                                            fadeOut(animationSpec = tween(240)))
+                        } else {
+                            (slideInHorizontally(initialOffsetX = { -it / 3 }, animationSpec = tween(240)) +
+                                    fadeIn(animationSpec = tween(240))) togetherWith
+                                    (slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(280, easing = FastOutSlowInEasing)) +
+                                            fadeOut(animationSpec = tween(280)))
                         }
-                    )
-                } else {
-                    AnimatedContent(
-                        targetState = selectedScreen,
-                        transitionSpec = {
-                            val enter = fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)) +
-                                    scaleIn(initialScale = 0.97f, animationSpec = tween(220, easing = FastOutSlowInEasing))
-                            val exit = fadeOut(animationSpec = tween(150, easing = FastOutLinearInEasing))
-                            enter togetherWith exit
-                        },
-                        label = "ScreenTransition"
-                    ) { screen ->
-                        when (screen) {
-                            NavigationScreen.DASHBOARD -> {
-                                DashboardScreen(
-                                    watchingList = watchingList,
-                                    trendingList = trendingList,
-                                    activitiesList = activitiesList,
-                                    isLoading = isDashboardLoading,
-                                    onRefresh = refreshDashboard,
-                                    onAnimeClick = { selectedAnimeDetail = it }
-                                )
+                    },
+                    label = "DetailTransition"
+                ) { detailMedia ->
+                    if (detailMedia != null) {
+                        AnimeDetailScreen(
+                            media = detailMedia,
+                            anilistToken = anilistToken,
+                            onBack = { selectedAnimeDetail = null },
+                            onMediaUpdated = { updated ->
+                                selectedAnimeDetail = updated
+                                watchingList = watchingList.map { if (it.mediaId == updated.mediaId) updated else it }
+                                allUserLists = allUserLists.mapValues { (_, list) ->
+                                    list.map { if (it.mediaId == updated.mediaId) updated else it }
+                                }
                             }
-                            NavigationScreen.SEARCH -> {
-                                SearchScreen(
-                                    searchResults = searchResults,
-                                    isSearching = isSearching,
-                                    onSearch = { q ->
-                                        if (q.isBlank()) {
-                                            searchResults = emptyList()
-                                        } else {
-                                            scope.launch {
-                                                isSearching = true
-                                                try {
-                                                    val res = withContext(Dispatchers.IO) {
-                                                        AniListClient.search(q, 1, 20, anilistToken.ifEmpty { null })
+                        )
+                    } else {
+                        AnimatedContent(
+                            targetState = selectedScreen,
+                            transitionSpec = {
+                                val enter = fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)) +
+                                        scaleIn(initialScale = 0.98f, animationSpec = tween(200, easing = FastOutSlowInEasing))
+                                val exit = fadeOut(animationSpec = tween(150, easing = FastOutLinearInEasing))
+                                enter togetherWith exit
+                            },
+                            label = "ScreenTransition"
+                        ) { screen ->
+                            when (screen) {
+                                NavigationScreen.DASHBOARD -> {
+                                    DashboardScreen(
+                                        watchingList = watchingList,
+                                        trendingList = trendingList,
+                                        activitiesList = activitiesList,
+                                        isLoading = isDashboardLoading,
+                                        onRefresh = refreshDashboard,
+                                        onAnimeClick = { selectedAnimeDetail = it }
+                                    )
+                                }
+                                NavigationScreen.SEARCH -> {
+                                    SearchScreen(
+                                        searchResults = searchResults,
+                                        isSearching = isSearching,
+                                        onSearch = { q ->
+                                            if (q.isBlank()) {
+                                                searchResults = emptyList()
+                                            } else {
+                                                scope.launch {
+                                                    isSearching = true
+                                                    try {
+                                                        val res = withContext(Dispatchers.IO) {
+                                                            AniListClient.search(q, 1, 20, anilistToken.ifEmpty { null })
+                                                        }
+                                                        searchResults = res.results
+                                                    } catch (_: Exception) {} finally {
+                                                        isSearching = false
                                                     }
-                                                    searchResults = res.results
-                                                } catch (_: Exception) {} finally {
-                                                    isSearching = false
                                                 }
                                             }
+                                        },
+                                        onAnimeClick = { selectedAnimeDetail = it }
+                                    )
+                                }
+                                NavigationScreen.RECOMMENDATIONS -> {
+                                    RecommendationsScreen(
+                                        recommendations = recommendations,
+                                        isLoading = isRecLoading,
+                                        isLoggedIn = anilistToken.isNotBlank(),
+                                        username = anilistUsername,
+                                        selectedCategory = selectedRecCategory,
+                                        onSelectCategory = loadCategoryRecs,
+                                        onLoginClick = {
+                                            val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=49762&response_type=token"
+                                            val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
+                                            context.startActivity(browserIntent)
+                                        },
+                                        onAnimeClick = { selectedAnimeDetail = it }
+                                    )
+                                }
+                                NavigationScreen.PROFILE -> {
+                                    ProfileScreen(
+                                        user = effectiveUser,
+                                        allLists = allUserLists,
+                                        watchingCount = watchingList.size,
+                                        completedCount = completedCount,
+                                        planningCount = planningCount,
+                                        anilistToken = anilistToken,
+                                        onLoginClick = {
+                                            val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=49762&response_type=token"
+                                            val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
+                                            context.startActivity(browserIntent)
+                                        },
+                                        onLogoutClick = {
+                                            scope.launch {
+                                                prefs.setAnilistToken("")
+                                                prefs.setAnilistUsername("")
+                                                userProfile = null
+                                                watchingList = emptyList()
+                                                allUserLists = emptyMap()
+                                            }
+                                        },
+                                        onAnimeClick = { selectedAnimeDetail = it },
+                                        onMediaUpdated = { updated ->
+                                            watchingList = watchingList.map { if (it.mediaId == updated.mediaId) updated else it }
+                                            allUserLists = allUserLists.mapValues { (_, list) ->
+                                                list.map { if (it.mediaId == updated.mediaId) updated else it }
+                                            }
                                         }
-                                    },
-                                    onAnimeClick = { selectedAnimeDetail = it }
-                                )
-                            }
-                            NavigationScreen.RECOMMENDATIONS -> {
-                                RecommendationsScreen(
-                                    recommendations = recommendations,
-                                    isLoading = isRecLoading,
-                                    isLoggedIn = anilistToken.isNotBlank(),
-                                    username = anilistUsername,
-                                    selectedCategory = selectedRecCategory,
-                                    onSelectCategory = loadCategoryRecs,
-                                    onLoginClick = {
-                                        val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=49762&response_type=token"
-                                        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
-                                        context.startActivity(browserIntent)
-                                    },
-                                    onAnimeClick = { selectedAnimeDetail = it }
-                                )
-                            }
-                            NavigationScreen.PROFILE -> {
-                                ProfileScreen(
-                                    user = effectiveUser,
-                                    allLists = allUserLists,
-                                    watchingCount = watchingList.size,
-                                    completedCount = completedCount,
-                                    planningCount = planningCount,
-                                    anilistToken = anilistToken,
-                                    onLoginClick = {
-                                        val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=49762&response_type=token"
-                                        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
-                                        context.startActivity(browserIntent)
-                                    },
-                                    onLogoutClick = {
-                                        scope.launch {
-                                            prefs.setAnilistToken("")
-                                            prefs.setAnilistUsername("")
-                                            userProfile = null
-                                            watchingList = emptyList()
-                                            allUserLists = emptyMap()
-                                        }
-                                    },
-                                    onAnimeClick = { selectedAnimeDetail = it },
-                                    onMediaUpdated = { updated ->
-                                        watchingList = watchingList.map { if (it.mediaId == updated.mediaId) updated else it }
-                                        allUserLists = allUserLists.mapValues { (_, list) ->
-                                            list.map { if (it.mediaId == updated.mediaId) updated else it }
-                                        }
-                                    }
-                                )
-                            }
-                            NavigationScreen.SETTINGS -> {
-                                SettingsScreen(
-                                    reportProgress = reportProgress,
-                                    onToggleReportProgress = { scope.launch { prefs.setReportProgress(it) } },
-                                    rememberPosition = rememberPosition,
-                                    onToggleRememberPosition = { scope.launch { prefs.setRememberPosition(it) } }
-                                )
+                                    )
+                                }
+                                NavigationScreen.SETTINGS -> {
+                                    SettingsScreen(
+                                        reportProgress = reportProgress,
+                                        onToggleReportProgress = { scope.launch { prefs.setReportProgress(it) } },
+                                        rememberPosition = rememberPosition,
+                                        onToggleRememberPosition = { scope.launch { prefs.setRememberPosition(it) } }
+                                    )
+                                }
                             }
                         }
                     }
@@ -964,6 +1040,7 @@ private fun DrawerItemRow(
         }
     }
 }
+
 
 
 
