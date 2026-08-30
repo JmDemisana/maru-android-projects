@@ -1,4 +1,4 @@
-package io.maru.manime.screens
+﻿package io.maru.manime.screens
 
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
@@ -47,14 +47,52 @@ fun ProfileScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var selectedCategory by remember { mutableStateOf("Watching") }
+
+    val availableCategories = remember(allLists) {
+        if (allLists.isEmpty()) {
+            listOf("Watching", "Planning", "Completed", "Paused", "Dropped")
+        } else {
+            val keys = allLists.keys.toList()
+            val resultList = mutableListOf<String>()
+            keys.find { it.contains("Watch", ignoreCase = true) || it.equals("Current", ignoreCase = true) }?.let { resultList.add(it) }
+            keys.find { it.contains("Plan", ignoreCase = true) }?.let { if (!resultList.contains(it)) resultList.add(it) }
+            for (k in keys) {
+                if (!resultList.contains(k)) resultList.add(k)
+            }
+            resultList
+        }
+    }
+
+    var selectedCategory by remember(availableCategories) {
+        mutableStateOf(availableCategories.firstOrNull() ?: "Watching")
+    }
 
     val currentList = remember(allLists, selectedCategory) {
-        allLists[selectedCategory]
-            ?: allLists[selectedCategory.lowercase()]
-            ?: allLists.entries.find { it.key.equals(selectedCategory, ignoreCase = true) }?.value
-            ?: emptyList()
+        if (selectedCategory.equals("Completed", ignoreCase = true)) {
+            val direct = allLists[selectedCategory] ?: allLists.entries.find { it.key.equals(selectedCategory, ignoreCase = true) }?.value
+            if (direct != null && direct.isNotEmpty()) direct
+            else {
+                val aggregated = allLists.filter { (k, _) -> k.contains("Complet", ignoreCase = true) || k.contains("Finish", ignoreCase = true) }.values.flatten()
+                if (aggregated.isNotEmpty()) aggregated.distinctBy { it.mediaId }
+                else emptyList()
+            }
+        } else if (selectedCategory.equals("Watching", ignoreCase = true)) {
+            val direct = allLists[selectedCategory] ?: allLists.entries.find { it.key.equals(selectedCategory, ignoreCase = true) }?.value
+            if (direct != null && direct.isNotEmpty()) direct
+            else {
+                val aggregated = allLists.filter { (k, _) -> k.contains("Watch", ignoreCase = true) || k.contains("Current", ignoreCase = true) }.values.flatten()
+                if (aggregated.isNotEmpty()) aggregated.distinctBy { it.mediaId }
+                else emptyList()
+            }
+        } else {
+            allLists[selectedCategory]
+                ?: allLists[selectedCategory.lowercase()]
+                ?: allLists.entries.find { it.key.equals(selectedCategory, ignoreCase = true) }?.value
+                ?: emptyList()
+        }
     }
+
+    val isLoggedIn = anilistToken.isNotBlank()
 
     LazyColumn(
         modifier = Modifier
@@ -88,26 +126,26 @@ fun ProfileScreen(
                         Icon(
                             Icons.Default.AccountCircle,
                             contentDescription = null,
-                            tint = MaruAccentPink,
+                            tint = if (isLoggedIn) MaruAccentPurple else MaruAccentPink,
                             modifier = Modifier.size(56.dp)
                         )
                     }
 
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = user?.name ?: "Guest User",
+                            text = user?.name ?: if (isLoggedIn) "AniList Connected" else "Guest User",
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Bold,
                             color = MaruTextStrong
                         )
                         Text(
-                            text = if (user != null) "AniList Connected" else "Sign in to sync your library",
+                            text = if (isLoggedIn) "Synced with AniList" else "Sign in to sync your library",
                             fontSize = 12.sp,
-                            color = if (user != null) MaruAccentGreen else MaruTextMuted
+                            color = if (isLoggedIn) MaruAccentGreen else MaruTextMuted
                         )
                     }
 
-                    if (user != null) {
+                    if (isLoggedIn) {
                         IconButton(onClick = onLogoutClick) {
                             Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Log Out", tint = MaruDanger)
                         }
@@ -126,7 +164,7 @@ fun ProfileScreen(
         }
 
         // Stats Row
-        if (user != null) {
+        if (isLoggedIn) {
             item(key = "stats") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -138,7 +176,10 @@ fun ProfileScreen(
                         color = MaruAccentBlue,
                         modifier = Modifier
                             .weight(1f)
-                            .clickable { selectedCategory = "Watching" }
+                            .clickable {
+                                val target = availableCategories.find { it.contains("Watch", ignoreCase = true) || it.equals("Current", ignoreCase = true) } ?: "Watching"
+                                selectedCategory = target
+                            }
                     )
                     StatBox(
                         title = "PLANNING",
@@ -146,7 +187,10 @@ fun ProfileScreen(
                         color = MaruAccentPurple,
                         modifier = Modifier
                             .weight(1f)
-                            .clickable { selectedCategory = "Planning" }
+                            .clickable {
+                                val target = availableCategories.find { it.contains("Plan", ignoreCase = true) } ?: "Planning"
+                                selectedCategory = target
+                            }
                     )
                     StatBox(
                         title = "COMPLETED",
@@ -154,23 +198,30 @@ fun ProfileScreen(
                         color = MaruAccentGreen,
                         modifier = Modifier
                             .weight(1f)
-                            .clickable { selectedCategory = "Completed" }
+                            .clickable {
+                                val target = availableCategories.find { it.contains("Complet", ignoreCase = true) } ?: "Completed"
+                                selectedCategory = target
+                            }
                     )
                 }
             }
 
             // Library Categories Scrollable Filter Bar
             item(key = "categories_bar") {
-                val categories = listOf("Watching", "Planning", "Completed", "Paused", "Dropped", "Repeating")
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    categories.forEach { cat ->
+                    availableCategories.forEach { cat ->
                         val isSelected = selectedCategory.equals(cat, ignoreCase = true)
-                        val count = allLists[cat]?.size ?: allLists.entries.find { it.key.equals(cat, ignoreCase = true) }?.value?.size ?: 0
+                        val count = if (cat.equals("Completed", ignoreCase = true) && !allLists.containsKey("Completed")) {
+                            completedCount
+                        } else {
+                            allLists[cat]?.size ?: allLists.entries.find { it.key.equals(cat, ignoreCase = true) }?.value?.size ?: 0
+                        }
+
                         Surface(
                             onClick = { selectedCategory = cat },
                             shape = MaruPillShape,

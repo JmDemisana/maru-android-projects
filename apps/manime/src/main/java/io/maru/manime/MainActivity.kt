@@ -1,4 +1,4 @@
-package io.maru.manime
+﻿package io.maru.manime
 
 import android.content.Intent
 import android.net.Uri
@@ -191,6 +191,7 @@ fun MainAppScreen(prefs: MAnimePrefs) {
 
     val anilistToken by prefs.anilistToken.collectAsStateWithLifecycle(initialValue = "")
     val anilistUsername by prefs.anilistUsername.collectAsStateWithLifecycle(initialValue = "")
+    val anilistAvatar by prefs.anilistAvatar.collectAsStateWithLifecycle(initialValue = "")
     val reportProgress by prefs.reportProgress.collectAsStateWithLifecycle(initialValue = true)
     val rememberPosition by prefs.rememberPosition.collectAsStateWithLifecycle(initialValue = true)
     val stremioAddons by prefs.stremioAddons.collectAsStateWithLifecycle(initialValue = MAnimePrefs.DEFAULT_STREMIO_ADDONS)
@@ -202,7 +203,13 @@ fun MainAppScreen(prefs: MAnimePrefs) {
     var isGlobalLoading by remember { mutableStateOf(false) }
 
     // Data States
+    val cachedUser = remember(anilistUsername, anilistAvatar) {
+        if (anilistUsername.isNotBlank()) {
+            AniListUser(id = 0, name = anilistUsername, avatarUrl = anilistAvatar.ifEmpty { null })
+        } else null
+    }
     var userProfile by remember { mutableStateOf<AniListUser?>(null) }
+    val effectiveUser = userProfile ?: cachedUser
     var watchingList by remember { mutableStateOf<List<AnimeMedia>>(emptyList()) }
     var completedCount by remember { mutableIntStateOf(0) }
     var planningCount by remember { mutableIntStateOf(0) }
@@ -308,16 +315,28 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                 if (anilistToken.isNotBlank()) {
                     val user = withContext(Dispatchers.IO) { AniListClient.getViewer(anilistToken) }
                     userProfile = user
+                    prefs.setAnilistUsername(user.name)
+                    if (user.avatarUrl != null) prefs.setAnilistAvatar(user.avatarUrl)
 
                     val userLists = withContext(Dispatchers.IO) { AniListClient.getUserList(user.name, anilistToken) }
                     allUserLists = userLists
-                    val current = userLists["Watching"] ?: userLists["Current"] ?: userLists["watching"] ?: emptyList()
-                    val completed = userLists["Completed"] ?: userLists["completed"] ?: emptyList()
-                    val planning = userLists["Planning"] ?: userLists["planning"] ?: emptyList()
 
-                    watchingList = current
-                    completedCount = completed.size
-                    planningCount = planning.size
+                    val totalWatching = mutableListOf<AnimeMedia>()
+                    val totalCompleted = mutableListOf<AnimeMedia>()
+                    val totalPlanning = mutableListOf<AnimeMedia>()
+
+                    for ((listName, items) in userLists) {
+                        val lower = listName.lowercase()
+                        when {
+                            lower.contains("watch") || lower == "current" -> totalWatching.addAll(items)
+                            lower.contains("complet") || lower.contains("finish") -> totalCompleted.addAll(items)
+                            lower.contains("plan") -> totalPlanning.addAll(items)
+                        }
+                    }
+
+                    watchingList = totalWatching.distinctBy { it.mediaId }
+                    completedCount = totalCompleted.distinctBy { it.mediaId }.size
+                    planningCount = totalPlanning.distinctBy { it.mediaId }.size
                 }
             } catch (e: Exception) {
                 // Ignore transient network errors
@@ -530,7 +549,7 @@ fun MainAppScreen(prefs: MAnimePrefs) {
                             }
                             NavigationScreen.PROFILE -> {
                                 ProfileScreen(
-                                    user = userProfile,
+                                    user = effectiveUser,
                                     allLists = allUserLists,
                                     watchingCount = watchingList.size,
                                     completedCount = completedCount,
@@ -945,5 +964,6 @@ private fun DrawerItemRow(
         }
     }
 }
+
 
 

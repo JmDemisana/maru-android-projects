@@ -1,4 +1,4 @@
-﻿package io.maru.manime.screens
+package io.maru.manime.screens
 
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
@@ -592,14 +592,13 @@ fun AnimeDetailScreen(
             val streamEp = streamingEpisodes.find { it.episodeNumber == episodeNum }
                 ?: streamingEpisodes.getOrNull(index)
 
-            // Extract title cleanly
-            val rawTitle = streamEp?.title
-            val displayTitle = if (!rawTitle.isNullOrBlank()) {
-                // If title starts with "Episode X - ", clean it up or display full
-                rawTitle
-            } else {
-                "Episode $episodeNum"
-            }
+            // Extract title cleanly without duplicate Episode prefix
+            val rawTitle = streamEp?.title?.trim()
+            val cleanSubTitle = if (!rawTitle.isNullOrBlank()) {
+                rawTitle.replaceFirst(Regex("^Episode\\s*\\d+\\s*[-:–\\.]\\s*", RegexOption.IGNORE_CASE), "").trim()
+            } else ""
+
+            val displayTitle = if (cleanSubTitle.isNotBlank()) cleanSubTitle else if (!rawTitle.isNullOrBlank()) rawTitle else "Episode $episodeNum"
 
             GlassCard(
                 modifier = Modifier
@@ -666,16 +665,18 @@ fun AnimeDetailScreen(
                         }
                     }
 
-                    // Episode Number + Name Column
+                    // Episode Number + Full Name Column (no cut-off)
                     Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(vertical = 2.dp),
+                        verticalArrangement = Arrangement.spacedBy(3.dp)
                     ) {
                         Text(
                             text = "Episode $episodeNum",
                             style = MaterialTheme.typography.labelSmall.copy(
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 10.sp,
+                                fontSize = 10.5.sp,
                                 letterSpacing = 0.5.sp
                             ),
                             color = if (isWatched) MaruAccentGreen else MaruAccentBlue
@@ -684,29 +685,10 @@ fun AnimeDetailScreen(
                         Text(
                             text = displayTitle,
                             fontSize = 13.5.sp,
-                            fontWeight = if (isWatched) FontWeight.Bold else FontWeight.Medium,
+                            fontWeight = if (isWatched) FontWeight.SemiBold else FontWeight.Normal,
                             color = if (isWatched) MaruTextStrong else MaruTextStrong.copy(alpha = 0.9f),
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
+                            lineHeight = 18.sp
                         )
-                    }
-
-                    // Watched status indicator / button
-                    Surface(
-                        onClick = { updateProgress(episodeNum) },
-                        shape = CircleShape,
-                        color = if (isWatched) Color(0x224ADE80) else MaruGlassSubtleBg,
-                        border = BorderStroke(1.dp, if (isWatched) MaruAccentGreen.copy(alpha = 0.5f) else MaruGlassBorderSoft),
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                if (isWatched) Icons.Default.Check else Icons.Default.Add,
-                                contentDescription = if (isWatched) "Watched" else "Mark Watched",
-                                tint = if (isWatched) MaruAccentGreen else MaruTextMuted,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
                     }
                 }
             }

@@ -13,6 +13,7 @@ class MAnimePrefs(private val context: Context) {
     companion object {
         val KEY_ANILIST_TOKEN       = stringPreferencesKey("anilist_token")
         val KEY_ANILIST_USERNAME    = stringPreferencesKey("anilist_username")
+        val KEY_ANILIST_AVATAR      = stringPreferencesKey("anilist_avatar")
         val KEY_EXT_TYPE            = stringPreferencesKey("extension_type") // CLOUDSTREAM | ANIYOMI | STREMIO
         val KEY_STREMIO_URL         = stringPreferencesKey("stremio_url")
         val KEY_STREMIO_ADDONS      = stringSetPreferencesKey("stremio_addon_urls")
@@ -40,6 +41,7 @@ class MAnimePrefs(private val context: Context) {
     // --- Flows ---
     val anilistToken: Flow<String> = context.dataStore.data.map { it[KEY_ANILIST_TOKEN] ?: "" }
     val anilistUsername: Flow<String> = context.dataStore.data.map { it[KEY_ANILIST_USERNAME] ?: "" }
+    val anilistAvatar: Flow<String> = context.dataStore.data.map { it[KEY_ANILIST_AVATAR] ?: "" }
     val extensionType: Flow<String> = context.dataStore.data.map { it[KEY_EXT_TYPE] ?: EXT_STREMIO }
     val stremioUrl: Flow<String> = context.dataStore.data.map { it[KEY_STREMIO_URL] ?: DEFAULT_STREMIO_URL }
     val stremioAddons: Flow<Set<String>> = context.dataStore.data.map { it[KEY_STREMIO_ADDONS] ?: DEFAULT_STREMIO_ADDONS }
@@ -52,6 +54,7 @@ class MAnimePrefs(private val context: Context) {
     // --- Suspend setters ---
     suspend fun setAnilistToken(value: String) = context.dataStore.edit { it[KEY_ANILIST_TOKEN] = value }
     suspend fun setAnilistUsername(value: String) = context.dataStore.edit { it[KEY_ANILIST_USERNAME] = value }
+    suspend fun setAnilistAvatar(value: String) = context.dataStore.edit { it[KEY_ANILIST_AVATAR] = value }
     suspend fun setExtensionType(value: String) = context.dataStore.edit { it[KEY_EXT_TYPE] = value }
     suspend fun setStremioUrl(value: String) = context.dataStore.edit { it[KEY_STREMIO_URL] = value }
     suspend fun setStremioAddons(value: Set<String>) = context.dataStore.edit { it[KEY_STREMIO_ADDONS] = value }
