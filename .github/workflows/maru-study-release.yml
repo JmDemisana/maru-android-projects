@@ -11,21 +11,30 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "25"
           cache: gradle
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Prepare Android SDK
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$(command -v sdkmanager || find "$SDK" -name sdkmanager -type f | head -n 1)"
+          echo "Using SDK at $SDK"
+          echo "Using sdkmanager at $SDKMANAGER"
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --sdk_root="$SDK" "platforms;android-36" "build-tools;36.1.0" > /dev/null
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
       - name: Resolve version
         run: |
@@ -71,7 +80,7 @@ jobs:
         run: |
           APK="apps/maru-study/build/outputs/apk/release/maru-study-release.apk"
           test -f "$APK"
-          APKSIGNER=$(find "${ANDROID_HOME}/build-tools" -name apksigner | sort | tail -n 1)
+          APKSIGNER=$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f | sort | tail -n 1)
           "$APKSIGNER" verify --print-certs "$APK"
 
       - name: Stage APK
