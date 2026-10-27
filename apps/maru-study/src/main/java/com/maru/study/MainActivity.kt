@@ -136,22 +136,24 @@ private fun MaruStudyApp() {
             },
         ) {
             Column(Modifier.fillMaxSize()) {
-                MaruTopBar(
-                    title = section.label,
-                    subtitle = when (section) {
-                        StudySection.SCHEDULE -> when {
-                            document.entries.isEmpty() -> "Add your first class"
-                            else -> "${classCountLabel(document.entries.size)} this week"
-                        }
-                        StudySection.GRADES -> "Required endterm"
-                        StudySection.HOMEWORK -> {
-                            val pending = homework.count { !it.done }
-                            if (pending == 0) "All clear" else "$pending pending"
-                        }
-                        StudySection.NANAMI -> null
-                    },
-                    onMenu = ::openDrawer,
-                )
+                if (section != StudySection.NANAMI) {
+                    MaruTopBar(
+                        title = section.label,
+                        subtitle = when (section) {
+                            StudySection.SCHEDULE -> when {
+                                document.entries.isEmpty() -> "Add your first class"
+                                else -> "${classCountLabel(document.entries.size)} this week"
+                            }
+                            StudySection.GRADES -> "Required endterm"
+                            StudySection.HOMEWORK -> {
+                                val pending = homework.count { !it.done }
+                                if (pending == 0) "All clear" else "$pending pending"
+                            }
+                            StudySection.NANAMI -> null
+                        },
+                        onMenu = ::openDrawer,
+                    )
+                }
 
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     AnimatedContent(

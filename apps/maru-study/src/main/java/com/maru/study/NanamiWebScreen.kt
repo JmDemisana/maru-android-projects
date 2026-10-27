@@ -20,11 +20,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -46,17 +51,18 @@ private const val NANAMI_AI_URL = "https://nanami-ai.pages.dev"
 @Composable
 fun NanamiWebScreen(onExit: () -> Unit) {
     var webView by remember { mutableStateOf<WebView?>(null) }
-    var canGoBack by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf(0) }
     var loading by remember { mutableStateOf(true) }
     var failed by remember { mutableStateOf(false) }
 
-    BackHandler {
-        val view = webView
-        if (view != null && view.canGoBack()) view.goBack() else onExit()
-    }
+    BackHandler { onExit() }
 
-    Box(Modifier.fillMaxSize().background(MaruPageMid)) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(MaruPageMid)
+            .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.ime))
+    ) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
@@ -89,7 +95,6 @@ fun NanamiWebScreen(onExit: () -> Unit) {
 
                         override fun onPageFinished(view: WebView?, url: String?) {
                             loading = false
-                            canGoBack = view?.canGoBack() == true
                         }
 
                         override fun onReceivedError(
@@ -129,9 +134,6 @@ fun NanamiWebScreen(onExit: () -> Unit) {
 
                     loadUrl(NANAMI_AI_URL)
                 }.also { webView = it }
-            },
-            update = { view ->
-                canGoBack = view.canGoBack()
             },
         )
 
