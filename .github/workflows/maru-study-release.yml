@@ -88,6 +88,8 @@ jobs:
           mkdir -p out
           cp apps/maru-study/build/outputs/apk/release/maru-study-release.apk \
              "out/maru-study-${MARU_STUDY_VERSION_NAME}.apk"
+          cp apps/maru-study/build/outputs/apk/release/maru-study-release.apk \
+             "out/maru-study-latest.apk"
           ls -lh out
 
       - name: Upload artifact
