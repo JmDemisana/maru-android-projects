@@ -174,7 +174,7 @@ fun GradeSolverScreen() {
                             value = course,
                             onValueChange = { course = it },
                             label = "Course / subject",
-                            placeholder = "ECE 414 A",
+                            placeholder = "e.g. MATH 101",
                         )
                     }
                 }

@@ -475,14 +475,14 @@ private fun ScheduleEditorDialog(
                             value = draft.courseCode,
                             onValueChange = { draft = draft.copy(courseCode = it) },
                             label = "Course code",
-                            placeholder = "ECE 414 A",
+                            placeholder = "e.g. MATH 101",
                             modifier = Modifier.weight(1f),
                         )
                         MaruTextField(
                             value = draft.section,
                             onValueChange = { draft = draft.copy(section = it) },
                             label = "Section",
-                            placeholder = "ECE 4A",
+                            placeholder = "e.g. A",
                             modifier = Modifier.weight(1f),
                         )
                     }
@@ -491,7 +491,7 @@ private fun ScheduleEditorDialog(
                         value = draft.title,
                         onValueChange = { draft = draft.copy(title = it) },
                         label = "Subject title",
-                        placeholder = "Feedback and Control Systems",
+                        placeholder = "e.g. Calculus 1",
                     )
 
                     SectionLabel("Day")
@@ -548,14 +548,14 @@ private fun ScheduleEditorDialog(
                             value = draft.instructor,
                             onValueChange = { draft = draft.copy(instructor = it) },
                             label = "Instructor",
-                            placeholder = "Abeto",
+                            placeholder = "e.g. Dela Cruz",
                             modifier = Modifier.weight(1f),
                         )
                         MaruTextField(
                             value = draft.room,
                             onValueChange = { draft = draft.copy(room = it) },
                             label = "Room",
-                            placeholder = "NEB 8",
+                            placeholder = "e.g. Room 204",
                             modifier = Modifier.weight(1f),
                         )
                     }

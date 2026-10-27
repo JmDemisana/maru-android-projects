@@ -80,19 +80,8 @@ data class ScheduleDocument(
             .sortedWith(String.CASE_INSENSITIVE_ORDER)
 }
 
-fun defaultDocument(): ScheduleDocument = ScheduleDocument(
-    entries = listOf(
-        ScheduleEntry("default-mon-bs434a", StudyDay.MONDAY, 8 * 60, 12 * 60, "BS 434 A", "Technopreneurship", "ECE 4D", "Young", "NEB 8", accent = EntryAccent.AMBER),
-        ScheduleEntry("default-mon-ece414a", StudyDay.MONDAY, 13 * 60, 16 * 60 + 45, "ECE 414 A", "Feedback and Control Systems", "ECE 4A", "Abeto", "LAB 2", accent = EntryAccent.MINT),
-        ScheduleEntry("default-tue-ece412b", StudyDay.TUESDAY, 13 * 60, 16 * 60 + 45, "ECE 412 B", "Antenna Systems", "ECE 4A", "Benitez", "NEB 8", accent = EntryAccent.SKY),
-        ScheduleEntry("default-wed-bes423", StudyDay.WEDNESDAY, 8 * 60, 12 * 60, "BES 423", "Engineering Economics and Accounting", "ECE 4D", "Young", "NEB 6", accent = EntryAccent.ROSE),
-        ScheduleEntry("default-wed-ece412", StudyDay.WEDNESDAY, 13 * 60, 15 * 60 + 30, "ECE 412", "Program Enhancement 4", "ECE 4B", "Diamante", "NEB 7", accent = EntryAccent.LILAC),
-        ScheduleEntry("default-thu-ece413", StudyDay.THURSDAY, 8 * 60, 12 * 60, "ECE 413", "Methods of Research", "ECE 4B", "Deldo", "31", accent = EntryAccent.AMBER),
-        ScheduleEntry("default-thu-ece432b", StudyDay.THURSDAY, 15 * 60 + 30, 18 * 60, "ECE 432 B", "Modern Comm's Syst's and Technologies", "ECE 4D", "Benitez", "NEB 6", accent = EntryAccent.SKY),
-        ScheduleEntry("default-fri-ece414a", StudyDay.FRIDAY, 8 * 60, 12 * 60, "ECE 414 A", "Feedback and Control Systems", "ECE 4B", "Abeto", "NEB 8", accent = EntryAccent.MINT),
-        ScheduleEntry("default-fri-ece412b", StudyDay.FRIDAY, 15 * 60, 16 * 60 + 45, "ECE 412 B", "Antenna Systems", "ECE 4A", "Benitez", "32", accent = EntryAccent.SKY),
-    ).sortedWith(compareBy({ it.day.ordinal }, { it.startMinute })),
-)
+// Fresh installs start empty: no seeded subjects, classes, or sample data.
+fun defaultDocument(): ScheduleDocument = ScheduleDocument()
 
 // ---------------------------------------------------------------------------
 // Time helpers
