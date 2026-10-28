@@ -60,7 +60,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import java.time.LocalDate
 
-private enum class ScheduleViewMode(val label: String) {
+internal enum class ScheduleViewMode(val label: String) {
     GRID("Grid"),
     LIST("List"),
 }
@@ -73,7 +73,8 @@ fun ScheduleScreen(
 ) {
     val context = LocalContext.current
     val reminderStore = remember { ReminderStore(context) }
-    var viewMode by rememberSaveable { mutableStateOf(ScheduleViewMode.GRID) }
+    val viewPreferences = remember { ViewPreferences(context) }
+    var viewMode by rememberSaveable { mutableStateOf(viewPreferences.scheduleView()) }
     var editorEntry by remember { mutableStateOf<ScheduleEntry?>(null) }
     var editorIsNew by remember { mutableStateOf(true) }
     var notificationsVisible by remember { mutableStateOf(false) }
@@ -97,6 +98,11 @@ fun ScheduleScreen(
 
     LaunchedEffect(newClassSignal) {
         if (newClassSignal > 0) openNew()
+    }
+
+    fun chooseView(mode: ScheduleViewMode) {
+        viewMode = mode
+        viewPreferences.setScheduleView(mode)
     }
 
     fun upsert(entry: ScheduleEntry) {
@@ -127,13 +133,13 @@ fun ScheduleScreen(
                 icon = Icons.Outlined.GridView,
                 label = "Grid",
                 active = viewMode == ScheduleViewMode.GRID,
-                onClick = { viewMode = ScheduleViewMode.GRID },
+                onClick = { chooseView(ScheduleViewMode.GRID) },
             )
             RibbonButton(
                 icon = Icons.Outlined.ViewList,
                 label = "List",
                 active = viewMode == ScheduleViewMode.LIST,
-                onClick = { viewMode = ScheduleViewMode.LIST },
+                onClick = { chooseView(ScheduleViewMode.LIST) },
             )
             RibbonSeparator()
             RibbonButton(
@@ -219,10 +225,11 @@ fun ScheduleScreen(
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun GridView(
+internal fun GridView(
     document: ScheduleDocument,
-    onEdit: (ScheduleEntry) -> Unit,
+    onEdit: ((ScheduleEntry) -> Unit)?,
     modifier: Modifier = Modifier,
+    header: (@Composable () -> Unit)? = null,
 ) {
     val days = document.activeDays()
     LazyColumn(
@@ -230,6 +237,9 @@ private fun GridView(
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        if (header != null) {
+            item(key = "grid-header-slot") { header() }
+        }
         if (days.isEmpty()) {
             item {
                 EmptyStateCard(
@@ -292,9 +302,9 @@ private fun DayHeader(day: StudyDay, entries: List<ScheduleEntry>) {
 private fun GridCard(
     entry: ScheduleEntry,
     modifier: Modifier = Modifier,
-    onEdit: (ScheduleEntry) -> Unit,
+    onEdit: ((ScheduleEntry) -> Unit)?,
 ) {
-    GlassCard(modifier, onClick = { onEdit(entry) }) {
+    GlassCard(modifier, onClick = onEdit?.let { edit -> { edit(entry) } }) {
         Box(Modifier.fillMaxWidth().height(2.dp).background(entry.accent.color))
         Column(
             Modifier.padding(11.dp),
@@ -333,10 +343,11 @@ private fun GridCard(
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun ListView(
+internal fun ListView(
     document: ScheduleDocument,
-    onEdit: (ScheduleEntry) -> Unit,
+    onEdit: ((ScheduleEntry) -> Unit)?,
     modifier: Modifier = Modifier,
+    header: (@Composable () -> Unit)? = null,
 ) {
     val days = document.activeDays()
     LazyColumn(
@@ -344,6 +355,9 @@ private fun ListView(
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        if (header != null) {
+            item(key = "list-header-slot") { header() }
+        }
         if (days.isEmpty()) {
             item {
                 EmptyStateCard(
@@ -361,7 +375,7 @@ private fun ListView(
             }
             items(entries, key = { "list-${it.id}" }) { entry ->
                 Box(Modifier.animateItem()) {
-                    ListRow(entry, onClick = { onEdit(entry) })
+                    ListRow(entry, onClick = onEdit?.let { edit -> { edit(entry) } })
                 }
             }
         }
@@ -369,7 +383,7 @@ private fun ListView(
 }
 
 @Composable
-private fun ListRow(entry: ScheduleEntry, onClick: () -> Unit) {
+private fun ListRow(entry: ScheduleEntry, onClick: (() -> Unit)? = null) {
     GlassCard(onClick = onClick) {
         Row(
             Modifier.padding(horizontal = 12.dp, vertical = 11.dp),

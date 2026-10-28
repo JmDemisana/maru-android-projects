@@ -34,12 +34,7 @@ import androidx.compose.material.icons.outlined.ViewList
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -53,24 +48,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private data class BulkSubject(
-    val id: Int,
-    val course: String = "",
-    val prelim: String = "",
-    val midterm: String = "",
-)
-
 @Composable
-fun GradeSolverScreen() {
+fun GradeSolverScreen(
+    state: GradeSolverState,
+    onStateChange: (GradeSolverState) -> Unit,
+) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
-    var bulkMode by remember { mutableStateOf(false) }
-    var prelim by remember { mutableStateOf("") }
-    var midterm by remember { mutableStateOf("") }
-    var course by remember { mutableStateOf("") }
-    val bulkSubjects = remember { mutableStateListOf(BulkSubject(id = 1)) }
-    var nextBulkId by remember { mutableStateOf(2) }
+
+    val bulkMode = state.bulkMode
+    val prelim = state.prelim
+    val midterm = state.midterm
+    val course = state.course
+    val bulkSubjects = state.bulkSubjects
 
     val required = computeRequiredEndterm(prelim, midterm)
 
@@ -103,13 +94,13 @@ fun GradeSolverScreen() {
                 icon = Icons.Outlined.Functions,
                 label = "Single",
                 active = !bulkMode,
-                onClick = { bulkMode = false },
+                onClick = { onStateChange(state.copy(bulkMode = false)) },
             )
             RibbonButton(
                 icon = Icons.Outlined.ViewList,
                 label = "Bulk",
                 active = bulkMode,
-                onClick = { bulkMode = true },
+                onClick = { onStateChange(state.copy(bulkMode = true)) },
             )
             RibbonSeparator()
             if (bulkMode) {
@@ -117,17 +108,24 @@ fun GradeSolverScreen() {
                     icon = Icons.Filled.Add,
                     label = "Add subject",
                     onClick = {
-                        bulkSubjects.add(BulkSubject(id = nextBulkId))
-                        nextBulkId += 1
+                        onStateChange(
+                            state.copy(
+                                bulkSubjects = state.bulkSubjects + BulkGradeSubject(id = state.nextId),
+                                nextId = state.nextId + 1,
+                            ),
+                        )
                     },
                 )
                 RibbonButton(
                     icon = Icons.Outlined.DeleteSweep,
                     label = "Clear",
                     onClick = {
-                        bulkSubjects.clear()
-                        bulkSubjects.add(BulkSubject(id = nextBulkId))
-                        nextBulkId += 1
+                        onStateChange(
+                            state.copy(
+                                bulkSubjects = listOf(BulkGradeSubject(id = state.nextId)),
+                                nextId = state.nextId + 1,
+                            ),
+                        )
                     },
                 )
                 RibbonSeparator()
@@ -159,20 +157,20 @@ fun GradeSolverScreen() {
                         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                             GradeInput(
                                 value = prelim,
-                                onValueChange = { prelim = it },
+                                onValueChange = { onStateChange(state.copy(prelim = it)) },
                                 label = "Prelim",
                                 modifier = Modifier.weight(1f),
                             )
                             GradeInput(
                                 value = midterm,
-                                onValueChange = { midterm = it },
+                                onValueChange = { onStateChange(state.copy(midterm = it)) },
                                 label = "Midterm",
                                 modifier = Modifier.weight(1f),
                             )
                         }
                         MaruTextField(
                             value = course,
-                            onValueChange = { course = it },
+                            onValueChange = { onStateChange(state.copy(course = it)) },
                             label = "Course / subject",
                             placeholder = "e.g. MATH 101",
                         )
@@ -198,10 +196,21 @@ fun GradeSolverScreen() {
                             subject = subject,
                             canDelete = bulkSubjects.size > 1,
                             onChange = { updated ->
-                                val index = bulkSubjects.indexOfFirst { it.id == updated.id }
-                                if (index >= 0) bulkSubjects[index] = updated
+                                onStateChange(
+                                    state.copy(
+                                        bulkSubjects = state.bulkSubjects.map {
+                                            if (it.id == updated.id) updated else it
+                                        },
+                                    ),
+                                )
                             },
-                            onDelete = { bulkSubjects.removeAll { it.id == subject.id } },
+                            onDelete = {
+                                onStateChange(
+                                    state.copy(
+                                        bulkSubjects = state.bulkSubjects.filterNot { it.id == subject.id },
+                                    ),
+                                )
+                            },
                         )
                     }
                 }
@@ -317,9 +326,9 @@ private fun ResultCard(
 
 @Composable
 private fun BulkSubjectCard(
-    subject: BulkSubject,
+    subject: BulkGradeSubject,
     canDelete: Boolean,
-    onChange: (BulkSubject) -> Unit,
+    onChange: (BulkGradeSubject) -> Unit,
     onDelete: () -> Unit,
 ) {
     val required = computeRequiredEndterm(subject.prelim, subject.midterm)
@@ -403,13 +412,13 @@ private fun BulkSubjectCard(
 private fun SolverNote() {
     InfoPanel(title = "How the grade is computed") {
         InfoLine("Endterm carries 40%. Prelim and midterm carry 30% each.")
-        InfoLine("Formula: (4.85 - 0.3 × prelim - 0.3 × midterm) / 0.4")
+        InfoLine("Formula: (4.85 - 0.3 Ã— prelim - 0.3 Ã— midterm) / 0.4")
         InfoLine("Blank inputs count as 5.0. Results round to one decimal and cap at 10.0.")
         InfoLine("A negative result means the endterm no longer matters: you already passed.")
     }
 }
 
-private fun openTupErs(context: Context) {
+internal fun openTupErs(context: Context) {
     runCatching {
         context.startActivity(
             Intent(Intent.ACTION_VIEW, Uri.parse("https://ers.tup.edu.ph/aims/students/"))

@@ -12,6 +12,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,21 +21,30 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.outlined.Assignment
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.CalendarMonth
+import androidx.compose.material.icons.outlined.CloudSync
+import androidx.compose.material.icons.outlined.Event
 import androidx.compose.material.icons.outlined.Functions
+import androidx.compose.material.icons.outlined.Grade
+import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -69,7 +79,11 @@ class MainActivity : ComponentActivity() {
 
 enum class StudySection(val label: String, val icon: ImageVector) {
     SCHEDULE("Schedule", Icons.Outlined.CalendarMonth),
+    EXAMS("Exam Schedule", Icons.Outlined.Event),
     GRADES("TUP Grade Solver", Icons.Outlined.Functions),
+    SYNC_CREDENTIALS("TUP Sync Credentials", Icons.Outlined.Key),
+    SYNC_SCHEDULE("TUP Sync Schedule", Icons.Outlined.CloudSync),
+    SYNC_GRADES("TUP Sync Grades", Icons.Outlined.Grade),
     HOMEWORK("Homework", Icons.Outlined.Assignment),
     NANAMI("Nanami AI", Icons.Outlined.AutoAwesome),
 }
@@ -83,11 +97,16 @@ private fun MaruStudyApp() {
     val studyStore = remember { StudyStore(context) }
     val homeworkStore = remember { HomeworkStore(context) }
     val reminderStore = remember { ReminderStore(context) }
+    val gradeStore = remember { GradeStore(context) }
+    val examStore = remember { ExamStore(context) }
 
     var document by remember { mutableStateOf(studyStore.load()) }
     var homework by remember { mutableStateOf(homeworkStore.load()) }
+    var grades by remember { mutableStateOf(gradeStore.load()) }
+    var exams by remember { mutableStateOf(examStore.load()) }
     var section by rememberSaveable { mutableStateOf(StudySection.SCHEDULE) }
     var newClassSignal by rememberSaveable { mutableStateOf(0) }
+    var pendingChange by remember { mutableStateOf<StudyChangeProposal?>(null) }
 
     fun updateDocument(next: ScheduleDocument) {
         document = next
@@ -100,6 +119,16 @@ private fun MaruStudyApp() {
         homeworkStore.save(next)
         next.filter { it.done || !it.reminder }.forEach { MaruReminders.cancelHomework(context, it) }
         next.filter { !it.done && it.reminder }.forEach { MaruReminders.scheduleHomework(context, it) }
+    }
+
+    fun updateGrades(next: GradeSolverState) {
+        grades = next
+        gradeStore.save(next)
+    }
+
+    fun updateExams(next: List<ExamEntry>) {
+        exams = next
+        examStore.save(next)
     }
 
     LaunchedEffect(Unit) {
@@ -145,6 +174,13 @@ private fun MaruStudyApp() {
                                 else -> "${classCountLabel(document.entries.size)} this week"
                             }
                             StudySection.GRADES -> "Required endterm"
+                            StudySection.SYNC_CREDENTIALS -> "Sign in to TUP ERS"
+                            StudySection.SYNC_SCHEDULE -> "Preview from ERS"
+                            StudySection.SYNC_GRADES -> "Your grades timeline"
+                            StudySection.EXAMS -> when {
+                                exams.isEmpty() -> "No exams saved yet"
+                                else -> examCountLabel(exams.size)
+                            }
                             StudySection.HOMEWORK -> {
                                 val pending = homework.count { !it.done }
                                 if (pending == 0) "All clear" else "$pending pending"
@@ -171,7 +207,47 @@ private fun MaruStudyApp() {
                                 newClassSignal = newClassSignal,
                             )
 
-                            StudySection.GRADES -> GradeSolverScreen()
+                            StudySection.GRADES -> GradeSolverScreen(
+                                state = grades,
+                                onStateChange = ::updateGrades,
+                            )
+
+                            StudySection.SYNC_CREDENTIALS -> TupSyncScreen(
+                                snapshot = StudySnapshot(document, homework, grades, exams),
+                                onReview = { pendingChange = it },
+                                tab = ErsSyncTab.CREDENTIALS,
+                                onOpenCredentials = {},
+                                onSynced = { hasSchedule ->
+                                    selectSection(
+                                        if (hasSchedule) {
+                                            StudySection.SYNC_SCHEDULE
+                                        } else {
+                                            StudySection.SYNC_GRADES
+                                        },
+                                    )
+                                },
+                            )
+
+                            StudySection.SYNC_SCHEDULE -> TupSyncScreen(
+                                snapshot = StudySnapshot(document, homework, grades, exams),
+                                onReview = { pendingChange = it },
+                                tab = ErsSyncTab.SCHEDULE,
+                                onOpenCredentials = { selectSection(StudySection.SYNC_CREDENTIALS) },
+                                onSynced = {},
+                            )
+
+                            StudySection.SYNC_GRADES -> TupSyncScreen(
+                                snapshot = StudySnapshot(document, homework, grades, exams),
+                                onReview = { pendingChange = it },
+                                tab = ErsSyncTab.GRADES,
+                                onOpenCredentials = { selectSection(StudySection.SYNC_CREDENTIALS) },
+                                onSynced = {},
+                            )
+
+                            StudySection.EXAMS -> ExamScheduleScreen(
+                                exams = exams,
+                                onExamsChange = ::updateExams,
+                            )
 
                             StudySection.HOMEWORK -> HomeworkScreen(
                                 tasks = homework,
@@ -185,12 +261,75 @@ private fun MaruStudyApp() {
                                     section = StudySection.SCHEDULE
                                     openDrawer()
                                 },
+                                studyContext = {
+                                    buildStudyContext(document, homework, grades, exams)
+                                },
+                                onStudyChange = { raw ->
+                                    parseStudyChange(
+                                        raw,
+                                        StudySnapshot(document, homework, grades, exams),
+                                    )?.let { pendingChange = it }
+                                },
                             )
                         }
                     }
                 }
             }
         }
+    }
+
+    pendingChange?.let { proposal ->
+        AlertDialog(
+            onDismissRequest = { pendingChange = null },
+            title = {
+                Text(
+                    proposal.title,
+                    color = MaruTextStrong,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            },
+            text = {
+                Column(
+                    Modifier
+                        .heightIn(max = 380.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    proposal.lines.forEach { line ->
+                        Text(
+                            line,
+                            color = MaruTextMuted,
+                            fontSize = 13.sp,
+                            lineHeight = 18.sp,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val next = proposal.apply(
+                            StudySnapshot(document, homework, grades, exams),
+                        )
+                        updateDocument(next.document)
+                        updateHomework(next.homework)
+                        updateGrades(next.grades)
+                        updateExams(next.exams)
+                        pendingChange = null
+                    },
+                ) {
+                    Text("Apply", color = MaruAccent, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingChange = null }) {
+                    Text("Cancel", color = MaruTextMuted)
+                }
+            },
+            containerColor = MaruPanelSolid,
+            textContentColor = MaruTextMuted,
+        )
     }
 }
 

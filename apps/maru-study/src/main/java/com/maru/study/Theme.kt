@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -53,6 +54,7 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -230,9 +232,12 @@ fun MaruTextField(
     modifier: Modifier = Modifier,
     placeholder: String? = null,
     singleLine: Boolean = true,
+    readOnly: Boolean = false,
     keyboardType: KeyboardType = KeyboardType.Text,
     minLines: Int = 1,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
     trailingIcon: (@Composable () -> Unit)? = null,
+    interactionSource: MutableInteractionSource = remember { MutableInteractionSource() },
 ) {
     OutlinedTextField(
         value = value,
@@ -240,9 +245,12 @@ fun MaruTextField(
         label = { Text(label.uppercase(), fontSize = 11.5.sp, letterSpacing = 0.8.sp) },
         placeholder = placeholder?.let { { Text(it, color = MaruTextFaint, fontSize = 13.5.sp) } },
         trailingIcon = trailingIcon,
+        visualTransformation = visualTransformation,
         modifier = modifier.fillMaxWidth(),
         singleLine = singleLine,
+        readOnly = readOnly,
         minLines = minLines,
+        interactionSource = interactionSource,
         shape = MaruShape,
         textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaruTextStrong, fontSize = 15.sp),
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
@@ -448,15 +456,20 @@ fun RowScope.RibbonButton(
     icon: ImageVector,
     label: String,
     active: Boolean = false,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val background by animateColorAsState(
-        targetValue = if (active) MaruAccentSoft else Color.Transparent,
+        targetValue = if (active && enabled) MaruAccentSoft else Color.Transparent,
         animationSpec = tween(180),
         label = "ribbon-background",
     )
     val tint by animateColorAsState(
-        targetValue = if (active) MaruAccent else MaruTextMuted,
+        targetValue = when {
+            !enabled -> MaruTextFaint.copy(alpha = 0.5f)
+            active -> MaruAccent
+            else -> MaruTextMuted
+        },
         animationSpec = tween(180),
         label = "ribbon-tint",
     )
@@ -464,7 +477,7 @@ fun RowScope.RibbonButton(
         Modifier
             .height(36.dp)
             .background(background)
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
