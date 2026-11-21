@@ -69,6 +69,8 @@ class ExamStore(context: Context) {
 
 fun List<ExamEntry>.sortedExams(): List<ExamEntry> = sortedWith(
     compareBy(
+        { parseExamDate(it.date) ?: LocalDate.MAX },
+        { parseExamMinute(it.start) ?: Int.MAX_VALUE },
         { it.date.ifBlank { "9999-99-99" } },
         { it.start.ifBlank { "99:99" } },
     ),

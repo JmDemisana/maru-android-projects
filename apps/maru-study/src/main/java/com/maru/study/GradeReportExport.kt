@@ -145,7 +145,7 @@ object GradeReportExport {
             GradeReportRow(
                 label = course.trim().ifBlank { "Subject ${index + 1}" },
                 detail = "Prelim ${gradeText(prelim)}   ·   Midterm ${gradeText(midterm)}",
-                value = formatRequiredEndterm(required),
+                value = if (required != null && required <= 0.0) "PASSED" else formatRequiredEndterm(required),
                 accent = difficultyFor(required)?.color?.toArgb() ?: FAINT,
                 difficulty = difficultyLabels[difficultyIndex(required)],
             )
@@ -415,36 +415,46 @@ object GradeReportExport {
 
     private fun save(context: Context, bitmap: Bitmap, prefix: String): String? {
         val name = "maru-study-$prefix-${System.currentTimeMillis()}.png"
-        val result = runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val values = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, name)
-                    put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-                    put(
-                        MediaStore.Images.Media.RELATIVE_PATH,
-                        "${Environment.DIRECTORY_PICTURES}/MaruStudy",
-                    )
+        return try {
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                        put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                        put(
+                            MediaStore.Images.Media.RELATIVE_PATH,
+                            "${Environment.DIRECTORY_PICTURES}/MaruStudy",
+                        )
+                    }
+                    val resolver = context.contentResolver
+                    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                        ?: return@runCatching null
+                    val wrote = resolver.openOutputStream(uri)?.use { stream ->
+                        bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+                    } ?: false
+                    if (!wrote) {
+                        resolver.delete(uri, null, null)
+                        return@runCatching null
+                    }
+                    "Pictures/MaruStudy/$name"
+                } else {
+                    val dir = File(
+                        context.getExternalFilesDir(Environment.DIRECTORY_PICTURES),
+                        "MaruStudy",
+                    ).apply { mkdirs() }
+                    val file = File(dir, name)
+                    val wrote = FileOutputStream(file).use { stream ->
+                        bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+                    }
+                    if (!wrote) {
+                        file.delete()
+                        return@runCatching null
+                    }
+                    file.absolutePath
                 }
-                val resolver = context.contentResolver
-                val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                    ?: return null
-                resolver.openOutputStream(uri)?.use { stream ->
-                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
-                }
-                "Pictures/MaruStudy/$name"
-            } else {
-                val dir = File(
-                    context.getExternalFilesDir(Environment.DIRECTORY_PICTURES),
-                    "MaruStudy",
-                ).apply { mkdirs() }
-                val file = File(dir, name)
-                FileOutputStream(file).use { stream ->
-                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
-                }
-                file.absolutePath
-            }
-        }.getOrNull()
-        bitmap.recycle()
-        return result
+            }.getOrNull()
+        } finally {
+            bitmap.recycle()
+        }
     }
 }

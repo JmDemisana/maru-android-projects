@@ -143,6 +143,7 @@ fun GradeSolverScreen(
         }
 
         LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -300,10 +301,10 @@ private fun ResultCard(
             Text(
                 formatRequiredEndterm(required),
                 color = if (required == null) MaruTextFaint else accent,
-                fontSize = if (required != null && required < 0) 24.sp else 44.sp,
+                fontSize = if (required != null && required <= 0.0) 24.sp else 44.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = (-0.5).sp,
-                lineHeight = if (required != null && required < 0) 30.sp else 48.sp,
+                lineHeight = if (required != null && required <= 0.0) 30.sp else 48.sp,
             )
             if (difficulty != null) {
                 Box(
@@ -390,10 +391,10 @@ private fun BulkSubjectCard(
                 Text(
                     formatRequiredEndterm(required),
                     color = difficulty?.color ?: MaruTextFaint,
-                    fontSize = if (required != null && required < 0) 13.sp else 22.sp,
+                    fontSize = if (required != null && required <= 0.0) 13.sp else 22.sp,
                     fontWeight = FontWeight.Bold,
                 )
-                if (difficulty != null && required != null && required >= 0) {
+                if (difficulty != null && required != null && required > 0.0) {
                     Spacer(Modifier.width(7.dp))
                     Text(
                         difficulty.label.uppercase(),
@@ -412,7 +413,7 @@ private fun BulkSubjectCard(
 private fun SolverNote() {
     InfoPanel(title = "How the grade is computed") {
         InfoLine("Endterm carries 40%. Prelim and midterm carry 30% each.")
-        InfoLine("Formula: (4.85 - 0.3 Ã— prelim - 0.3 Ã— midterm) / 0.4")
+        InfoLine("Formula: (4.85 - 0.3 × prelim - 0.3 × midterm) / 0.4")
         InfoLine("Blank inputs count as 5.0. Results round to one decimal and cap at 10.0.")
         InfoLine("A negative result means the endterm no longer matters: you already passed.")
     }

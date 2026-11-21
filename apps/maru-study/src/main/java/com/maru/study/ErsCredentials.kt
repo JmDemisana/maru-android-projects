@@ -60,6 +60,8 @@ class ErsCredentialStore(context: Context) {
             .putString(KEY_BIRTHDAY, credentials.birthday.trim())
         if (encrypted != null) {
             editor.putString(KEY_PASSWORD, encrypted)
+        } else {
+            editor.remove(KEY_PASSWORD)
         }
         editor.apply()
     }

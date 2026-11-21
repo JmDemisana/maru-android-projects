@@ -36,13 +36,13 @@ class StudyStore(context: Context) {
         val accent = runCatching {
             EntryAccent.valueOf(item.optString("accent", EntryAccent.SKY.name).uppercase())
         }.getOrDefault(EntryAccent.SKY)
-        val start = item.optInt("startMinute", DAY_START_MINUTE)
-        val end = item.optInt("endMinute", start + 90)
+        val start = item.optInt("startMinute", DAY_START_MINUTE).coerceIn(0, 23 * 60 + 58)
+        val end = item.optInt("endMinute", start + 90).coerceIn(start + 1, 23 * 60 + 59)
         return ScheduleEntry(
             id = item.optString("id").ifBlank { "entry-${System.currentTimeMillis()}-$start" },
             day = day,
             startMinute = start,
-            endMinute = end.coerceAtLeast(start + 15),
+            endMinute = end,
             courseCode = item.optString("courseCode"),
             title = item.optString("title"),
             section = item.optString("section"),

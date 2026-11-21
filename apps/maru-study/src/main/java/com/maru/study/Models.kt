@@ -222,7 +222,7 @@ fun computeRequiredEndterm(prelim: String, midterm: String): Double? {
 
 fun formatRequiredEndterm(value: Double?): String = when {
     value == null -> "--"
-    value < 0 -> "You Already Passed!"
+    value <= 0.0 -> "You Already Passed!"
     else -> String.format(Locale.US, "%.1f", value)
 }
 

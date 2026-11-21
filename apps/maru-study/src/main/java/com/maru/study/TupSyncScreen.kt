@@ -8,6 +8,9 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -183,8 +186,6 @@ internal fun TupSyncScreen(
             return
         }
 
-        staged = null
-        stagedAt = 0L
         lastInjectedUrl.set(null)
         request.set(ErsRequest(credentials, ErsSyncMode.BOTH))
         payloadSink.set { raw -> finish(raw) }
@@ -1029,6 +1030,38 @@ private fun createErsWebView(
             val current = request() ?: return
             if (lastInjectedUrl.getAndSet(url) == url) return
             view.evaluateJavascript(buildErsSyncScript(current), null)
+        }
+
+        override fun onReceivedError(
+            view: WebView,
+            webRequest: WebResourceRequest?,
+            error: WebResourceError?,
+        ) {
+            if (webRequest?.isForMainFrame != true) return
+            bridge.post(
+                JSONObject()
+                    .put("ok", false)
+                    .put("error", "network")
+                    .put("message", "Could not reach ERS. Check your connection and try again.")
+                    .toString(),
+            )
+        }
+
+        override fun onReceivedHttpError(
+            view: WebView,
+            webRequest: WebResourceRequest?,
+            errorResponse: WebResourceResponse?,
+        ) {
+            if (webRequest?.isForMainFrame != true) return
+            val code = errorResponse?.statusCode ?: return
+            if (code < 400) return
+            bridge.post(
+                JSONObject()
+                    .put("ok", false)
+                    .put("error", "http_$code")
+                    .put("message", "ERS returned HTTP $code. Try again in a moment.")
+                    .toString(),
+            )
         }
     }
 

@@ -66,8 +66,8 @@ data class ErsImportResult(
     val displayTerm: String get() = scheduleTerm.ifBlank { gradesTerm }.trim()
 
     fun isEmpty(): Boolean =
-        (mode.includesSchedule && schedule.isEmpty()) &&
-            (mode.includesGrades && grades.isEmpty())
+        (!mode.includesSchedule || schedule.isEmpty()) &&
+            (!mode.includesGrades || grades.isEmpty())
 }
 
 class ErsImportException(message: String) : Exception(message)
@@ -147,7 +147,7 @@ fun ErsImportResult.toProposal(snapshot: StudySnapshot): StudyChangeProposal? {
                     gradeRows.forEach { record ->
                         put(
                             JSONObject().apply {
-                                put("course", record.code)
+                                put("course", record.title.ifBlank { record.code })
                                 put("prelim", record.prelim)
                                 put("midterm", record.midterm)
                             },

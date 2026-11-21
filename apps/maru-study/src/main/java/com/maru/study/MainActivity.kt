@@ -109,14 +109,18 @@ private fun MaruStudyApp() {
     var pendingChange by remember { mutableStateOf<StudyChangeProposal?>(null) }
 
     fun updateDocument(next: ScheduleDocument) {
+        val previous = document
         document = next
         studyStore.save(next)
-        MaruReminders.scheduleClasses(context, next, reminderStore.load())
+        MaruReminders.scheduleClasses(context, next, reminderStore.load(), previous = previous)
     }
 
     fun updateHomework(next: List<HomeworkTask>) {
+        val previous = homework
         homework = next
         homeworkStore.save(next)
+        val nextIds = next.map { it.id }.toSet()
+        previous.filter { it.id !in nextIds }.forEach { MaruReminders.cancelHomework(context, it) }
         next.filter { it.done || !it.reminder }.forEach { MaruReminders.cancelHomework(context, it) }
         next.filter { !it.done && it.reminder }.forEach { MaruReminders.scheduleHomework(context, it) }
     }
@@ -205,6 +209,7 @@ private fun MaruStudyApp() {
                                 document = document,
                                 onDocumentChange = ::updateDocument,
                                 newClassSignal = newClassSignal,
+                                onNewClassConsumed = { newClassSignal = 0 },
                             )
 
                             StudySection.GRADES -> GradeSolverScreen(

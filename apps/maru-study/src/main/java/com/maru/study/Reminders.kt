@@ -98,7 +98,7 @@ object MaruReminders {
             settings = ReminderStore(context).load(),
         )
         HomeworkStore(context).load().forEach { task ->
-            if (!task.done) scheduleHomework(context, task)
+            if (!task.done && task.reminder) scheduleHomework(context, task)
         }
     }
 
@@ -106,14 +106,20 @@ object MaruReminders {
         context: Context,
         document: ScheduleDocument,
         settings: ReminderSettings,
+        previous: ScheduleDocument? = null,
     ) {
         val alarms = context.getSystemService(AlarmManager::class.java) ?: return
         val today = LocalDate.now()
         val nowMillis = System.currentTimeMillis()
 
-        // Clear the window we own, then rebuild it.
+        // Clear the window we own (including any removed entries), then rebuild it.
+        val toCancel = buildList {
+            if (previous != null) addAll(previous.entries)
+            addAll(document.entries)
+        }.distinctBy { it.id }
+
         for (offset in 0..DAYS_AHEAD) {
-            document.entries.forEach { entry ->
+            toCancel.forEach { entry ->
                 alarms.cancel(classPendingIntent(context, entry, offset))
             }
         }
@@ -124,6 +130,7 @@ object MaruReminders {
             val date = today.plusDays(offset.toLong())
             val day = StudyDay.fromDate(date) ?: continue
             document.entriesFor(day).forEach { entry ->
+                if (entry.startMinute !in 0 until 24 * 60) return@forEach
                 val startMillis = date
                     .atTime(LocalTime.of(entry.startMinute / 60, entry.startMinute % 60))
                     .atZone(ZoneId.systemDefault())

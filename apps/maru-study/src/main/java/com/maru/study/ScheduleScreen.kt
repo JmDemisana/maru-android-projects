@@ -42,6 +42,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimeInput
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,6 +53,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -70,6 +74,7 @@ fun ScheduleScreen(
     document: ScheduleDocument,
     onDocumentChange: (ScheduleDocument) -> Unit,
     newClassSignal: Int = 0,
+    onNewClassConsumed: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val reminderStore = remember { ReminderStore(context) }
@@ -97,7 +102,10 @@ fun ScheduleScreen(
     }
 
     LaunchedEffect(newClassSignal) {
-        if (newClassSignal > 0) openNew()
+        if (newClassSignal > 0) {
+            openNew()
+            onNewClassConsumed()
+        }
     }
 
     fun chooseView(mode: ScheduleViewMode) {
@@ -649,8 +657,14 @@ private fun ScheduleEditorDialog(
             initialMinute = draft.startMinute,
             onDismiss = { timePickerTarget = null },
             onConfirm = { minute ->
-                val safeEnd = if (draft.endMinute <= minute) minute + 60 else draft.endMinute
-                draft = draft.copy(startMinute = minute, endMinute = safeEnd)
+                val maxEnd = 23 * 60 + 59
+                val safeStart = minute.coerceAtMost(maxEnd - 1)
+                val safeEnd = if (draft.endMinute <= safeStart) {
+                    (safeStart + 60).coerceAtMost(maxEnd)
+                } else {
+                    draft.endMinute.coerceAtMost(maxEnd)
+                }
+                draft = draft.copy(startMinute = safeStart, endMinute = safeEnd)
                 timePickerTarget = null
             },
         )
@@ -705,9 +719,10 @@ private fun TimePickerDialog(
     onDismiss: () -> Unit,
     onConfirm: (Int) -> Unit,
 ) {
+    val clamped = initialMinute.coerceIn(0, 23 * 60 + 59)
     val state = rememberTimePickerState(
-        initialHour = initialMinute / 60,
-        initialMinute = initialMinute % 60,
+        initialHour = clamped / 60,
+        initialMinute = clamped % 60,
         is24Hour = false,
     )
     AlertDialog(
@@ -738,9 +753,20 @@ private fun NotificationSettingsDialog(
     onSave: (ReminderSettings) -> Unit,
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var enabled by remember { mutableStateOf(settings.enabled) }
     var lead by remember { mutableStateOf(settings.leadMinutes) }
-    val allowed = MaruReminders.canNotify(context)
+    var allowed by remember { mutableStateOf(MaruReminders.canNotify(context)) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                allowed = MaruReminders.canNotify(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     Dialog(
         onDismissRequest = onDismiss,

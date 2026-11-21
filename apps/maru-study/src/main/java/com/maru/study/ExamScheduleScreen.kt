@@ -190,11 +190,11 @@ private fun ExamList(
         }
 
         var lastMonth = ""
-        sorted.forEach { exam ->
+        sorted.forEachIndexed { index, exam ->
             val month = examMonthKey(exam.date)
             if (month != lastMonth) {
                 lastMonth = month
-                item(key = "exam-month-$month") {
+                item(key = "exam-month-$month-$index") {
                     Text(
                         month.uppercase(Locale.US),
                         color = MaruTextStrong,
@@ -290,7 +290,8 @@ private fun ExamEditorDialog(
     var timeTarget by remember { mutableStateOf<ExamTimeField?>(null) }
     var datePickerVisible by remember { mutableStateOf(false) }
 
-    val canSave = draft.title.isNotBlank()
+    val dateValid = draft.date.isBlank() || parseExamDate(draft.date) != null
+    val canSave = draft.title.isNotBlank() && dateValid
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -447,7 +448,16 @@ private fun ExamEditorDialog(
                     MaruGhostButton(text = "Cancel", onClick = onDismiss)
                     MaruPrimaryButton(
                         text = if (isNew) "Add" else "Save",
-                        onClick = { onSave(draft) },
+                        onClick = {
+                            onSave(
+                                draft.copy(
+                                    title = draft.title.trim(),
+                                    date = draft.date.trim(),
+                                    room = draft.room.trim(),
+                                    notes = draft.notes.trim(),
+                                ),
+                            )
+                        },
                         enabled = canSave,
                     )
                 }
@@ -535,9 +545,10 @@ private fun ExamTimePickerDialog(
     onDismiss: () -> Unit,
     onConfirm: (Int) -> Unit,
 ) {
+    val clamped = initialMinute.coerceIn(0, 23 * 60 + 59)
     val state = rememberTimePickerState(
-        initialHour = initialMinute / 60,
-        initialMinute = initialMinute % 60,
+        initialHour = clamped / 60,
+        initialMinute = clamped % 60,
         is24Hour = false,
     )
     AlertDialog(

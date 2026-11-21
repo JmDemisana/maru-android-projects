@@ -72,20 +72,22 @@ fun parseStudyChange(raw: String, snapshot: StudySnapshot): StudyChangeProposal?
 
     val lines = buildList {
         schedule?.let { edit ->
-            edit.replace?.let { entries ->
-                add("Replace entire schedule · ${classCountLabel(entries.size)}")
-                entries.sortedWith(compareBy({ it.day.ordinal }, { it.startMinute }))
+            val replace = edit.replace
+            if (replace != null) {
+                add("Replace entire schedule · ${classCountLabel(replace.size)}")
+                replace.sortedWith(compareBy({ it.day.ordinal }, { it.startMinute }))
                     .forEach { entry -> add("  · ${entryLabel(entry)}") }
+            } else {
+                edit.deleteIds.forEach { id ->
+                    val entry = snapshot.document.entries.firstOrNull { it.id == id }
+                    add("Remove class · ${entry?.let(::entryLabel) ?: id}")
+                }
+                edit.update.forEach { updated ->
+                    val before = snapshot.document.entries.firstOrNull { it.id == updated.id }
+                    add("Change class · ${before?.let(::entryLabel) ?: updated.id} → ${entryLabel(updated)}")
+                }
+                edit.add.forEach { entry -> add("Add class · ${entryLabel(entry)}") }
             }
-            edit.deleteIds.forEach { id ->
-                val entry = snapshot.document.entries.firstOrNull { it.id == id }
-                add("Remove class · ${entry?.let(::entryLabel) ?: id}")
-            }
-            edit.update.forEach { updated ->
-                val before = snapshot.document.entries.firstOrNull { it.id == updated.id }
-                add("Change class · ${before?.let(::entryLabel) ?: updated.id} → ${entryLabel(updated)}")
-            }
-            edit.add.forEach { entry -> add("Add class · ${entryLabel(entry)}") }
         }
 
         homework?.let { edit ->
@@ -100,19 +102,21 @@ fun parseStudyChange(raw: String, snapshot: StudySnapshot): StudyChangeProposal?
         }
 
         exams?.let { edit ->
-            edit.replace?.let { entries ->
-                add("Replace entire exam schedule · ${examCountLabel(entries.size)}")
-                entries.sortedExams().forEach { exam -> add("  · ${examLabel(exam)}") }
+            val replace = edit.replace
+            if (replace != null) {
+                add("Replace entire exam schedule · ${examCountLabel(replace.size)}")
+                replace.sortedExams().forEach { exam -> add("  · ${examLabel(exam)}") }
+            } else {
+                edit.deleteIds.forEach { id ->
+                    val exam = snapshot.exams.firstOrNull { it.id == id }
+                    add("Remove exam · ${exam?.let(::examLabel) ?: id}")
+                }
+                edit.update.forEach { updated ->
+                    val before = snapshot.exams.firstOrNull { it.id == updated.id }
+                    add("Change exam · ${before?.let(::examLabel) ?: updated.id} → ${examLabel(updated)}")
+                }
+                edit.add.forEach { exam -> add("Add exam · ${examLabel(exam)}") }
             }
-            edit.deleteIds.forEach { id ->
-                val exam = snapshot.exams.firstOrNull { it.id == id }
-                add("Remove exam · ${exam?.let(::examLabel) ?: id}")
-            }
-            edit.update.forEach { updated ->
-                val before = snapshot.exams.firstOrNull { it.id == updated.id }
-                add("Change exam · ${before?.let(::examLabel) ?: updated.id} → ${examLabel(updated)}")
-            }
-            edit.add.forEach { exam -> add("Add exam · ${examLabel(exam)}") }
         }
 
         grades?.let { edit ->
@@ -144,7 +148,11 @@ fun parseStudyChange(raw: String, snapshot: StudySnapshot): StudyChangeProposal?
                     entries = entries.map { entry ->
                         edit.update.firstOrNull { it.id == entry.id } ?: entry
                     }
-                    ScheduleDocument(entries = entries + edit.add)
+                    ScheduleDocument(
+                        entries = (entries + edit.add).sortedWith(
+                            compareBy({ it.day.ordinal }, { it.startMinute }, { it.endMinute }),
+                        ),
+                    )
                 }
             } ?: current.document,
             homework = homework?.let { edit ->
@@ -201,7 +209,7 @@ private fun parseScheduleEdit(block: JSONObject?, existing: List<ScheduleEntry>)
         } else {
             entryFromJson(item, "ai-${System.currentTimeMillis()}-r$index")
         }
-    }
+    }?.takeIf { it.isNotEmpty() }
     val adds = block.optJSONArray("add").toObjects().mapIndexedNotNull { index, item ->
         if (!item.has("day") && !item.has("title") && !item.has("courseCode")) {
             null
@@ -221,8 +229,10 @@ private fun parseScheduleEdit(block: JSONObject?, existing: List<ScheduleEntry>)
 
 private fun entryFromJson(item: JSONObject, id: String): ScheduleEntry {
     val day = parseDay(item.optString("day")) ?: StudyDay.MONDAY
-    val start = parseTimeToMinute(item.optString("start")) ?: DAY_START_MINUTE
-    val end = parseTimeToMinute(item.optString("end")) ?: (start + 90)
+    val start = (parseTimeToMinute(item.optString("start")) ?: DAY_START_MINUTE)
+        .coerceIn(0, 23 * 60 + 58)
+    val end = (parseTimeToMinute(item.optString("end")) ?: (start + 90))
+        .coerceIn((start + 15).coerceAtMost(23 * 60 + 59), 23 * 60 + 59)
     val accent = runCatching {
         EntryAccent.valueOf(item.optString("accent").trim().uppercase(Locale.US))
     }.getOrDefault(EntryAccent.SKY)
@@ -231,7 +241,7 @@ private fun entryFromJson(item: JSONObject, id: String): ScheduleEntry {
         id = item.optString("id").ifBlank { id },
         day = day,
         startMinute = start,
-        endMinute = end.coerceAtLeast(start + 15),
+        endMinute = end,
         courseCode = item.optString("courseCode"),
         title = item.optString("title"),
         section = item.optString("section"),
@@ -262,10 +272,13 @@ private fun mergeEntry(base: ScheduleEntry, item: JSONObject): ScheduleEntry {
         base.accent
     }
 
+    val safeStart = start.coerceIn(0, 23 * 60 + 58)
+    val safeEnd = end.coerceIn((safeStart + 15).coerceAtMost(23 * 60 + 59), 23 * 60 + 59)
+
     return base.copy(
         day = day,
-        startMinute = start,
-        endMinute = end.coerceAtLeast(start + 15),
+        startMinute = safeStart,
+        endMinute = safeEnd,
         courseCode = item.stringOr("courseCode", base.courseCode),
         title = item.stringOr("title", base.title),
         section = item.stringOr("section", base.section),
@@ -351,7 +364,7 @@ private fun parseExamEdit(block: JSONObject?, existing: List<ExamEntry>): ExamEd
         } else {
             examFromJson(item, "ai-exam-${System.currentTimeMillis()}-r$index")
         }
-    }
+    }?.takeIf { it.isNotEmpty() }
     val adds = block.optJSONArray("add").toObjects().mapIndexedNotNull { index, item ->
         if (item.optString("title").isBlank()) {
             null
@@ -502,12 +515,18 @@ internal fun parseTimeToMinute(raw: String): Int? {
     val parts = core.split(":")
     val hour = parts.getOrNull(0)?.trim()?.toIntOrNull() ?: return null
     val minute = parts.getOrNull(1)?.trim()?.toIntOrNull() ?: 0
+    if (minute !in 0..59) return null
 
     var hour24 = hour
-    if (period == "AM" && hour == 12) hour24 = 0
-    if (period == "PM" && hour < 12) hour24 = hour + 12
+    if (period.isNotEmpty()) {
+        if (hour !in 1..12) return null
+        if (period == "AM" && hour == 12) hour24 = 0
+        if (period == "PM" && hour < 12) hour24 = hour + 12
+    } else if (hour !in 0..23) {
+        return null
+    }
 
-    return hour24.coerceIn(0, 23) * 60 + minute.coerceIn(0, 59)
+    return hour24 * 60 + minute
 }
 
 private fun parseDue(raw: String): Long? {

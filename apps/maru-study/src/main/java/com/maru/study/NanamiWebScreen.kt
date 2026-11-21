@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -420,6 +421,13 @@ fun NanamiWebScreen(
 
     BackHandler { onExit() }
 
+    DisposableEffect(Unit) {
+        onDispose {
+            filePathCallback?.onReceiveValue(null)
+            filePathCallback = null
+        }
+    }
+
     Box(
         Modifier
             .fillMaxSize()
@@ -530,6 +538,12 @@ fun NanamiWebScreen(
 
                     loadUrl(NANAMI_AI_URL)
                 }.also { webView = it }
+            },
+            onRelease = { view ->
+                view.stopLoading()
+                view.removeJavascriptInterface("MaruStudy")
+                view.destroy()
+                if (webView === view) webView = null
             },
         )
 
