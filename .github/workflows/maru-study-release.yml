@@ -46,24 +46,18 @@ jobs:
           echo "MARU_STUDY_VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
           echo "Building $VERSION_NAME (code ${GITHUB_RUN_NUMBER})"
 
-      - name: Cache release keystore
-        uses: actions/cache@v4
-        with:
-          path: apps/maru-study/keystore/maru-study-release.jks
-          key: maru-study-release-keystore-v1
-
       - name: Prepare signing key
+        env:
+          MARU_STUDY_KEYSTORE_B64: ${{ secrets.MARU_STUDY_KEYSTORE_B64 }}
         run: |
+          set -euo pipefail
+          if [ -z "${MARU_STUDY_KEYSTORE_B64:-}" ]; then
+            echo "::error::Missing MARU_STUDY_KEYSTORE_B64 repository secret."
+            exit 1
+          fi
           mkdir -p apps/maru-study/keystore
           KEYSTORE=apps/maru-study/keystore/maru-study-release.jks
-          if [ ! -f "$KEYSTORE" ]; then
-            keytool -genkeypair -v \
-              -keystore "$KEYSTORE" \
-              -alias maru-study \
-              -keyalg RSA -keysize 4096 -validity 10000 \
-              -storepass maru-study-release -keypass maru-study-release \
-              -dname "CN=Maru Study, OU=Maru, O=Maru, L=Manila, ST=Metro Manila, C=PH"
-          fi
+          printf '%s' "$MARU_STUDY_KEYSTORE_B64" | base64 --decode > "$KEYSTORE"
           cat > apps/maru-study/keystore.properties <<'EOF'
           storeFile=keystore/maru-study-release.jks
           storePassword=maru-study-release
