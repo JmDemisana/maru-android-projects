@@ -15,6 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -52,6 +53,7 @@ fun ProfileScreen(
     val context = LocalContext.current
     val offlineEpisodes by TorrentStreamService.offlineEpisodes.collectAsState()
     var activeOfflinePlaying by remember { mutableStateOf<OfflineEpisodeEntry?>(null) }
+    var selectedOfflineSeriesId by remember { mutableStateOf<Int?>(null) }
 
     LaunchedEffect(Unit) {
         TorrentStreamService.loadOfflineVault(context)
@@ -99,109 +101,75 @@ fun ProfileScreen(
         return
     }
 
-    val availableCategories = remember(allLists) {
-        val base = if (allLists.isEmpty()) {
-            listOf("Watching", "Planning", "Completed", "Paused", "Dropped")
-        } else {
-            val keys = allLists.keys.toList()
-            val resultList = mutableListOf<String>()
-            keys.find { it.contains("Watch", ignoreCase = true) || it.equals("Current", ignoreCase = true) }?.let { resultList.add(it) }
-            keys.find { it.contains("Plan", ignoreCase = true) }?.let { if (!resultList.contains(it)) resultList.add(it) }
-            for (k in keys) {
-                if (!resultList.contains(k)) resultList.add(k)
-            }
-            resultList
-        }
-        listOf("Offline") + base
-    }
-
-    var selectedCategory by remember {
-        mutableStateOf(availableCategories.getOrElse(1) { "Watching" })
-    }
+    val availableCategories = listOf("Watchlist", "History", "Completed", "Downloads")
+    var selectedCategory by remember { mutableStateOf("Watchlist") }
 
     val currentList = remember(allLists, selectedCategory) {
-        if (selectedCategory.equals("Offline", ignoreCase = true)) {
-            emptyList()
-        } else if (selectedCategory.equals("Completed", ignoreCase = true)) {
-            val direct = allLists[selectedCategory] ?: allLists.entries.find { it.key.equals(selectedCategory, ignoreCase = true) }?.value
-            if (direct != null && direct.isNotEmpty()) direct
-            else {
-                val aggregated = allLists.filter { (k, _) -> k.contains("Complet", ignoreCase = true) || k.contains("Finish", ignoreCase = true) }.values.flatten()
-                if (aggregated.isNotEmpty()) aggregated.distinctBy { it.mediaId }
-                else emptyList()
+        when (selectedCategory) {
+            "Watchlist" -> {
+                allLists.filter { (k, _) ->
+                    k.contains("Watch", ignoreCase = true) ||
+                    k.contains("Current", ignoreCase = true) ||
+                    k.contains("Plan", ignoreCase = true)
+                }.values.flatten().distinctBy { it.mediaId }
             }
-        } else if (selectedCategory.equals("Watching", ignoreCase = true)) {
-            val direct = allLists[selectedCategory] ?: allLists.entries.find { it.key.equals(selectedCategory, ignoreCase = true) }?.value
-            if (direct != null && direct.isNotEmpty()) direct
-            else {
-                val aggregated = allLists.filter { (k, _) -> k.contains("Watch", ignoreCase = true) || k.contains("Current", ignoreCase = true) }.values.flatten()
-                if (aggregated.isNotEmpty()) aggregated.distinctBy { it.mediaId }
-                else emptyList()
+            "History" -> {
+                allLists.values.flatten().filter { it.progress > 0 }.distinctBy { it.mediaId }
             }
-        } else {
-            allLists[selectedCategory]
-                ?: allLists[selectedCategory.lowercase()]
-                ?: allLists.entries.find { it.key.equals(selectedCategory, ignoreCase = true) }?.value
-                ?: emptyList()
+            "Completed" -> {
+                allLists.filter { (k, _) ->
+                    k.contains("Complet", ignoreCase = true) || k.contains("Finish", ignoreCase = true)
+                }.values.flatten().distinctBy { it.mediaId }
+            }
+            else -> emptyList()
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        // Crunchyroll "MY LISTS" Category Bar
-        Surface(
-            color = CrunchySurface,
-            modifier = Modifier.fillMaxWidth()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(CrunchyBgBlack)
+    ) {
+        // Authentic Crunchyroll Top Underline Tab Bar (Watchlist | History | Completed | Downloads)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(CrunchyBgBlack)
+                .padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                availableCategories.forEach { category ->
-                    val isSelected = selectedCategory.equals(category, ignoreCase = true)
-                    val isOfflineTab = category.equals("Offline", ignoreCase = true)
-                    val count = if (isOfflineTab) offlineEpisodes.size else allLists[category]?.size
-                    val label = if (count != null && count > 0) "${category.uppercase()} ($count)" else category.uppercase()
-
-                    Surface(
-                        onClick = { selectedCategory = category },
-                        shape = RoundedCornerShape(4.dp),
-                        color = if (isSelected) CrunchyOrange else CrunchyCardBg,
-                        border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else CrunchyBorder)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
-                        ) {
-                            if (isOfflineTab) {
-                                Icon(
-                                    Icons.Default.DownloadDone,
-                                    contentDescription = null,
-                                    tint = if (isSelected) Color.Black else CrunchyTeal,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                            }
-                            Text(
-                                text = label,
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 11.sp,
-                                    letterSpacing = 0.5.sp
-                                ),
-                                color = if (isSelected) Color.Black else MaruTextStrong
-                            )
+            availableCategories.forEach { category ->
+                val isSelected = selectedCategory == category
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable {
+                            selectedCategory = category
+                            selectedOfflineSeriesId = null
                         }
-                    }
+                        .padding(top = 12.dp)
+                ) {
+                    Text(
+                        text = category,
+                        fontSize = 14.sp,
+                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.SemiBold,
+                        color = if (isSelected) Color.White else MaruTextMuted,
+                        modifier = Modifier.padding(bottom = 10.dp)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(3.dp)
+                            .background(if (isSelected) CrunchyOrange else Color.Transparent)
+                    )
                 }
             }
         }
 
         HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
 
-        if (selectedCategory.equals("Offline", ignoreCase = true)) {
+        if (selectedCategory == "Downloads") {
             if (offlineEpisodes.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(
@@ -210,70 +178,64 @@ fun ProfileScreen(
                         modifier = Modifier.padding(28.dp)
                     ) {
                         Icon(Icons.Default.CloudDownload, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(44.dp))
-                        Text("Your Offline Vault is Empty", color = MaruTextStrong, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text("No Offline Downloads Yet", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                         Text(
-                            "Tap the download icon on any episode to save it for offline viewing. Videos stay privately inside Nanami Anime and never clutter your phone's gallery or external video players.",
+                            "Tap the download icon on any episode to save it into your app-only Offline Vault.",
                             color = MaruTextMuted,
-                            fontSize = 12.5.sp,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                            lineHeight = 18.sp
+                            fontSize = 13.sp,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
                         )
                     }
                 }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    item {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "PRIVATE OFFLINE VAULT (${offlineEpisodes.size})",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = CrunchyTeal,
-                                letterSpacing = 0.8.sp
-                            )
-                            Text(
-                                text = "App-Only Encrypted Storage",
-                                fontSize = 10.5.sp,
-                                color = MaruTextMuted
-                            )
+            } else if (selectedOfflineSeriesId != null) {
+                // Drill-down: Episodes for the selected offline series
+                val seriesEps = offlineEpisodes.filter { it.mediaId == selectedOfflineSeriesId }.sortedBy { it.episodeNumber }
+                val seriesTitle = seriesEps.firstOrNull()?.animeTitle ?: "Downloaded Episodes"
+
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = { selectedOfflineSeriesId = null }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                         }
+                        Text(
+                            text = seriesTitle,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
 
-                    items(offlineEpisodes, key = { "${it.mediaId}_${it.episodeNumber}" }) { item ->
-                        GlassCard(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    if (item.isCompleted) {
-                                        activeOfflinePlaying = item
-                                    } else {
-                                        Toast.makeText(context, "Episode is still syncing (${item.progressPercent}%)", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                        ) {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(seriesEps, key = { "${it.mediaId}_${it.episodeNumber}" }) { item ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(10.dp),
+                                    .clickable {
+                                        if (item.isCompleted) {
+                                            activeOfflinePlaying = item
+                                        } else {
+                                            Toast.makeText(context, "Syncing (${item.progressPercent}%)", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
                                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .width(120.dp)
-                                        .height(68.dp)
-                                        .clip(RoundedCornerShape(4.dp))
-                                        .background(Color.Black),
+                                        .width(136.dp)
+                                        .height(76.dp)
+                                        .background(CrunchyCardBg),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     AsyncImage(
@@ -283,50 +245,29 @@ fun ProfileScreen(
                                         modifier = Modifier.fillMaxSize()
                                     )
                                     Surface(
-                                        color = Color(0xCC0B0C0F),
+                                        color = Color(0xBB000000),
                                         shape = CircleShape,
-                                        border = BorderStroke(1.dp, CrunchyOrange),
-                                        modifier = Modifier.size(30.dp)
+                                        modifier = Modifier.size(32.dp)
                                     ) {
                                         Box(contentAlignment = Alignment.Center) {
-                                            Icon(
-                                                Icons.Default.PlayArrow,
-                                                contentDescription = "Play Offline",
-                                                tint = CrunchyOrange,
-                                                modifier = Modifier.size(18.dp)
-                                            )
+                                            Icon(Icons.Default.PlayArrow, contentDescription = "Play", tint = Color.White, modifier = Modifier.size(20.dp))
                                         }
                                     }
                                 }
 
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(3.dp)
-                                ) {
+                                Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = item.animeTitle,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = CrunchyOrange,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = "S1 E${item.episodeNumber} - ${item.episodeTitle}",
-                                        fontSize = 13.sp,
+                                        text = "E${item.episodeNumber} - ${item.episodeTitle}",
+                                        fontSize = 13.5.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = Color.White,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        maxLines = 2
                                     )
+                                    Spacer(modifier = Modifier.height(4.dp))
                                     val sizeMb = (item.sizeBytes / (1024 * 1024)).coerceAtLeast(1)
                                     Text(
-                                        text = if (item.isCompleted) {
-                                            "${item.quality} • ${if (item.audioType == "DUB") "Dub" else "Sub"} • ${sizeMb} MB"
-                                        } else {
-                                            "Downloading... ${item.progressPercent}%"
-                                        },
-                                        fontSize = 11.sp,
+                                        text = if (item.isCompleted) "${item.quality} • ${sizeMb} MB" else "Syncing ${item.progressPercent}%",
+                                        fontSize = 11.5.sp,
                                         color = if (item.isCompleted) CrunchyTeal else CrunchyOrange
                                     )
                                 }
@@ -334,12 +275,86 @@ fun ProfileScreen(
                                 IconButton(
                                     onClick = {
                                         TorrentStreamService.deleteOfflineEpisode(context, item.mediaId, item.episodeNumber)
-                                        Toast.makeText(context, "Deleted from Offline Vault", Toast.LENGTH_SHORT).show()
+                                        if (seriesEps.size <= 1) selectedOfflineSeriesId = null
                                     }
                                 ) {
-                                    Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = MaruDanger)
+                                    Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = MaruTextMuted)
                                 }
                             }
+                        }
+                    }
+                }
+            } else {
+                // Crunchyroll 2-Column Poster Grid for Downloads (Matches Reference Screenshot 2: "4 Episodes", "9 Episodes")
+                val groupedSeries = remember(offlineEpisodes) {
+                    offlineEpisodes.groupBy { it.mediaId }.map { (mId, eps) ->
+                        val first = eps.first()
+                        Pair(
+                            AnimeMedia(
+                                mediaId = mId,
+                                title = first.animeTitle,
+                                titleEnglish = first.animeTitle,
+                                titleRomaji = first.animeTitle,
+                                coverUrl = first.coverUrl ?: first.thumbnailUrl,
+                                bannerUrl = first.thumbnailUrl,
+                                accentColor = null,
+                                episodes = eps.size,
+                                format = "TV",
+                                status = null,
+                                season = null,
+                                seasonYear = null,
+                                averageScore = null,
+                                genres = emptyList(),
+                                description = null,
+                                siteUrl = null,
+                                isAdult = false,
+                                nextEpisode = null,
+                                nextEpisodeAt = null,
+                                externalLinks = emptyList(),
+                                listEntryId = null,
+                                listStatus = null,
+                                progress = 0,
+                                score = null,
+                                notes = null,
+                                isPrivate = false,
+                                updatedAt = null
+                            ),
+                            eps
+                        )
+                    }
+                }
+
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        Text(
+                            text = "Manage",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(2),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp),
+                        contentPadding = PaddingValues(bottom = 28.dp),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(18.dp)
+                    ) {
+                        items(groupedSeries, key = { "dl_series_${it.first.mediaId}" }) { (seriesMedia, eps) ->
+                            val epCountLabel = if (eps.size == 1) "1 Episode" else "${eps.size} Episodes"
+                            PosterCard(
+                                media = seriesMedia,
+                                subtitleOverride = epCountLabel,
+                                onClick = { selectedOfflineSeriesId = seriesMedia.mediaId }
+                            )
                         }
                     }
                 }
@@ -351,19 +366,19 @@ fun ProfileScreen(
         } else if (currentList.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("No anime in $selectedCategory.", color = MaruTextStrong, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                    Text("Tap any show to add it to your watchlist!", color = MaruTextMuted, fontSize = 12.sp)
+                    Text("No anime in $selectedCategory.", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Tap any show to add it to your watchlist!", color = MaruTextMuted, fontSize = 12.5.sp)
                 }
             }
         } else {
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 110.dp),
+                columns = GridCells.Fixed(2),
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 12.dp),
-                contentPadding = PaddingValues(top = 12.dp, bottom = 24.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                    .padding(horizontal = 16.dp),
+                contentPadding = PaddingValues(top = 16.dp, bottom = 28.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp)
             ) {
                 items(currentList, key = { "lib_${selectedCategory}_${it.mediaId}" }) { media ->
                     PosterCard(

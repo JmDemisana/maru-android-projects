@@ -42,6 +42,7 @@ import androidx.lifecycle.lifecycleScope
 import coil.compose.AsyncImage
 import io.maru.manime.screens.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -188,6 +189,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
     }
 
     var trendingList by remember { mutableStateOf<List<AnimeMedia>>(emptyList()) }
+    var simulcastList by remember { mutableStateOf<List<AnimeMedia>>(emptyList()) }
     var isDashboardLoading by remember { mutableStateOf(false) }
 
     var searchResults by remember { mutableStateOf<List<AnimeMedia>>(emptyList()) }
@@ -202,13 +204,18 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
         scope.launch {
             isDashboardLoading = true
             try {
-                val trending = withContext(Dispatchers.IO) { AniListClient.getTrending(25) }
-                trendingList = trending
-
-                val activities = withContext(Dispatchers.IO) {
-                    AniListClient.getActivities(page = 1, perPage = 25, isFollowing = true, token = anilistToken.ifEmpty { null })
+                // Parallel concurrent loading so Home lanes render ultra-fast!
+                val trendingDef = async(Dispatchers.IO) { runCatching { AniListClient.getTrending(18) }.getOrDefault(emptyList()) }
+                val simulcastDef = async(Dispatchers.IO) { runCatching { AniListClient.getSimulcastSchedule(18) }.getOrDefault(emptyList()) }
+                val activitiesDef = async(Dispatchers.IO) {
+                    runCatching {
+                        AniListClient.getActivities(page = 1, perPage = 20, isFollowing = true, token = anilistToken.ifEmpty { null })
+                    }.getOrDefault(emptyList())
                 }
-                activitiesList = activities
+
+                trendingList = trendingDef.await()
+                simulcastList = simulcastDef.await()
+                activitiesList = activitiesDef.await()
             } catch (e: Exception) {
                 Toast.makeText(context, "Error loading feed: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
             } finally {
@@ -314,6 +321,16 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
     }
 
     LaunchedEffect(anilistToken, anilistUsername) {
+        if (anilistToken.isNotBlank()) {
+            launch(Dispatchers.IO) {
+                try {
+                    val viewer = AniListClient.getViewer(anilistToken)
+                    prefs.setAnilistUsername(viewer.name)
+                    prefs.setAnilistScoreFormat(viewer.scoreFormat)
+                    if (viewer.avatarUrl != null) prefs.setAnilistAvatar(viewer.avatarUrl)
+                } catch (_: Exception) {}
+            }
+        }
         refreshProfile()
         refreshDashboard()
         fetchRecommendations("For You")
@@ -344,9 +361,9 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
             containerColor = CrunchyBgBlack,
             topBar = {
                 if (selectedAnimeDetail == null && selectedUserProfile == null) {
-                    Column {
-                        TopAppBar(
-                            title = {
+                    TopAppBar(
+                        title = {
+                            if (selectedScreen == NavigationScreen.DASHBOARD) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -356,91 +373,55 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                                         contentDescription = "Nanami Anime",
                                         modifier = Modifier.size(34.dp)
                                     )
-                                    Column {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(
-                                                text = "nanami",
-                                                fontWeight = FontWeight.ExtraBold,
-                                                fontSize = 19.sp,
-                                                color = CrunchyOrange,
-                                                letterSpacing = 0.5.sp
-                                            )
-                                            Text(
-                                                text = "anime",
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 19.sp,
-                                                color = Color.White,
-                                                letterSpacing = 0.5.sp
-                                            )
-                                        }
-                                    }
-                                }
-                            },
-                            actions = {
-                                Surface(
-                                    onClick = {
-                                        selectedAnimeDetail = null
-                                        selectedUserProfile = null
-                                        selectedScreen = NavigationScreen.SETTINGS
-                                    },
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = CrunchyCardBg,
-                                    border = BorderStroke(1.dp, CrunchyBorder),
-                                    modifier = Modifier.padding(end = 14.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
-                                            text = if (preferredAudio == "DUB") "DUB" else "SUB",
-                                            fontSize = 10.sp,
+                                            text = "nanami",
                                             fontWeight = FontWeight.ExtraBold,
+                                            fontSize = 19.sp,
                                             color = CrunchyOrange
                                         )
-                                        if (effectiveUser?.avatarUrl != null) {
-                                            AsyncImage(
-                                                model = effectiveUser?.avatarUrl,
-                                                contentDescription = effectiveUser?.name,
-                                                contentScale = ContentScale.Crop,
-                                                modifier = Modifier
-                                                    .size(22.dp)
-                                                    .clip(CircleShape)
-                                            )
-                                        } else {
-                                            Icon(
-                                                Icons.Default.AccountCircle,
-                                                contentDescription = null,
-                                                tint = CrunchyOrange,
-                                                modifier = Modifier.size(20.dp)
-                                            )
-                                        }
                                         Text(
-                                            text = effectiveUser?.name ?: "Guest",
-                                            fontSize = 11.5.sp,
+                                            text = "anime",
                                             fontWeight = FontWeight.Bold,
-                                            color = MaruTextStrong
+                                            fontSize = 19.sp,
+                                            color = Color.White
                                         )
                                     }
                                 }
-                            },
-                            colors = TopAppBarDefaults.topAppBarColors(
-                                containerColor = CrunchySurface,
-                                titleContentColor = MaruTextStrong
-                            )
+                            } else {
+                                Text(
+                                    text = selectedScreen.title,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 21.sp,
+                                    color = Color.White
+                                )
+                            }
+                        },
+                        actions = {
+                            IconButton(
+                                onClick = {
+                                    selectedAnimeDetail = null
+                                    selectedUserProfile = null
+                                    selectedScreen = NavigationScreen.SEARCH
+                                }
+                            ) {
+                                Icon(Icons.Default.Search, contentDescription = "Search", tint = Color.White, modifier = Modifier.size(25.dp))
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = CrunchyBgBlack,
+                            titleContentColor = Color.White
                         )
-                        HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
-                    }
+                    )
                 }
             },
             bottomBar = {
                 if (selectedAnimeDetail == null && selectedUserProfile == null) {
                     Column {
-                        HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
+                        HorizontalDivider(color = Color(0xFF1A1B20), thickness = 1.dp)
                         NavigationBar(
-                            containerColor = CrunchySurface,
-                            contentColor = MaruTextStrong,
+                            containerColor = Color(0xFF0D0E12),
+                            contentColor = Color.White,
                             tonalElevation = 0.dp
                         ) {
                             NavigationScreen.values().forEach { screen ->
@@ -456,22 +437,22 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                                         Icon(
                                             imageVector = screen.icon,
                                             contentDescription = screen.title,
-                                            modifier = Modifier.size(22.dp)
+                                            modifier = Modifier.size(23.dp)
                                         )
                                     },
                                     label = {
                                         Text(
                                             text = screen.title,
                                             fontSize = 10.5.sp,
-                                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                                         )
                                     },
                                     colors = NavigationBarItemDefaults.colors(
                                         selectedIconColor = CrunchyOrange,
                                         selectedTextColor = CrunchyOrange,
-                                        indicatorColor = CrunchyOrange.copy(alpha = 0.14f),
-                                        unselectedIconColor = MaruTextMuted,
-                                        unselectedTextColor = MaruTextMuted
+                                        indicatorColor = Color.Transparent,
+                                        unselectedIconColor = Color(0xFFD5D7DF),
+                                        unselectedTextColor = Color(0xFFD5D7DF)
                                     )
                                 )
                             }
@@ -494,12 +475,27 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                 AnimatedContent(
                     targetState = navStateKey,
                     transitionSpec = {
-                        val enter = fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)) +
-                                slideInVertically(initialOffsetY = { it / 24 }, animationSpec = tween(220, easing = FastOutSlowInEasing))
-                        val exit = fadeOut(animationSpec = tween(150, easing = FastOutLinearInEasing))
-                        enter togetherWith exit
+                        val isGoingToDetail = targetState.startsWith("detail_") || targetState.startsWith("user_")
+                        val isReturningFromDetail = initialState.startsWith("detail_") || initialState.startsWith("user_")
+                        val springSpec = spring<androidx.compose.ui.unit.IntOffset>(
+                            dampingRatio = 0.88f,
+                            stiffness = Spring.StiffnessMediumLow
+                        )
+                        when {
+                            isGoingToDetail -> {
+                                (slideInHorizontally(initialOffsetX = { it / 3 }, animationSpec = springSpec) + fadeIn(tween(180))) togetherWith
+                                        (slideOutHorizontally(targetOffsetX = { -it / 6 }, animationSpec = springSpec) + fadeOut(tween(150)))
+                            }
+                            isReturningFromDetail -> {
+                                (slideInHorizontally(initialOffsetX = { -it / 6 }, animationSpec = springSpec) + fadeIn(tween(180))) togetherWith
+                                        (slideOutHorizontally(targetOffsetX = { it / 3 }, animationSpec = springSpec) + fadeOut(tween(150)))
+                            }
+                            else -> {
+                                fadeIn(tween(180)) togetherWith fadeOut(tween(120))
+                            }
+                        }
                     },
-                    label = "CrunchyRootTransition"
+                    label = "iOSSpringNavTransition"
                 ) { stateKey ->
                     when {
                         stateKey.startsWith("detail_") && selectedAnimeDetail != null -> {
@@ -533,6 +529,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                                     anilistToken = anilistToken,
                                     watchingList = watchingList,
                                     trendingList = trendingList,
+                                    simulcastList = simulcastList,
                                     activitiesList = activitiesList,
                                     isLoading = isDashboardLoading,
                                     onRefresh = refreshDashboard,
@@ -677,6 +674,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                                                             try {
                                                                 val viewer = AniListClient.getViewer(hashToken)
                                                                 prefs.setAnilistUsername(viewer.name)
+                                                                prefs.setAnilistScoreFormat(viewer.scoreFormat)
                                                                 if (viewer.avatarUrl != null) prefs.setAnilistAvatar(viewer.avatarUrl)
                                                             } catch (_: Exception) {}
                                                             showAnilistAuthDialog = false
@@ -691,6 +689,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                                                                 try {
                                                                     val viewer = AniListClient.getViewer(exchanged)
                                                                     prefs.setAnilistUsername(viewer.name)
+                                                                    prefs.setAnilistScoreFormat(viewer.scoreFormat)
                                                                     if (viewer.avatarUrl != null) prefs.setAnilistAvatar(viewer.avatarUrl)
                                                                     Toast.makeText(context, "Logged in as @${viewer.name}!", Toast.LENGTH_SHORT).show()
                                                                 } catch (_: Exception) {}

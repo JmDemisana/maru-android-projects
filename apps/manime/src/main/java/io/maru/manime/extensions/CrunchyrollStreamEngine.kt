@@ -47,6 +47,11 @@ data class ExternalSubtitleItem(
     val format: String // "ASS" | "VTT" | "SRT"
 )
 
+data class StreamDubStatus(
+    val hasStreamDubOrDual: Boolean = false,
+    val detectedLanguages: List<String> = emptyList()
+)
+
 object CrunchyrollStreamEngine {
 
     private val httpClient = OkHttpClient.Builder()
@@ -79,6 +84,41 @@ object CrunchyrollStreamEngine {
     )
 
     private val mappingCache = ConcurrentHashMap<Int, AnimeIdMappings>()
+    private val dubStatusCache = ConcurrentHashMap<Int, StreamDubStatus>()
+
+    /**
+     * Checks live Torrentio/Kitsu streams for Episode 1 to detect if Dual-Audio / Multi-Audio / Dubbed
+     * streams exist even when AniList hasn't cataloged the dub yet!
+     */
+    suspend fun checkStreamDubAvailability(anilistId: Int, animeTitle: String, episodeNum: Int = 1): StreamDubStatus = withContext(Dispatchers.IO) {
+        dubStatusCache[anilistId]?.let { return@withContext it }
+        try {
+            val streams = resolveRankedStreams(
+                anilistId = anilistId,
+                animeTitle = animeTitle,
+                episodeNum = episodeNum,
+                preferredAudio = "DUB"
+            )
+            val dubStreams = streams.filter { it.audioType == "DUAL_AUDIO" || it.audioType == "DUB" }
+            val hasDub = dubStreams.isNotEmpty()
+            val langs = mutableSetOf<String>()
+            for (s in dubStreams) {
+                val raw = (s.filename ?: "").lowercase()
+                if (raw.contains("🇬🇧") || raw.contains("🇺🇸") || raw.contains("eng") || raw.contains("english") || raw.contains("dual")) {
+                    langs.add("English / Dual Audio")
+                }
+                if (raw.contains("multi")) {
+                    langs.add("Multi-Language Dub")
+                }
+            }
+            if (hasDub && langs.isEmpty()) langs.add("Dual Audio / Dub")
+            val status = StreamDubStatus(hasStreamDubOrDual = hasDub, detectedLanguages = langs.toList())
+            dubStatusCache[anilistId] = status
+            status
+        } catch (_: Exception) {
+            StreamDubStatus()
+        }
+    }
 
     /**
      * Resolves AniList ID -> Kitsu ID, MAL ID, IMDb ID, and rich Crunchyroll-style Episode metadata
@@ -242,28 +282,39 @@ object CrunchyrollStreamEngine {
     /**
      * Merges AniList streamingEpisodes with AniZip/Kitsu episode metadata so every anime has a complete,
      * Crunchyroll-style episode list with thumbnails, air dates, and episode synopses.
+     * Strictly caps releasing shows at latestAired (or airDate <= today) so unreleased future episodes never appear!
      */
     fun buildCompleteEpisodeList(
         mappings: AnimeIdMappings?,
         anilistStreamingEps: List<StreamingEpisode>,
         totalEpisodes: Int?,
-        latestAired: Int?
+        latestAired: Int?,
+        isReleasing: Boolean = false
     ): List<CrunchyEpisodeMeta> {
-        val maxEp = latestAired
-            ?: totalEpisodes
-            ?: mappings?.episodeCount
-            ?: mappings?.episodes?.maxOfOrNull { it.episodeNumber }
-            ?: anilistStreamingEps.maxOfOrNull { it.episodeNumber }
-            ?: 12
-
-        val safeCap = maxEp.coerceIn(1, 1500)
         val aniZipMap = mappings?.episodes?.associateBy { it.episodeNumber } ?: emptyMap()
         val anilistMap = anilistStreamingEps.associateBy { it.episodeNumber }
         val defaultSeasonNum = mappings?.episodes?.firstOrNull()?.seasonNumber ?: 1
 
-        val list = mutableListOf<CrunchyEpisodeMeta>()
-        val targetCount = maxOf(safeCap, aniZipMap.keys.maxOrNull() ?: 0, anilistMap.keys.maxOrNull() ?: 0).coerceAtMost(1500)
+        // Today in YYYY-MM-DD (UTC+8) to filter out future scheduled episodes when latestAired is unknown
+        val todayIso = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+        val highestAiredFromDates = mappings?.episodes
+            ?.filter { !it.airDate.isNullOrBlank() && it.airDate <= todayIso }
+            ?.maxOfOrNull { it.episodeNumber }
 
+        val targetCount = when {
+            isReleasing && latestAired != null -> latestAired.coerceAtLeast(0)
+            isReleasing && highestAiredFromDates != null -> highestAiredFromDates.coerceAtLeast(0)
+            latestAired != null -> latestAired
+            totalEpisodes != null && totalEpisodes > 0 -> totalEpisodes
+            mappings?.episodeCount != null && mappings.episodeCount > 0 -> mappings.episodeCount
+            aniZipMap.isNotEmpty() -> aniZipMap.keys.maxOrNull() ?: 12
+            anilistMap.isNotEmpty() -> anilistMap.keys.maxOrNull() ?: 12
+            else -> 12
+        }.coerceIn(0, 1500)
+
+        if (targetCount <= 0) return emptyList()
+
+        val list = mutableListOf<CrunchyEpisodeMeta>()
         for (epNum in 1..targetCount) {
             val az = aniZipMap[epNum]
             val al = anilistMap[epNum]
@@ -605,7 +656,14 @@ object CrunchyrollStreamEngine {
 
     private fun detectAudioType(raw: String): String {
         val lower = raw.lowercase()
-        return if (lower.contains("dual") || lower.contains("multi-audio") || lower.contains("multi audio") || lower.contains("ja+en") || lower.contains("jpn+eng")) {
+        return if (
+            lower.contains("dual") ||
+            lower.contains("multi-audio") ||
+            lower.contains("multi audio") ||
+            lower.contains("ja+en") ||
+            lower.contains("jpn+eng") ||
+            lower.contains("dubbed")
+        ) {
             "DUAL_AUDIO"
         } else if (lower.contains("dub") || lower.contains("eng dub") || lower.contains("english dub")) {
             "DUB"

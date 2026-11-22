@@ -1,21 +1,30 @@
 ﻿package io.maru.manime
 
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -24,19 +33,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 
-// Crunchyroll Dark & Vibrant Orange Palette
+// Authentic Crunchyroll OLED Pitch Black & Vibrant Orange Palette
 val CrunchyOrange = Color(0xFFF47521)
 val CrunchyOrangeBright = Color(0xFFFF8838)
 val CrunchyTeal = Color(0xFF2ABDBB)
 val CrunchyGold = Color(0xFFFAB818)
-val CrunchyBgBlack = Color(0xFF0B0C0F)
-val CrunchySurface = Color(0xFF141519)
-val CrunchyCardBg = Color(0xFF1B1D24)
-val CrunchyBorder = Color(0xFF2B2E38)
+val CrunchyBgBlack = Color(0xFF000000)
+val CrunchySurface = Color(0xFF0E0F12)
+val CrunchyCardBg = Color(0xFF16181D)
+val CrunchyBorder = Color(0xFF23252C)
 
-// Backwards-compatible aliases so all existing screens adopt the Crunchyroll look seamlessly
+// Backwards-compatible aliases
 val MaruBgBase = CrunchyBgBlack
-val MaruCosmicTop = Color(0xFF16181F)
+val MaruCosmicTop = Color(0xFF101216)
 val MaruCosmicMid = CrunchySurface
 val MaruCosmicBot = CrunchyBgBlack
 
@@ -49,8 +58,8 @@ val MaruAccentPurple = CrunchyOrangeBright
 val MaruAccentGreen = Color(0xFF2ECC71)
 val MaruAccentYellow = CrunchyGold
 val MaruDanger = Color(0xFFE74C3C)
-val MaruTextStrong = Color(0xFFF4F5F7)
-val MaruTextMuted = Color(0xFFA0A4B0)
+val MaruTextStrong = Color(0xFFFFFFFF)
+val MaruTextMuted = Color(0xFF9EA2AE)
 
 val MaruPillShape = RoundedCornerShape(4.dp)
 val MaruInputShape = RoundedCornerShape(4.dp)
@@ -81,35 +90,16 @@ fun GlassSectionHeader(
     color: Color = CrunchyOrange,
     modifier: Modifier = Modifier
 ) {
-    Row(
-        modifier = modifier.padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .width(3.dp)
-                .height(14.dp)
-                .background(color)
-        )
-        if (icon != null) {
-            Icon(
-                icon,
-                contentDescription = null,
-                tint = color,
-                modifier = Modifier.size(16.dp)
-            )
-        }
-        Text(
-            text = title.uppercase(),
-            style = MaterialTheme.typography.labelSmall.copy(
-                fontWeight = FontWeight.ExtraBold,
-                fontSize = 11.5.sp,
-                letterSpacing = 1.sp
-            ),
-            color = MaruTextStrong
-        )
-    }
+    Text(
+        text = title,
+        style = MaterialTheme.typography.titleMedium.copy(
+            fontWeight = FontWeight.ExtraBold,
+            fontSize = 19.sp,
+            letterSpacing = 0.2.sp
+        ),
+        color = Color.White,
+        modifier = modifier.padding(vertical = 4.dp)
+    )
 }
 
 @Composable
@@ -128,7 +118,7 @@ fun GlassFeatureRow(
     ) {
         Text(
             text = label,
-            fontSize = 13.5.sp,
+            fontSize = 14.sp,
             fontWeight = FontWeight.Medium,
             color = MaruTextStrong
         )
@@ -146,237 +136,229 @@ fun GlassFeatureRow(
     }
 }
 
+/**
+ * Authentic Crunchyroll Continue Watching Card with iOS Spring Press Physics
+ */
 @Composable
 fun WatchingCard(
     media: AnimeMedia,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val subOrDubLabel = if (media.hasEnglishDub) "Sub | Dub" else "Subtitled"
-    val totalEps = media.latestAiredEpisode ?: media.episodes ?: 12
-    val progressFrac = if (totalEps > 0) (media.progress.toFloat() / totalEps.toFloat()).coerceIn(0.05f, 1f) else 0.1f
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.96f else 1f,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow),
+        label = "WatchingCardSpring"
+    )
 
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(6.dp),
-        color = CrunchyCardBg,
-        border = BorderStroke(1.dp, CrunchyBorder),
+    val subOrDubLabel = if (media.hasEnglishDub) "Dub | Sub" else "Subtitled"
+    val totalEps = media.latestAiredEpisode ?: media.episodes ?: 12
+    val progressFrac = if (totalEps > 0) (media.progress.toFloat() / totalEps.toFloat()).coerceIn(0.06f, 1f) else 0.1f
+
+    Column(
         modifier = modifier
-            .width(156.dp)
-            .height(234.dp)
+            .width(152.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(2f / 3f)
+                .background(CrunchyCardBg)
+        ) {
+            AsyncImage(
+                model = media.coverUrl,
+                contentDescription = media.title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, Color(0x22000000), Color(0xBB000000))
+                        )
+                    )
+            )
+
+            // Play Icon Badge on Bottom Right
+            Surface(
+                shape = CircleShape,
+                color = CrunchyOrange,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(8.dp)
+                    .size(28.dp)
             ) {
-                AsyncImage(
-                    model = media.coverUrl,
-                    contentDescription = media.title,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color.Transparent, Color(0x44000000), Color(0xDD0B0C0F))
-                            )
-                        )
-                )
-
-                // Crunchyroll Play Badge on Bottom Right of Cover
-                Surface(
-                    shape = CircleShape,
-                    color = CrunchyOrange,
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(8.dp)
-                        .size(28.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Default.PlayArrow,
-                            contentDescription = "Continue",
-                            tint = Color.Black,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-
-                // Episode tag on Bottom Left
-                Surface(
-                    shape = RoundedCornerShape(2.dp),
-                    color = Color(0xCC0B0C0F),
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(8.dp)
-                ) {
-                    val nextEp = (media.progress + 1).coerceAtMost(totalEps.coerceAtLeast(1))
-                    Text(
-                        text = if (media.progress > 0) "S1 E$nextEp" else "S1 E1",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color.White,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        Icons.Default.PlayArrow,
+                        contentDescription = "Continue",
+                        tint = Color.Black,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }
 
-            // Crunchyroll Orange Progress Bar
+            // Next Episode Badge on Bottom Left
+            Surface(
+                shape = RoundedCornerShape(2.dp),
+                color = Color(0xD9000000),
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(8.dp)
+            ) {
+                val nextEp = (media.progress + 1).coerceAtMost(totalEps.coerceAtLeast(1))
+                Text(
+                    text = if (media.progress > 0) "E$nextEp" else "E1",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        }
+
+        // Crunchyroll Orange Progress Line right under the 2:3 cover
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(3.dp)
+                .background(Color(0xFF282A32))
+        ) {
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(3.dp)
-                    .background(Color(0xFF2E323D))
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(progressFrac)
-                        .fillMaxHeight()
-                        .background(CrunchyOrange)
-                )
-            }
+                    .fillMaxWidth(progressFrac)
+                    .fillMaxHeight()
+                    .background(CrunchyOrange)
+            )
+        }
 
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(CrunchySurface)
-                    .padding(horizontal = 8.dp, vertical = 7.dp)
-            ) {
-                Text(
-                    text = media.title,
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = "$subOrDubLabel • Ep ${media.progress}/${media.episodes ?: "?"}",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = CrunchyTeal
-                )
-            }
+        Spacer(modifier = Modifier.height(7.dp))
+
+        Text(
+            text = media.title,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+
+        Spacer(modifier = Modifier.height(2.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "$subOrDubLabel • Ep ${media.progress}/${totalEps}",
+                fontSize = 11.5.sp,
+                color = MaruTextMuted,
+                fontWeight = FontWeight.Normal
+            )
+            Icon(
+                Icons.Default.MoreVert,
+                contentDescription = null,
+                tint = MaruTextMuted,
+                modifier = Modifier.size(16.dp)
+            )
         }
     }
 }
 
+/**
+ * Authentic Crunchyroll 2:3 Poster Card matching the user's Crunchyroll reference screenshots:
+ * Borderless 2:3 key art image on top, clean Title + "Dub | Sub" (or custom subtitle like "4 Episodes") + 3-dot icon below on pure black background.
+ */
 @Composable
 fun PosterCard(
     media: AnimeMedia,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    subtitleOverride: String? = null
 ) {
-    val subOrDubLabel = if (media.hasEnglishDub) "Sub | Dub" else "Subtitled"
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.96f else 1f,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow),
+        label = "PosterCardSpring"
+    )
 
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(6.dp),
-        color = CrunchyCardBg,
-        border = BorderStroke(1.dp, CrunchyBorder),
+    val subOrDubLabel = subtitleOverride ?: if (media.hasEnglishDub) "Dub | Sub" else "Subtitled"
+
+    Column(
         modifier = modifier
             .fillMaxWidth()
-            .height(248.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            ) {
-                AsyncImage(
-                    model = media.coverUrl,
-                    contentDescription = media.title,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color.Transparent, Color(0x33000000), Color(0xCC0B0C0F))
-                            )
-                        )
-                )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(2f / 3f)
+                .background(CrunchyCardBg)
+        ) {
+            AsyncImage(
+                model = media.coverUrl,
+                contentDescription = media.title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
 
-                val isAiring = media.status?.equals("RELEASING", ignoreCase = true) == true
-                if (isAiring) {
-                    Surface(
-                        color = CrunchyOrange,
-                        shape = RoundedCornerShape(2.dp),
-                        modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .padding(6.dp)
-                    ) {
-                        Text(
-                            text = "SIMULCAST",
-                            fontSize = 8.5.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color.Black,
-                            letterSpacing = 0.5.sp,
-                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                        )
-                    }
-                }
+        Spacer(modifier = Modifier.height(8.dp))
 
-                if (media.averageScore != null && media.averageScore > 0) {
-                    Surface(
-                        color = Color(0xCC0B0C0F),
-                        shape = RoundedCornerShape(2.dp),
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(6.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Star,
-                                contentDescription = null,
-                                tint = CrunchyGold,
-                                modifier = Modifier.size(10.dp)
-                            )
-                            Text(
-                                text = "${media.averageScore}%",
-                                fontSize = 9.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = CrunchyGold
-                            )
-                        }
-                    }
-                }
-            }
+        Text(
+            text = media.title,
+            fontSize = 13.5.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
 
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(CrunchySurface)
-                    .padding(horizontal = 8.dp, vertical = 7.dp)
-            ) {
-                Text(
-                    text = media.title,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = subOrDubLabel,
-                    fontSize = 10.sp,
-                    color = MaruTextMuted,
-                    fontWeight = FontWeight.Medium
-                )
-            }
+        Spacer(modifier = Modifier.height(3.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = subOrDubLabel,
+                fontSize = 12.sp,
+                color = MaruTextMuted,
+                fontWeight = FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Icon(
+                Icons.Default.MoreVert,
+                contentDescription = null,
+                tint = MaruTextMuted,
+                modifier = Modifier.size(16.dp)
+            )
         }
     }
 }

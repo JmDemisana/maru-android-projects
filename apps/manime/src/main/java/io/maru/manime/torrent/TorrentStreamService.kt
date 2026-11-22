@@ -47,6 +47,8 @@ data class ActiveStreamStatus(
     val isBuffering: Boolean = false,
     val statusMessage: String = "Preparing episode...",
     val progressPercent: Int = 0,
+    val downloadSpeedKbps: Int = 0,
+    val connectedPeers: Int = 0,
     val streamUrl: String? = null,
     val error: String? = null
 )
@@ -487,6 +489,8 @@ class TorrentStreamService : Service() {
                 while (isActive && waitedMs < 35_000) {
                     val status = handle?.status()
                     val downloaded = status?.totalDone() ?: 0L
+                    val speedKbps = ((status?.downloadPayloadRate() ?: 0) / 1024).coerceAtLeast(0)
+                    val peers = status?.numPeers() ?: 0
                     val hasFirstChunk = hasFileRangeDownloaded(0L, 512 * 1024L)
                     val pct = if (minPrebufferBytes > 0) {
                         ((downloaded.toDouble() / minPrebufferBytes.toDouble()) * 100.0).toInt().coerceIn(5, 99)
@@ -496,14 +500,17 @@ class TorrentStreamService : Service() {
                         break
                     }
 
+                    val speedLabel = if (speedKbps >= 1024) String.format("%.1f MB/s", speedKbps / 1024.0) else "$speedKbps KB/s"
                     _streamStatus.value = ActiveStreamStatus(
                         isReady = false,
                         isBuffering = true,
-                        statusMessage = "Buffering Episode $episodeNum ($pct%)...",
-                        progressPercent = pct
+                        statusMessage = if (peers > 0) "Buffering Episode $episodeNum ($pct% • $speedLabel)" else "Connecting to Episode $episodeNum stream...",
+                        progressPercent = pct,
+                        downloadSpeedKbps = speedKbps,
+                        connectedPeers = peers
                     )
-                    delay(400)
-                    waitedMs += 400
+                    delay(350)
+                    waitedMs += 350
                 }
 
                 val ext = if (targetRelPath.lowercase().endsWith(".mp4")) "mp4" else "mkv"
@@ -515,6 +522,22 @@ class TorrentStreamService : Service() {
                     progressPercent = 100,
                     streamUrl = url
                 )
+
+                // Keep updating download speed & overall cache percentage while playing
+                while (isActive && handle != null) {
+                    val st = handle.status()
+                    val done = st.totalDone()
+                    val totalPct = if (expectedBytes > 0) ((done * 100L) / expectedBytes).toInt().coerceIn(1, 100) else 100
+                    val spd = (st.downloadPayloadRate() / 1024).coerceAtLeast(0)
+                    val prs = st.numPeers()
+                    _streamStatus.value = _streamStatus.value.copy(
+                        progressPercent = totalPct,
+                        downloadSpeedKbps = spd,
+                        connectedPeers = prs
+                    )
+                    if (st.isFinished || st.isSeeding) break
+                    delay(1200)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

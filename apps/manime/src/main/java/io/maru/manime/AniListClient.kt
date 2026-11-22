@@ -12,7 +12,8 @@ import java.util.concurrent.TimeUnit
 data class AniListUser(
     val id: Int,
     val name: String,
-    val avatarUrl: String?
+    val avatarUrl: String?,
+    val scoreFormat: String = "POINT_100" // POINT_100 | POINT_10_DECIMAL | POINT_10 | POINT_5 | POINT_3
 )
 
 data class AniListProfile(
@@ -136,6 +137,17 @@ data class AniListActivity(
     val rawMedia: AnimeMedia?,
     val replyCount: Int,
     val likeCount: Int,
+    val isLiked: Boolean = false,
+    val createdAt: Long
+)
+
+data class ActivityReply(
+    val id: Int,
+    val userId: Int,
+    val userName: String,
+    val userAvatar: String?,
+    val text: String,
+    val likeCount: Int,
     val createdAt: Long
 )
 
@@ -205,9 +217,15 @@ object AniListClient {
         variables: Map<String, Any?> = emptyMap(),
         token: String? = null
     ): JSONObject = withContext(Dispatchers.IO) {
+        val varsJson = JSONObject()
+        for ((k, v) in variables) {
+            if (v != null) {
+                varsJson.put(k, v)
+            }
+        }
         val body = JSONObject().apply {
             put("query", gql)
-            put("variables", JSONObject(variables))
+            put("variables", varsJson)
         }.toString().toRequestBody(JSON_MEDIA_TYPE)
 
         val reqBuilder = Request.Builder()
@@ -218,10 +236,14 @@ object AniListClient {
         if (!token.isNullOrBlank()) reqBuilder.header("Authorization", "Bearer $token")
 
         val resp = client.newCall(reqBuilder.build()).execute()
-        val json = JSONObject(resp.body?.string() ?: "{}")
+        val rawStr = resp.body?.string() ?: "{}"
+        val json = JSONObject(rawStr)
         if (json.has("errors")) {
             val msg = json.getJSONArray("errors").getJSONObject(0).optString("message", "AniList error")
             throw Exception(msg)
+        }
+        if (!resp.isSuccessful) {
+            throw Exception("AniList HTTP ${resp.code}")
         }
         json.getJSONObject("data")
     }
@@ -312,17 +334,13 @@ object AniListClient {
         )
     }
 
-    private fun mediaFields() = """
+    private fun mediaFields(includeDubCast: Boolean = false) = """
         id episodes format status season seasonYear meanScore averageScore isAdult siteUrl bannerImage
         title { userPreferred english romaji native }
         coverImage { large color }
         nextAiringEpisode { episode airingAt }
         externalLinks { id url site type language }
-        characters(perPage: 6, sort: [ROLE, RELEVANCE]) {
-          edges {
-            voiceActors(language: ENGLISH) { id }
-          }
-        }
+        ${if (includeDubCast) "characters(perPage: 2, sort: [ROLE]) { edges { voiceActors(language: ENGLISH) { id } } }" else ""}
         genres
         description(asHtml: false)
         mediaListEntry { id status score progress private notes updatedAt }
@@ -330,13 +348,21 @@ object AniListClient {
 
     suspend fun getViewer(token: String): AniListUser {
         val data = query("""
-            query { Viewer { id name avatar { medium } } }
+            query {
+              Viewer {
+                id name
+                avatar { medium }
+                mediaListOptions { scoreFormat }
+              }
+            }
         """, token = token)
         val v = data.getJSONObject("Viewer")
+        val scoreFmt = v.optJSONObject("mediaListOptions")?.optNullableString("scoreFormat") ?: "POINT_100"
         return AniListUser(
-            id        = v.getInt("id"),
-            name      = v.getString("name"),
-            avatarUrl = v.optJSONObject("avatar")?.optNullableString("medium")
+            id          = v.getInt("id"),
+            name        = v.getString("name"),
+            avatarUrl   = v.optJSONObject("avatar")?.optNullableString("medium"),
+            scoreFormat = scoreFmt
         )
     }
 
@@ -555,22 +581,22 @@ object AniListClient {
         return data.getJSONObject("ToggleFollow").optBoolean("isFollowing")
     }
 
-    suspend fun getTrending(perPage: Int = 20): List<AnimeMedia> {
+    suspend fun getTrending(perPage: Int = 18): List<AnimeMedia> {
         val data = query("""
             query {
               Page(page: 1, perPage: $perPage) {
-                media(type: ANIME, sort: [TRENDING_DESC, POPULARITY_DESC]) { ${mediaFields()} }
+                media(type: ANIME, sort: [TRENDING_DESC, POPULARITY_DESC]) { ${mediaFields(includeDubCast = true)} }
               }
             }
         """)
         return parsePageMedia(data)
     }
 
-    suspend fun getSimulcastSchedule(perPage: Int = 40): List<AnimeMedia> {
+    suspend fun getSimulcastSchedule(perPage: Int = 20): List<AnimeMedia> {
         val data = query("""
             query {
               Page(page: 1, perPage: $perPage) {
-                media(type: ANIME, status: RELEASING, sort: [POPULARITY_DESC, TRENDING_DESC]) { ${mediaFields()} }
+                media(type: ANIME, status: RELEASING, sort: [POPULARITY_DESC, TRENDING_DESC]) { ${mediaFields(includeDubCast = true)} }
               }
             }
         """)
@@ -764,23 +790,27 @@ object AniListClient {
     }
 
     suspend fun saveEntry(
-        mediaId: Int, status: String, progress: Int?,
-        score: Double?, notes: String?, isPrivate: Boolean,
+        mediaId: Int, status: String?, progress: Int?,
+        score: Double?, notes: String?, isPrivate: Boolean?,
         token: String
     ): AnimeMedia {
+        val vars = mutableMapOf<String, Any?>("mediaId" to mediaId)
+        if (!status.isNullOrBlank()) vars["status"] = status.uppercase()
+        if (progress != null) vars["progress"] = progress
+        if (score != null) vars["score"] = score
+        if (notes != null) vars["notes"] = notes
+        if (isPrivate != null) vars["private"] = isPrivate
+
         val data = query("""
             mutation (${'$'}mediaId: Int!, ${'$'}status: MediaListStatus, ${'$'}score: Float,
                       ${'$'}progress: Int, ${'$'}private: Boolean, ${'$'}notes: String) {
               SaveMediaListEntry(mediaId: ${'$'}mediaId, status: ${'$'}status, score: ${'$'}score,
                                  progress: ${'$'}progress, private: ${'$'}private, notes: ${'$'}notes) {
                 id status score progress private notes updatedAt
-                media { ${mediaFields()} }
+                media { ${mediaFields(includeDubCast = false)} }
               }
             }
-        """, mapOf(
-            "mediaId" to mediaId, "status" to status, "score" to score,
-            "progress" to progress, "private" to isPrivate, "notes" to notes
-        ), token)
+        """, vars, token)
         val entry = data.getJSONObject("SaveMediaListEntry")
         return mapMedia(entry.getJSONObject("media"), entry)
     }
@@ -800,11 +830,11 @@ object AniListClient {
                   Page(page: ${'$'}page, perPage: ${'$'}perPage) {
                     activities(isFollowing: ${'$'}isFollowing, type_in: [TEXT, ANIME_LIST], sort: ID_DESC) {
                       ... on TextActivity {
-                        id userId text replyCount likeCount createdAt
+                        id userId text replyCount likeCount isLiked createdAt
                         user { name avatar { medium } }
                       }
                       ... on ListActivity {
-                        id userId status progress replyCount likeCount createdAt
+                        id userId status progress replyCount likeCount isLiked createdAt
                         user { name avatar { medium } }
                         media {
                           type
@@ -821,11 +851,11 @@ object AniListClient {
                   Page(page: ${'$'}page, perPage: ${'$'}perPage) {
                     activities(sort: ID_DESC) {
                       ... on TextActivity {
-                        id userId text replyCount likeCount createdAt
+                        id userId text replyCount likeCount isLiked createdAt
                         user { name avatar { medium } }
                       }
                       ... on ListActivity {
-                        id userId status progress replyCount likeCount createdAt
+                        id userId status progress replyCount likeCount isLiked createdAt
                         user { name avatar { medium } }
                         media {
                           type
@@ -850,6 +880,7 @@ object AniListClient {
             val userAvatar = userObj?.optJSONObject("avatar")?.optNullableString("medium")
             val replyCount = act.optInt("replyCount", 0)
             val likeCount = act.optInt("likeCount", 0)
+            val isLiked = act.optBoolean("isLiked", false)
             val createdAt = act.optLong("createdAt", 0L)
 
             if (act.has("text")) {
@@ -868,6 +899,7 @@ object AniListClient {
                         rawMedia = null,
                         replyCount = replyCount,
                         likeCount = likeCount,
+                        isLiked = isLiked,
                         createdAt = createdAt
                     )
                 )
@@ -899,12 +931,79 @@ object AniListClient {
                         rawMedia = parsedMedia,
                         replyCount = replyCount,
                         likeCount = likeCount,
+                        isLiked = isLiked,
                         createdAt = createdAt
                     )
                 )
             }
         }
         return list
+    }
+
+    suspend fun toggleActivityLike(activityId: Int, token: String): Pair<Boolean, Int> {
+        val data = query("""
+            mutation (${'$'}id: Int) {
+              ToggleLikeV2(id: ${'$'}id, type: ACTIVITY) {
+                ... on TextActivity { isLiked likeCount }
+                ... on ListActivity { isLiked likeCount }
+              }
+            }
+        """, mapOf("id" to activityId), token)
+        val obj = data.optJSONObject("ToggleLikeV2")
+        return Pair(obj?.optBoolean("isLiked", true) ?: true, obj?.optInt("likeCount", 1) ?: 1)
+    }
+
+    suspend fun getActivityReplies(activityId: Int): List<ActivityReply> {
+        val data = query("""
+            query (${'$'}id: Int) {
+              Page(page: 1, perPage: 30) {
+                activityReplies(activityId: ${'$'}id) {
+                  id userId text likeCount createdAt
+                  user { name avatar { medium } }
+                }
+              }
+            }
+        """, mapOf("id" to activityId))
+        val arr = data.optJSONObject("Page")?.optJSONArray("activityReplies") ?: return emptyList()
+        val list = mutableListOf<ActivityReply>()
+        for (i in 0 until arr.length()) {
+            val r = arr.getJSONObject(i)
+            val u = r.optJSONObject("user")
+            list.add(
+                ActivityReply(
+                    id = r.optInt("id"),
+                    userId = r.optInt("userId"),
+                    userName = u?.optNullableString("name") ?: "User",
+                    userAvatar = u?.optJSONObject("avatar")?.optNullableString("medium"),
+                    text = r.optNullableString("text") ?: "",
+                    likeCount = r.optInt("likeCount", 0),
+                    createdAt = r.optLong("createdAt", 0L)
+                )
+            )
+        }
+        return list
+    }
+
+    suspend fun postActivityReply(activityId: Int, text: String, token: String): ActivityReply {
+        val data = query("""
+            mutation (${'$'}activityId: Int, ${'$'}text: String) {
+              SaveActivityReply(activityId: ${'$'}activityId, text: ${'$'}text) {
+                id userId text likeCount createdAt
+                user { name avatar { medium } }
+              }
+            }
+        """, mapOf("activityId" to activityId, "text" to text), token)
+        val r = data.getJSONObject("SaveActivityReply")
+        val u = r.optJSONObject("user")
+        return ActivityReply(
+            id = r.optInt("id"),
+            userId = r.optInt("userId"),
+            userName = u?.optNullableString("name") ?: "You",
+            userAvatar = u?.optJSONObject("avatar")?.optNullableString("medium"),
+            text = r.optNullableString("text") ?: text,
+            likeCount = r.optInt("likeCount", 0),
+            createdAt = r.optLong("createdAt", System.currentTimeMillis() / 1000)
+        )
     }
 
     suspend fun postTextActivity(text: String, token: String): AniListActivity {
