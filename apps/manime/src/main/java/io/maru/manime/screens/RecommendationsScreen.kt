@@ -36,6 +36,7 @@ fun RecommendationsScreen(
 
     val categories = listOf(
         "For You",
+        "Simulcast Calendar",
         "Trending Now",
         "Romance & CGDCT",
         "Music & Idols",
@@ -211,10 +212,38 @@ fun RecommendationsScreen(
             }
         } else {
             items(displayedRecs, key = { "rec_${it.mediaId}" }) { media ->
-                PosterCard(
-                    media = media,
-                    onClick = { onAnimeClick(media) }
-                )
+                val isSimulcastTab = selectedCategory == "Simulcast Calendar"
+                val nowSec = System.currentTimeMillis() / 1000L
+                val countdownBadge = if (isSimulcastTab && media.nextEpisode != null && media.nextEpisodeAt != null) {
+                    val diffHours = ((media.nextEpisodeAt - nowSec) / 3600L).coerceAtLeast(0L)
+                    val days = diffHours / 24L
+                    val hrs = diffHours % 24L
+                    if (days > 0) "EP ${media.nextEpisode} IN ${days}D ${hrs}H" else "EP ${media.nextEpisode} IN ${hrs}H"
+                } else null
+
+                Box {
+                    PosterCard(
+                        media = media,
+                        onClick = { onAnimeClick(media) }
+                    )
+                    if (countdownBadge != null) {
+                        Surface(
+                            color = CrunchyTeal,
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(3.dp),
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(6.dp)
+                        ) {
+                            Text(
+                                text = countdownBadge,
+                                fontSize = 8.5.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.Black,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
             }
         }
     }

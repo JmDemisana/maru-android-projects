@@ -161,6 +161,13 @@ fun AnimeDetailScreen(
         listOf("Episodes (${completeEpisodes.size})", "Overview", "Cast")
     }
 
+    var selectedEpRangeIndex by remember(completeEpisodes.size) { mutableIntStateOf(0) }
+    val episodeChunkSize = 50
+    val episodeChunks = remember(completeEpisodes) {
+        if (completeEpisodes.isEmpty()) listOf(emptyList())
+        else completeEpisodes.chunked(episodeChunkSize)
+    }
+    val visibleEpisodes = episodeChunks.getOrElse(selectedEpRangeIndex.coerceIn(0, (episodeChunks.size - 1).coerceAtLeast(0))) { completeEpisodes }
     var selectedTabIndex by remember { mutableIntStateOf(0) }
     val currentTabName = availableTabs.getOrElse(selectedTabIndex) { "Episodes" }
 
@@ -276,13 +283,16 @@ fun AnimeDetailScreen(
         return
     }
 
+    androidx.activity.compose.BackHandler {
+        onBack()
+    }
+
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
             Surface(
-                color = Color(0xEE0E0A1A),
-                border = BorderStroke(1.dp, MaruGlassBorderSoft),
-                shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp),
+                color = CrunchySurface,
+                border = BorderStroke(1.dp, CrunchyBorder),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
@@ -1026,7 +1036,39 @@ fun AnimeDetailScreen(
                 }
             } else if (currentTabName.startsWith("Episodes", ignoreCase = true)) {
                 // ================= CRUNCHYROLL EPISODES TAB =================
-                items(completeEpisodes, key = { "crunchy_ep_${it.episodeNumber}" }) { streamEp ->
+                if (episodeChunks.size > 1) {
+                    item(key = "ep_range_chunks") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            episodeChunks.forEachIndexed { idx, chunk ->
+                                val firstEp = chunk.firstOrNull()?.episodeNumber ?: 1
+                                val lastEp = chunk.lastOrNull()?.episodeNumber ?: firstEp
+                                val isRangeSelected = selectedEpRangeIndex == idx
+                                Surface(
+                                    onClick = { selectedEpRangeIndex = idx },
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = if (isRangeSelected) CrunchyOrange else CrunchyCardBg,
+                                    border = BorderStroke(1.dp, if (isRangeSelected) CrunchyOrange else CrunchyBorder)
+                                ) {
+                                    Text(
+                                        text = "EP $firstEp - $lastEp",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (isRangeSelected) Color.Black else MaruTextStrong,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                items(visibleEpisodes, key = { "crunchy_ep_${it.episodeNumber}" }) { streamEp ->
                     val episodeNum = streamEp.episodeNumber
                     val isWatched = episodeNum <= currentMedia.progress
                     val displayTitle = streamEp.title.ifBlank { "Episode $episodeNum" }
@@ -1556,7 +1598,7 @@ fun AnimeDetailScreen(
                                         )
                                         if (workMedia.averageScore != null) {
                                             Text(
-                                                text = "â˜… ${workMedia.averageScore}%",
+                                                text = "★ ${workMedia.averageScore}%",
                                                 fontSize = 9.5.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = MaruAccentYellow

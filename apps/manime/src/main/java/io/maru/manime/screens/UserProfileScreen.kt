@@ -56,6 +56,10 @@ fun UserProfileScreen(
     var followersList by remember { mutableStateOf<List<AniListProfile>>(emptyList()) }
     var isFollowersLoading by remember { mutableStateOf(false) }
 
+    androidx.activity.compose.BackHandler {
+        onBack()
+    }
+
     LaunchedEffect(username) {
         isLoading = true
         withContext(Dispatchers.IO) {

@@ -566,6 +566,17 @@ object AniListClient {
         return parsePageMedia(data)
     }
 
+    suspend fun getSimulcastSchedule(perPage: Int = 40): List<AnimeMedia> {
+        val data = query("""
+            query {
+              Page(page: 1, perPage: $perPage) {
+                media(type: ANIME, status: RELEASING, sort: [POPULARITY_DESC, TRENDING_DESC]) { ${mediaFields()} }
+              }
+            }
+        """)
+        return parsePageMedia(data).filter { it.nextEpisodeAt != null }
+    }
+
     suspend fun search(
         queryStr: String,
         page: Int = 1,

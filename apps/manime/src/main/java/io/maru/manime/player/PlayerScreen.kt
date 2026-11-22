@@ -45,11 +45,13 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import io.maru.manime.*
@@ -101,6 +103,10 @@ fun PlayerScreen(
     var totalDuration by remember { mutableLongStateOf(0L) }
     var showControls by remember { mutableStateOf(true) }
     var isInPipMode by remember { mutableStateOf(false) }
+    var isScreenLocked by remember { mutableStateOf(false) }
+    var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
+    var videoResizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
+    var autoPlayCountdown by remember { mutableStateOf<Int?>(null) }
     var hasScrobbled85Percent by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
     var hasRestoredPosition by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
 
@@ -321,6 +327,10 @@ fun PlayerScreen(
                     }
                 } else if (state == Player.STATE_ENDED) {
                     onEpisodeWatched(episodeNum)
+                    val maxEps = media.latestAiredEpisode ?: media.episodes ?: 9999
+                    if (episodeNum < maxEps) {
+                        autoPlayCountdown = 5
+                    }
                 }
             }
 
@@ -396,6 +406,20 @@ fun PlayerScreen(
         }
     }
 
+    // Next Episode Auto-Play Countdown Loop
+    LaunchedEffect(autoPlayCountdown) {
+        val count = autoPlayCountdown ?: return@LaunchedEffect
+        if (count <= 0) {
+            autoPlayCountdown = null
+            onSwitchEpisode(episodeNum + 1)
+        } else {
+            delay(1000)
+            if (autoPlayCountdown != null) {
+                autoPlayCountdown = count - 1
+            }
+        }
+    }
+
     // Auto-hide controls after 4 seconds
     LaunchedEffect(showControls, isPlaying) {
         if (showControls && isPlaying && !showSettingsSheet) {
@@ -428,6 +452,7 @@ fun PlayerScreen(
                 PlayerView(ctx).apply {
                     player = exoPlayer
                     useController = false
+                    resizeMode = videoResizeMode
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
@@ -449,6 +474,9 @@ fun PlayerScreen(
                         )
                     }
                 }
+            },
+            update = { view ->
+                view.resizeMode = videoResizeMode
             },
             modifier = Modifier.fillMaxSize()
         )
@@ -570,9 +598,91 @@ fun PlayerScreen(
             }
         }
 
-        // Custom Crunchyroll Overlay Controls (hidden automatically when inside Picture-in-Picture window)
+        // Next Episode Auto-Play Countdown Card
         AnimatedVisibility(
-            visible = showControls && !isInPipMode,
+            visible = autoPlayCountdown != null && !isInPipMode,
+            enter = fadeIn() + scaleIn(initialScale = 0.95f),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 24.dp, bottom = 92.dp)
+        ) {
+            val secs = autoPlayCountdown ?: 0
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = Color(0xF0141519),
+                border = BorderStroke(1.5.dp, CrunchyOrange)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = "UP NEXT IN ${secs}S",
+                            color = CrunchyOrange,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = 0.8.sp
+                        )
+                        Text(
+                            text = "Episode ${episodeNum + 1}",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            autoPlayCountdown = null
+                            onSwitchEpisode(episodeNum + 1)
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = CrunchyOrange),
+                        shape = RoundedCornerShape(4.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text("PLAY NOW", color = Color.Black, fontWeight = FontWeight.ExtraBold, fontSize = 11.5.sp)
+                    }
+                    IconButton(
+                        onClick = { autoPlayCountdown = null },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "Cancel", tint = MaruTextMuted, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+
+        // Screen Lock Overlay Mode (prevents accidental touches while watching)
+        if (showControls && isScreenLocked && !isInPipMode) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp),
+                contentAlignment = Alignment.TopEnd
+            ) {
+                Surface(
+                    onClick = { isScreenLocked = false },
+                    shape = RoundedCornerShape(24.dp),
+                    color = Color(0xDD141519),
+                    border = BorderStroke(1.5.dp, CrunchyOrange)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(Icons.Default.Lock, contentDescription = "Unlock", tint = CrunchyOrange, modifier = Modifier.size(16.dp))
+                        Text("TAP TO UNLOCK", color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp)
+                    }
+                }
+            }
+        }
+
+        // Custom Crunchyroll Overlay Controls (hidden automatically when inside Picture-in-Picture window or Screen Lock)
+        AnimatedVisibility(
+            visible = showControls && !isInPipMode && !isScreenLocked,
             enter = fadeIn(),
             exit = fadeOut()
         ) {
@@ -652,6 +762,59 @@ fun PlayerScreen(
                                 )
                             }
                         }
+                    }
+
+                    // Playback Speed Cycle Pill (1.0x -> 1.25x -> 1.5x -> 2.0x -> 0.75x)
+                    Surface(
+                        onClick = {
+                            val nextSpeed = when (playbackSpeed) {
+                                1.0f -> 1.25f
+                                1.25f -> 1.5f
+                                1.5f -> 2.0f
+                                2.0f -> 0.75f
+                                else -> 1.0f
+                            }
+                            playbackSpeed = nextSpeed
+                            exoPlayer.playbackParameters = PlaybackParameters(nextSpeed)
+                        },
+                        shape = RoundedCornerShape(4.dp),
+                        color = CrunchySurface,
+                        border = BorderStroke(1.dp, CrunchyBorder),
+                        modifier = Modifier.padding(end = 6.dp)
+                    ) {
+                        Text(
+                            text = "${playbackSpeed}x",
+                            color = if (playbackSpeed != 1.0f) CrunchyOrange else Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                        )
+                    }
+
+                    // Aspect Ratio Fit / Fill / Zoom Toggle
+                    IconButton(
+                        onClick = {
+                            videoResizeMode = when (videoResizeMode) {
+                                AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                                else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+                            }
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.AspectRatio,
+                            contentDescription = "Aspect Ratio",
+                            tint = if (videoResizeMode != AspectRatioFrameLayout.RESIZE_MODE_FIT) CrunchyOrange else Color.White
+                        )
+                    }
+
+                    // Screen Touch Lock Button
+                    IconButton(onClick = { isScreenLocked = true }) {
+                        Icon(
+                            Icons.Default.LockOpen,
+                            contentDescription = "Lock Controls",
+                            tint = Color.White
+                        )
                     }
 
                     // Picture-in-Picture (PiP) Button

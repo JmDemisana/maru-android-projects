@@ -270,6 +270,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                                 AniListClient.getTrending(30)
                             }
                         }
+                        "Simulcast Calendar" -> AniListClient.getSimulcastSchedule(45)
                         "Trending Now" -> AniListClient.getTrending(30)
                         "Slice of Life" -> AniListClient.browseCategory(genre = "Slice of Life", perPage = 30)
                         "Romance & CGDCT" -> AniListClient.browseCategory(genre = "Romance", tag = "Cute Girls Doing Cute Things", perPage = 30)
@@ -324,6 +325,14 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
             effectiveUser = AniListUser(id = 0, name = anilistUsername, avatarUrl = anilistAvatar.ifEmpty { null })
         } else {
             effectiveUser = AniListUser(id = 0, name = "PpolHi", avatarUrl = "https://s4.anilist.co/file/anilistcdn/user/avatar/medium/b6197170-zN9M2ZgZg9Yh.png")
+        }
+    }
+
+    androidx.activity.compose.BackHandler(enabled = selectedAnimeDetail != null || selectedUserProfile != null || selectedScreen != NavigationScreen.DASHBOARD) {
+        when {
+            selectedUserProfile != null -> selectedUserProfile = null
+            selectedAnimeDetail != null -> selectedAnimeDetail = null
+            selectedScreen != NavigationScreen.DASHBOARD -> selectedScreen = NavigationScreen.DASHBOARD
         }
     }
 
