@@ -268,7 +268,7 @@ fun AnimeDetailScreen(
             },
             onSwitchEpisode = { targetNum ->
                 val nextMeta = completeEpisodes.firstOrNull { it.episodeNumber == targetNum }
-                    ?: CrunchyEpisodeMeta(targetNum, "Episode $targetNum")
+                    ?: CrunchyEpisodeMeta(episodeNumber = targetNum, title = "Episode $targetNum")
                 activePlayingEp = nextMeta
             },
             onBack = { activePlayingEp = null }
@@ -549,12 +549,21 @@ fun AnimeDetailScreen(
                 }
             }
 
-            // Crunchyroll Action Block: START WATCHING CTA + SUB / DUB Audio Switcher
+            // Crunchyroll Action Block: START WATCHING CTA + Season Switcher + SUB / DUB Audio Switcher
             item(key = "crunchy_cta_bar") {
+                val seasonRelations = remember(similarAnime) {
+                    similarAnime.filter {
+                        it.relationType == "PREQUEL" ||
+                        it.relationType == "SEQUEL" ||
+                        it.relationType == "SIDE_STORY" ||
+                        it.relationType == "PARENT" ||
+                        it.relationType == "ALTERNATIVE"
+                    }
+                }
                 val nextEpNum = (currentMedia.progress + 1).coerceAtMost((latestAiredEp ?: currentMedia.episodes ?: 9999).coerceAtLeast(1))
                 val targetEpMeta = completeEpisodes.firstOrNull { it.episodeNumber == nextEpNum }
                     ?: completeEpisodes.firstOrNull()
-                    ?: CrunchyEpisodeMeta(1, "Episode 1")
+                    ?: CrunchyEpisodeMeta(1, title = "Episode 1")
 
                 Column(
                     modifier = Modifier
@@ -579,9 +588,9 @@ fun AnimeDetailScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         val btnText = if (currentMedia.progress > 0) {
-                            "CONTINUE WATCHING S1 E${targetEpMeta.episodeNumber}"
+                            "CONTINUE WATCHING S${targetEpMeta.seasonNumber} E${targetEpMeta.episodeNumber}"
                         } else {
-                            "START WATCHING S1 E1"
+                            "START WATCHING S${targetEpMeta.seasonNumber} E1"
                         }
                         Text(
                             text = btnText,
@@ -590,6 +599,62 @@ fun AnimeDetailScreen(
                             color = Color.Black,
                             letterSpacing = 0.6.sp
                         )
+                    }
+
+                    // Related Seasons / Prequel / Sequel Quick Switcher Pill Bar
+                    if (seasonRelations.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "SEASONS:",
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = CrunchyOrange,
+                                letterSpacing = 0.6.sp
+                            )
+                            seasonRelations.forEach { rel ->
+                                val tag = when (rel.relationType) {
+                                    "PREQUEL" -> "PREV SEASON"
+                                    "SEQUEL" -> "NEXT SEASON"
+                                    "SIDE_STORY" -> "OVA / SIDE"
+                                    else -> "RELATED"
+                                }
+                                Surface(
+                                    onClick = {
+                                        currentMedia = rel
+                                        onMediaUpdated(rel)
+                                    },
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = CrunchyCardBg,
+                                    border = BorderStroke(1.dp, CrunchyBorder)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = tag,
+                                            fontSize = 9.5.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = CrunchyTeal
+                                        )
+                                        Text(
+                                            text = rel.title,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Audio Language Selector: Smartly reflects whether an English Dub actually exists!
@@ -1049,7 +1114,11 @@ fun AnimeDetailScreen(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = "S1 E$episodeNum",
+                                        text = if (streamEp.absoluteEpisodeNumber != null && streamEp.absoluteEpisodeNumber != episodeNum) {
+                                            "S${streamEp.seasonNumber} E$episodeNum (Ep ${streamEp.absoluteEpisodeNumber})"
+                                        } else {
+                                            "S${streamEp.seasonNumber} E$episodeNum"
+                                        },
                                         style = MaterialTheme.typography.labelSmall.copy(
                                             fontWeight = FontWeight.ExtraBold,
                                             fontSize = 10.5.sp,

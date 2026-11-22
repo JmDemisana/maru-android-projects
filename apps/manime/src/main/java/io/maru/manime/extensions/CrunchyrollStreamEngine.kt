@@ -23,6 +23,9 @@ data class AnimeIdMappings(
 
 data class CrunchyEpisodeMeta(
     val episodeNumber: Int,
+    val seasonNumber: Int = 1,
+    val tvdbEpisodeNumber: Int? = null,
+    val absoluteEpisodeNumber: Int? = null,
     val title: String,
     val overview: String? = null,
     val thumbnail: String? = null,
@@ -132,12 +135,21 @@ object CrunchyrollStreamEngine {
 
                         val image = epObj.optString("image").takeIf { it.isNotBlank() && it != "null" }
                         val overview = epObj.optString("overview").takeIf { it.isNotBlank() && it != "null" }
+                            ?: epObj.optString("summary").takeIf { it.isNotBlank() && it != "null" }
                         val airDate = epObj.optString("airDate").takeIf { it.isNotBlank() && it != "null" }
+                            ?: epObj.optString("airdate").takeIf { it.isNotBlank() && it != "null" }
                         val length = epObj.optInt("length", 0).takeIf { it > 0 }
+                            ?: epObj.optInt("runtime", 0).takeIf { it > 0 }
+                        val seasonNum = epObj.optInt("seasonNumber", 1).takeIf { it > 0 } ?: 1
+                        val tvdbEpNum = epObj.optInt("episodeNumber", epNum).takeIf { it > 0 } ?: epNum
+                        val absEpNum = epObj.optInt("absoluteEpisodeNumber", 0).takeIf { it > 0 }
 
                         episodesList.add(
                             CrunchyEpisodeMeta(
                                 episodeNumber = epNum,
+                                seasonNumber = seasonNum,
+                                tvdbEpisodeNumber = tvdbEpNum,
+                                absoluteEpisodeNumber = absEpNum,
                                 title = epTitle,
                                 overview = overview,
                                 thumbnail = image,
@@ -247,6 +259,7 @@ object CrunchyrollStreamEngine {
         val safeCap = maxEp.coerceIn(1, 1500)
         val aniZipMap = mappings?.episodes?.associateBy { it.episodeNumber } ?: emptyMap()
         val anilistMap = anilistStreamingEps.associateBy { it.episodeNumber }
+        val defaultSeasonNum = mappings?.episodes?.firstOrNull()?.seasonNumber ?: 1
 
         val list = mutableListOf<CrunchyEpisodeMeta>()
         val targetCount = maxOf(safeCap, aniZipMap.keys.maxOrNull() ?: 0, anilistMap.keys.maxOrNull() ?: 0).coerceAtMost(1500)
@@ -265,6 +278,9 @@ object CrunchyrollStreamEngine {
             list.add(
                 CrunchyEpisodeMeta(
                     episodeNumber = epNum,
+                    seasonNumber = az?.seasonNumber ?: defaultSeasonNum,
+                    tvdbEpisodeNumber = az?.tvdbEpisodeNumber ?: epNum,
+                    absoluteEpisodeNumber = az?.absoluteEpisodeNumber,
                     title = finalTitle,
                     overview = az?.overview,
                     thumbnail = az?.thumbnail ?: al?.thumbnail,
@@ -285,9 +301,16 @@ object CrunchyrollStreamEngine {
         episodeNum: Int
     ): List<ExternalSubtitleItem> = withContext(Dispatchers.IO) {
         val mappings = getAnimeMappings(anilistId, animeTitle)
+        val epMeta = mappings.episodes.firstOrNull { it.episodeNumber == episodeNum }
+        val trueSeason = epMeta?.seasonNumber ?: mappings.episodes.firstOrNull()?.seasonNumber ?: 1
+        val trueTvdbEp = epMeta?.tvdbEpisodeNumber ?: episodeNum
+
         val queryIds = mutableListOf<String>()
         if (!mappings.imdbId.isNullOrBlank()) {
-            queryIds.add("${mappings.imdbId}:1:$episodeNum")
+            queryIds.add("${mappings.imdbId}:$trueSeason:$trueTvdbEp")
+            if (trueSeason != 1 && epMeta?.absoluteEpisodeNumber != null) {
+                queryIds.add("${mappings.imdbId}:1:${epMeta.absoluteEpisodeNumber}")
+            }
         }
         if (!mappings.kitsuId.isNullOrBlank()) {
             queryIds.add("kitsu:${mappings.kitsuId}:$episodeNum")
@@ -403,14 +426,21 @@ object CrunchyrollStreamEngine {
         preferredQuality: String = "1080p" // "1080p" | "720p" | "4K"
     ): List<StreamLink> = coroutineScope {
         val mappings = getAnimeMappings(anilistId, animeTitle)
+        val epMeta = mappings.episodes.firstOrNull { it.episodeNumber == episodeNum }
+        val trueSeason = epMeta?.seasonNumber ?: mappings.episodes.firstOrNull()?.seasonNumber ?: 1
+        val trueTvdbEp = epMeta?.tvdbEpisodeNumber ?: episodeNum
 
-        // Kitsu ID MUST be queried first and prioritized over IMDb so live-action remakes (e.g. Netflix One Piece) never pollute anime
+        // 1. Kitsu ID uses per-season AniList episode numbering (kitsu:{id}:{episodeNum})
+        // 2. IMDb ID uses combined multi-season numbering (tt{id}:{seasonNumber}:{tvdbEpisodeNumber} and absoluteEpisodeNumber)
         val queryIds = mutableListOf<Pair<String, Boolean>>() // (queryId, isKitsu)
         if (!mappings.kitsuId.isNullOrBlank()) {
             queryIds.add("kitsu:${mappings.kitsuId}:$episodeNum" to true)
         }
         if (!mappings.imdbId.isNullOrBlank()) {
-            queryIds.add("${mappings.imdbId}:1:$episodeNum" to false)
+            queryIds.add("${mappings.imdbId}:$trueSeason:$trueTvdbEp" to false)
+            if (epMeta?.absoluteEpisodeNumber != null && epMeta.absoluteEpisodeNumber != episodeNum) {
+                queryIds.add("${mappings.imdbId}:1:${epMeta.absoluteEpisodeNumber}" to false)
+            }
         }
 
         if (queryIds.isEmpty()) return@coroutineScope emptyList()

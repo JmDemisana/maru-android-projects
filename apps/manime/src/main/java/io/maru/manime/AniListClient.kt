@@ -56,7 +56,8 @@ data class AnimeMedia(
     val notes: String?,
     val isPrivate: Boolean,
     val updatedAt: Long?,
-    val hasEnglishDubCast: Boolean = false
+    val hasEnglishDubCast: Boolean = false,
+    val relationType: String? = null
 ) {
     val isReleasing: Boolean get() = status.equals("RELEASING", ignoreCase = true)
 
@@ -668,10 +669,12 @@ object AniListClient {
         val relEdges = media.optJSONObject("relations")?.optJSONArray("edges")
         if (relEdges != null) {
             for (i in 0 until relEdges.length()) {
-                val node = relEdges.getJSONObject(i).optJSONObject("node") ?: continue
+                val edgeObj = relEdges.getJSONObject(i)
+                val relType = edgeObj.optNullableString("relationType")
+                val node = edgeObj.optJSONObject("node") ?: continue
                 val id = node.optInt("id")
                 if (!isMangaOrNovel(node) && id > 0 && id != mediaId && seen.add(id)) {
-                    results.add(mapMedia(node))
+                    results.add(mapMedia(node).copy(relationType = relType))
                 }
             }
         }
