@@ -389,7 +389,7 @@ class TorrentStreamService : Service() {
             }
             for (p in (lastPiece - 1).coerceAtLeast(firstPiece)..lastPiece) {
                 if (p in 0 until totalPieces) {
-                    handle.piecePriority(p, Priority.SEVEN)
+                    handle.piecePriority(p, Priority.TOP_PRIORITY)
                     handle.setPieceDeadline(p, 2500)
                 }
             }
