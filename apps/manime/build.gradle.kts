@@ -9,7 +9,7 @@ android {
     namespace = "io.maru.manime"
 
     defaultConfig {
-        applicationId = "io.maru.manime"
+        applicationId = "io.maru.nanamianime"
         versionCode = System.getenv("NANAMI_ANIME_VERSION_CODE")?.toIntOrNull() ?: 2
         versionName = System.getenv("NANAMI_ANIME_VERSION_NAME") ?: "2.0.0"
     }
