@@ -3,6 +3,9 @@
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.webkit.WebResourceRequest
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -30,6 +33,9 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
@@ -85,7 +91,7 @@ class MainActivity : ComponentActivity() {
                 params["access_token"]
             } else null
 
-            val finalToken = token ?: code
+            val finalToken = token
             if (!finalToken.isNullOrBlank()) {
                 val prefs = MAnimePrefs(applicationContext)
                 lifecycleScope.launch {
@@ -95,6 +101,19 @@ class MainActivity : ComponentActivity() {
                         prefs.setAnilistUsername(user.name)
                         if (user.avatarUrl != null) prefs.setAnilistAvatar(user.avatarUrl)
                     } catch (_: Exception) {}
+                }
+            } else if (!code.isNullOrBlank()) {
+                val prefs = MAnimePrefs(applicationContext)
+                lifecycleScope.launch {
+                    val exchanged = AniListClient.exchangeAuthCode(code)
+                    if (!exchanged.isNullOrBlank()) {
+                        prefs.setAnilistToken(exchanged)
+                        try {
+                            val user = AniListClient.getViewer(exchanged)
+                            prefs.setAnilistUsername(user.name)
+                            if (user.avatarUrl != null) prefs.setAnilistAvatar(user.avatarUrl)
+                        } catch (_: Exception) {}
+                    }
                 }
             }
         }
@@ -123,6 +142,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
     var selectedScreen by remember { mutableStateOf(NavigationScreen.DASHBOARD) }
     var selectedAnimeDetail by remember { mutableStateOf<AnimeMedia?>(null) }
     var selectedUserProfile by remember { mutableStateOf<String?>(null) }
+    var showAnilistAuthDialog by remember { mutableStateOf(false) }
 
     // User library list disk cache for 0ms instant startup
     val cacheFile = remember { File(context.filesDir, "cached_user_lists.json") }
@@ -251,13 +271,16 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                             }
                         }
                         "Trending Now" -> AniListClient.getTrending(30)
+                        "Slice of Life" -> AniListClient.browseCategory(genre = "Slice of Life", perPage = 30)
                         "Romance & CGDCT" -> AniListClient.browseCategory(genre = "Romance", tag = "Cute Girls Doing Cute Things", perPage = 30)
                         "Action & Shounen" -> AniListClient.browseCategory(genre = "Action", perPage = 30)
                         "Sci-Fi & Cyberpunk" -> AniListClient.browseCategory(genre = "Sci-Fi", tag = "Cyberpunk", perPage = 30)
                         "Music & Idols" -> AniListClient.browseCategory(genre = "Music", tag = "Idol", perPage = 30)
+                        "Fantasy" -> AniListClient.browseCategory(genre = "Fantasy", perPage = 30)
+                        "Comedy" -> AniListClient.browseCategory(genre = "Comedy", perPage = 30)
                         "Dubbed Only" -> {
                             val trending = AniListClient.getTrending(50)
-                            trending.filter { m -> m.externalLinks.any { it.isEnglishDub } }
+                            trending.filter { m -> m.hasEnglishDub }
                         }
                         else -> AniListClient.getTrending(30)
                     }
@@ -345,52 +368,28 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                                 }
                             },
                             actions = {
-                                // Quick Audio Mode Indicator Pill (SUB / DUB)
-                                Surface(
-                                    onClick = {
-                                        val nextMode = if (preferredAudio == "SUB") "DUB" else "SUB"
-                                        scope.launch { prefs.setPreferredAudio(nextMode) }
-                                    },
-                                    shape = RoundedCornerShape(4.dp),
-                                    color = CrunchyCardBg,
-                                    border = BorderStroke(1.dp, CrunchyOrange),
-                                    modifier = Modifier.padding(end = 8.dp)
-                                ) {
-                                    Text(
-                                        text = if (preferredAudio == "DUB") "DUB" else "SUB",
-                                        fontSize = 10.5.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = CrunchyOrange,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                    )
-                                }
-
-                                IconButton(
-                                    onClick = {
-                                        selectedAnimeDetail = null
-                                        selectedUserProfile = null
-                                        selectedScreen = NavigationScreen.SEARCH
-                                    }
-                                ) {
-                                    Icon(Icons.Default.Search, contentDescription = "Search", tint = Color.White)
-                                }
-
                                 Surface(
                                     onClick = {
                                         selectedAnimeDetail = null
                                         selectedUserProfile = null
                                         selectedScreen = NavigationScreen.SETTINGS
                                     },
-                                    shape = RoundedCornerShape(4.dp),
+                                    shape = RoundedCornerShape(6.dp),
                                     color = CrunchyCardBg,
                                     border = BorderStroke(1.dp, CrunchyBorder),
-                                    modifier = Modifier.padding(end = 12.dp)
+                                    modifier = Modifier.padding(end = 14.dp)
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
+                                        Text(
+                                            text = if (preferredAudio == "DUB") "DUB" else "SUB",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = CrunchyOrange
+                                        )
                                         if (effectiveUser?.avatarUrl != null) {
                                             AsyncImage(
                                                 model = effectiveUser?.avatarUrl,
@@ -477,123 +476,230 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                     .fillMaxSize()
                     .padding(paddingValues)
             ) {
-                if (selectedAnimeDetail != null) {
-                    AnimeDetailScreen(
-                        media = selectedAnimeDetail!!,
-                        anilistToken = anilistToken,
-                        prefs = prefs,
-                        onBack = { selectedAnimeDetail = null },
-                        onMediaUpdated = { updated ->
-                            selectedAnimeDetail = updated
-                            refreshProfile()
-                        },
-                        onUserClick = { userClicked ->
-                            selectedUserProfile = userClicked
-                        }
-                    )
-                } else if (selectedUserProfile != null) {
-                    UserProfileScreen(
-                        username = selectedUserProfile!!,
-                        anilistToken = anilistToken,
-                        onBack = { selectedUserProfile = null },
-                        onAnimeClick = { selectedAnimeDetail = it },
-                        onUserClick = { newProfile -> selectedUserProfile = newProfile }
-                    )
-                } else {
-                    AnimatedContent(
-                        targetState = selectedScreen,
-                        transitionSpec = {
-                            val enter = fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing))
-                            val exit = fadeOut(animationSpec = tween(140, easing = FastOutLinearInEasing))
-                            enter togetherWith exit
-                        },
-                        label = "CrunchyMainScreenTransition"
-                    ) { screen ->
-                        when (screen) {
-                            NavigationScreen.DASHBOARD -> DashboardScreen(
-                                user = effectiveUser,
-                                anilistToken = anilistToken,
-                                watchingList = watchingList,
-                                trendingList = trendingList,
-                                activitiesList = activitiesList,
-                                isLoading = isDashboardLoading,
-                                onRefresh = refreshDashboard,
-                                onPostCreated = { newAct ->
-                                    activitiesList = listOf(newAct) + activitiesList
-                                },
-                                onAnimeClick = { selectedAnimeDetail = it },
-                                onUserClick = { selectedUserProfile = it }
-                            )
-                            NavigationScreen.PROFILE -> ProfileScreen(
-                                user = effectiveUser,
-                                allLists = userAnimeLists,
-                                watchingCount = watchingList.size,
-                                completedCount = completedCount,
-                                planningCount = planningCount,
+                val navStateKey = when {
+                    selectedAnimeDetail != null -> "detail_${selectedAnimeDetail!!.mediaId}"
+                    selectedUserProfile != null -> "user_$selectedUserProfile"
+                    else -> "tab_${selectedScreen.name}"
+                }
+
+                AnimatedContent(
+                    targetState = navStateKey,
+                    transitionSpec = {
+                        val enter = fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)) +
+                                slideInVertically(initialOffsetY = { it / 24 }, animationSpec = tween(220, easing = FastOutSlowInEasing))
+                        val exit = fadeOut(animationSpec = tween(150, easing = FastOutLinearInEasing))
+                        enter togetherWith exit
+                    },
+                    label = "CrunchyRootTransition"
+                ) { stateKey ->
+                    when {
+                        stateKey.startsWith("detail_") && selectedAnimeDetail != null -> {
+                            AnimeDetailScreen(
+                                media = selectedAnimeDetail!!,
                                 anilistToken = anilistToken,
                                 prefs = prefs,
-                                isLoading = isDashboardLoading,
-                                onLoginClick = {
-                                    val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=22736&response_type=token"
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
-                                    context.startActivity(intent)
+                                onBack = { selectedAnimeDetail = null },
+                                onMediaUpdated = { updated ->
+                                    selectedAnimeDetail = updated
+                                    refreshProfile()
                                 },
-                                onLogoutClick = {
-                                    scope.launch {
-                                        prefs.setAnilistToken("")
-                                        prefs.setAnilistUsername("")
-                                        prefs.setAnilistAvatar("")
-                                    }
-                                },
-                                onAnimeClick = { selectedAnimeDetail = it }
-                            )
-                            NavigationScreen.RECOMMENDATIONS -> RecommendationsScreen(
-                                recommendations = recommendations,
-                                isLoading = isRecLoading,
-                                isLoggedIn = anilistToken.isNotBlank(),
-                                username = effectiveUser?.name ?: "PpolHi",
-                                selectedCategory = selectedRecCategory,
-                                onSelectCategory = fetchRecommendations,
-                                onLoginClick = {
-                                    val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=22736&response_type=token"
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
-                                    context.startActivity(intent)
-                                },
-                                onAnimeClick = { selectedAnimeDetail = it }
-                            )
-                            NavigationScreen.SEARCH -> SearchScreen(
-                                searchResults = searchResults,
-                                isSearching = isSearching,
-                                onSearch = performSearch,
-                                onAnimeClick = { selectedAnimeDetail = it },
-                                onUserClick = { selectedUserProfile = it }
-                            )
-                            NavigationScreen.SETTINGS -> SettingsScreen(
-                                user = effectiveUser,
-                                anilistUsername = anilistUsername,
-                                isLoggedIn = anilistToken.isNotBlank(),
-                                preferredAudio = preferredAudio,
-                                onSelectPreferredAudio = { scope.launch { prefs.setPreferredAudio(it) } },
-                                preferredQuality = preferredQuality,
-                                onSelectPreferredQuality = { scope.launch { prefs.setPreferredQuality(it) } },
-                                autoSkipIntro = autoSkipIntro,
-                                onToggleAutoSkipIntro = { scope.launch { prefs.setAutoSkipIntro(it) } },
-                                reportProgress = reportProgress,
-                                onToggleReportProgress = { scope.launch { prefs.setReportProgress(it) } },
-                                rememberPosition = rememberPosition,
-                                onToggleRememberPosition = { scope.launch { prefs.setRememberPosition(it) } },
-                                onLoginClick = {
-                                    val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=22736&response_type=token"
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
-                                    context.startActivity(intent)
-                                },
-                                onLogoutClick = {
-                                    scope.launch {
-                                        prefs.setAnilistToken("")
-                                        prefs.setAnilistUsername("")
-                                        prefs.setAnilistAvatar("")
-                                    }
+                                onUserClick = { userClicked ->
+                                    selectedUserProfile = userClicked
                                 }
+                            )
+                        }
+                        stateKey.startsWith("user_") && selectedUserProfile != null -> {
+                            UserProfileScreen(
+                                username = selectedUserProfile!!,
+                                anilistToken = anilistToken,
+                                onBack = { selectedUserProfile = null },
+                                onAnimeClick = { selectedAnimeDetail = it },
+                                onUserClick = { newProfile -> selectedUserProfile = newProfile }
+                            )
+                        }
+                        else -> {
+                            when (selectedScreen) {
+                                NavigationScreen.DASHBOARD -> DashboardScreen(
+                                    user = effectiveUser,
+                                    anilistToken = anilistToken,
+                                    watchingList = watchingList,
+                                    trendingList = trendingList,
+                                    activitiesList = activitiesList,
+                                    isLoading = isDashboardLoading,
+                                    onRefresh = refreshDashboard,
+                                    onPostCreated = { newAct ->
+                                        activitiesList = listOf(newAct) + activitiesList
+                                    },
+                                    onAnimeClick = { selectedAnimeDetail = it },
+                                    onUserClick = { selectedUserProfile = it }
+                                )
+                                NavigationScreen.PROFILE -> ProfileScreen(
+                                    user = effectiveUser,
+                                    allLists = userAnimeLists,
+                                    watchingCount = watchingList.size,
+                                    completedCount = completedCount,
+                                    planningCount = planningCount,
+                                    anilistToken = anilistToken,
+                                    prefs = prefs,
+                                    isLoading = isDashboardLoading,
+                                    onLoginClick = { showAnilistAuthDialog = true },
+                                    onLogoutClick = {
+                                        scope.launch {
+                                            prefs.setAnilistToken("")
+                                            prefs.setAnilistUsername("")
+                                            prefs.setAnilistAvatar("")
+                                        }
+                                    },
+                                    onAnimeClick = { selectedAnimeDetail = it }
+                                )
+                                NavigationScreen.RECOMMENDATIONS -> RecommendationsScreen(
+                                    recommendations = recommendations,
+                                    isLoading = isRecLoading,
+                                    isLoggedIn = anilistToken.isNotBlank(),
+                                    username = effectiveUser?.name ?: "PpolHi",
+                                    selectedCategory = selectedRecCategory,
+                                    onSelectCategory = fetchRecommendations,
+                                    onLoginClick = { showAnilistAuthDialog = true },
+                                    onAnimeClick = { selectedAnimeDetail = it }
+                                )
+                                NavigationScreen.SEARCH -> SearchScreen(
+                                    searchResults = searchResults,
+                                    isSearching = isSearching,
+                                    onSearch = performSearch,
+                                    onAnimeClick = { selectedAnimeDetail = it },
+                                    onUserClick = { selectedUserProfile = it }
+                                )
+                                NavigationScreen.SETTINGS -> SettingsScreen(
+                                    user = effectiveUser,
+                                    anilistUsername = anilistUsername,
+                                    isLoggedIn = anilistToken.isNotBlank(),
+                                    preferredAudio = preferredAudio,
+                                    onSelectPreferredAudio = { scope.launch { prefs.setPreferredAudio(it) } },
+                                    preferredQuality = preferredQuality,
+                                    onSelectPreferredQuality = { scope.launch { prefs.setPreferredQuality(it) } },
+                                    autoSkipIntro = autoSkipIntro,
+                                    onToggleAutoSkipIntro = { scope.launch { prefs.setAutoSkipIntro(it) } },
+                                    reportProgress = reportProgress,
+                                    onToggleReportProgress = { scope.launch { prefs.setReportProgress(it) } },
+                                    rememberPosition = rememberPosition,
+                                    onToggleRememberPosition = { scope.launch { prefs.setRememberPosition(it) } },
+                                    onLoginClick = { showAnilistAuthDialog = true },
+                                    onLogoutClick = {
+                                        scope.launch {
+                                            prefs.setAnilistToken("")
+                                            prefs.setAnilistUsername("")
+                                            prefs.setAnilistAvatar("")
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // In-App AniList OAuth Dialog using Master Client ID 52524 (same as IsThisDubbed)
+        if (showAnilistAuthDialog) {
+            val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=${AniListClient.MASTER_CLIENT_ID}&redirect_uri=${Uri.encode(AniListClient.REDIRECT_URI)}&response_type=code"
+            var isExchanging by remember { mutableStateOf(false) }
+
+            Dialog(
+                onDismissRequest = { if (!isExchanging) showAnilistAuthDialog = false },
+                properties = DialogProperties(usePlatformDefaultWidth = false)
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = CrunchyBgBlack
+                ) {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(CrunchySurface)
+                                .statusBarsPadding()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Connect AniList (Client 52524)",
+                                color = Color.White,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 15.sp
+                            )
+                            IconButton(onClick = { showAnilistAuthDialog = false }) {
+                                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                            }
+                        }
+
+                        if (isExchanging) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    CircularProgressIndicator(color = CrunchyOrange)
+                                    Text("Connecting your AniList account...", color = Color.White, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        } else {
+                            AndroidView(
+                                factory = { ctx ->
+                                    WebView(ctx).apply {
+                                        settings.javaScriptEnabled = true
+                                        settings.domStorageEnabled = true
+                                        webViewClient = object : WebViewClient() {
+                                            override fun shouldOverrideUrlLoading(
+                                                view: WebView?,
+                                                request: WebResourceRequest?
+                                            ): Boolean {
+                                                val urlStr = request?.url?.toString() ?: return false
+                                                if (urlStr.startsWith(AniListClient.REDIRECT_URI) || urlStr.startsWith("manime://auth")) {
+                                                    val parsed = Uri.parse(urlStr)
+                                                    val code = parsed.getQueryParameter("code")
+                                                    val hashToken = parsed.fragment?.let { frag ->
+                                                        Regex("access_token=([^&]+)").find(frag)?.groupValues?.getOrNull(1)
+                                                    }
+                                                    if (!hashToken.isNullOrBlank()) {
+                                                        isExchanging = true
+                                                        scope.launch {
+                                                            prefs.setAnilistToken(hashToken)
+                                                            try {
+                                                                val viewer = AniListClient.getViewer(hashToken)
+                                                                prefs.setAnilistUsername(viewer.name)
+                                                                if (viewer.avatarUrl != null) prefs.setAnilistAvatar(viewer.avatarUrl)
+                                                            } catch (_: Exception) {}
+                                                            showAnilistAuthDialog = false
+                                                        }
+                                                        return true
+                                                    } else if (!code.isNullOrBlank()) {
+                                                        isExchanging = true
+                                                        scope.launch {
+                                                            val exchanged = AniListClient.exchangeAuthCode(code)
+                                                            if (!exchanged.isNullOrBlank()) {
+                                                                prefs.setAnilistToken(exchanged)
+                                                                try {
+                                                                    val viewer = AniListClient.getViewer(exchanged)
+                                                                    prefs.setAnilistUsername(viewer.name)
+                                                                    if (viewer.avatarUrl != null) prefs.setAnilistAvatar(viewer.avatarUrl)
+                                                                    Toast.makeText(context, "Logged in as @${viewer.name}!", Toast.LENGTH_SHORT).show()
+                                                                } catch (_: Exception) {}
+                                                            } else {
+                                                                Toast.makeText(context, "AniList code exchange failed", Toast.LENGTH_SHORT).show()
+                                                            }
+                                                            showAnilistAuthDialog = false
+                                                        }
+                                                        return true
+                                                    }
+                                                }
+                                                return false
+                                            }
+                                        }
+                                        loadUrl(authUrl)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxSize()
                             )
                         }
                     }

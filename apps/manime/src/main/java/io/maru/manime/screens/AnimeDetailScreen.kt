@@ -164,9 +164,15 @@ fun AnimeDetailScreen(
     var selectedTabIndex by remember { mutableIntStateOf(0) }
     val currentTabName = availableTabs.getOrElse(selectedTabIndex) { "Episodes" }
 
-    // Accurate English Dub validation: Must have English VA in Cast OR explicit English Dub link
-    val hasEnglishDub = remember(castList, currentMedia.externalLinks) {
-        castList.any { it.englishVa != null } || currentMedia.externalLinks.any { it.isEnglishDub }
+    // Accurate English Dub validation matching IsThisDubbed: Must have English VA in Cast OR explicit English Dub link
+    val hasEnglishDub = remember(castList, currentMedia) {
+        currentMedia.hasEnglishDub || castList.any { it.englishVa != null }
+    }
+
+    LaunchedEffect(hasEnglishDub) {
+        if (!hasEnglishDub && selectedAudioMode == "DUB") {
+            selectedAudioMode = "SUB"
+        }
     }
 
     fun openVoiceActorWorks(va: VoiceActor) {
@@ -252,7 +258,8 @@ fun AnimeDetailScreen(
             media = currentMedia,
             episodeNum = ep.episodeNumber,
             episodeTitle = ep.title,
-            initialAudioMode = selectedAudioMode,
+            initialAudioMode = if (hasEnglishDub) selectedAudioMode else "SUB",
+            hasEnglishDub = hasEnglishDub,
             prefs = prefs,
             onEpisodeWatched = { watchedNum ->
                 if (watchedNum > currentMedia.progress) {
@@ -585,52 +592,79 @@ fun AnimeDetailScreen(
                         )
                     }
 
-                    // Audio Language Selector: [SUBTITLED (JP)] [ENGLISH DUB]
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "AUDIO:",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = MaruTextMuted,
-                            letterSpacing = 0.8.sp
-                        )
-                        listOf("SUB" to "Japanese (Sub)", "DUB" to "English Dub").forEach { (mode, label) ->
-                            val isSelected = selectedAudioMode == mode
-                            Surface(
-                                onClick = {
-                                    selectedAudioMode = mode
-                                    scope.launch { prefs.setPreferredAudio(mode) }
-                                },
-                                shape = RoundedCornerShape(4.dp),
-                                color = if (isSelected) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
-                                border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else CrunchyBorder),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-                                    horizontalArrangement = Arrangement.Center,
-                                    verticalAlignment = Alignment.CenterVertically
+                    // Audio Language Selector: Smartly reflects whether an English Dub actually exists!
+                    if (hasEnglishDub) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "AUDIO:",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaruTextMuted,
+                                letterSpacing = 0.8.sp
+                            )
+                            listOf("SUB" to "Japanese (Sub)", "DUB" to "English Dub").forEach { (mode, label) ->
+                                val isSelected = selectedAudioMode == mode
+                                Surface(
+                                    onClick = {
+                                        selectedAudioMode = mode
+                                        scope.launch { prefs.setPreferredAudio(mode) }
+                                    },
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = if (isSelected) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
+                                    border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else CrunchyBorder),
+                                    modifier = Modifier.weight(1f)
                                 ) {
-                                    if (isSelected) {
-                                        Icon(
-                                            Icons.Default.Check,
-                                            contentDescription = null,
-                                            tint = CrunchyOrange,
-                                            modifier = Modifier.size(14.dp)
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                        horizontalArrangement = Arrangement.Center,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        if (isSelected) {
+                                            Icon(
+                                                Icons.Default.Check,
+                                                contentDescription = null,
+                                                tint = CrunchyOrange,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                        }
+                                        Text(
+                                            text = label,
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isSelected) CrunchyOrange else MaruTextStrong
                                         )
-                                        Spacer(modifier = Modifier.width(4.dp))
                                     }
-                                    Text(
-                                        text = label,
-                                        fontSize = 11.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSelected) CrunchyOrange else MaruTextStrong
-                                    )
                                 }
+                            }
+                        }
+                    } else {
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = CrunchyCardBg,
+                            border = BorderStroke(1.dp, CrunchyBorder),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "AUDIO: Japanese (Subtitled)",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaruTextStrong
+                                )
+                                Text(
+                                    text = "Subtitled Only (No English Dub)",
+                                    fontSize = 10.5.sp,
+                                    color = MaruTextMuted
+                                )
                             }
                         }
                     }
@@ -1029,11 +1063,18 @@ fun AnimeDetailScreen(
                                         color = MaruTextMuted
                                     )
                                     Text(
-                                        text = if (selectedAudioMode == "DUB") "Sub | Dub" else "Subtitled",
+                                        text = if (hasEnglishDub) "Sub | Dub" else "Subtitled",
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Medium,
                                         color = CrunchyTeal
                                     )
+                                    if (!streamEp.airDate.isNullOrBlank()) {
+                                        Text(
+                                            text = "• ${streamEp.airDate}",
+                                            fontSize = 9.5.sp,
+                                            color = MaruTextMuted
+                                        )
+                                    }
                                 }
 
                                 Text(
@@ -1041,9 +1082,19 @@ fun AnimeDetailScreen(
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = MaruTextStrong,
-                                    maxLines = 2,
+                                    maxLines = 1,
                                     lineHeight = 16.sp
                                 )
+
+                                if (!streamEp.overview.isNullOrBlank()) {
+                                    Text(
+                                        text = streamEp.overview,
+                                        fontSize = 11.sp,
+                                        color = MaruTextMuted,
+                                        maxLines = 2,
+                                        lineHeight = 14.sp
+                                    )
+                                }
 
                                 if (offlineEntry != null) {
                                     Text(

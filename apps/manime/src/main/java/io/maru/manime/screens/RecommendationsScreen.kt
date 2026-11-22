@@ -36,13 +36,12 @@ fun RecommendationsScreen(
 
     val categories = listOf(
         "For You",
-        "CGDCT",
-        "Idol",
-        "Music",
+        "Trending Now",
+        "Romance & CGDCT",
+        "Music & Idols",
         "Slice of Life",
-        "Romance",
-        "Sci-Fi",
-        "Action",
+        "Action & Shounen",
+        "Sci-Fi & Cyberpunk",
         "Fantasy",
         "Comedy"
     )
@@ -50,9 +49,7 @@ fun RecommendationsScreen(
     val displayedRecs = remember(recommendations, dubbedOnlyFilter) {
         if (!dubbedOnlyFilter) recommendations
         else {
-            val filtered = recommendations.filter { media ->
-                media.externalLinks.any { it.isEnglishDub }
-            }
+            val filtered = recommendations.filter { media -> media.hasEnglishDub }
             if (filtered.isNotEmpty()) filtered else recommendations
         }
     }

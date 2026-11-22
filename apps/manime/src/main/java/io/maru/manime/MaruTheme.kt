@@ -152,19 +152,18 @@ fun WatchingCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val hasDub = media.externalLinks.any { it.isEnglishDub }
-    val subOrDubLabel = if (hasDub) "Sub | Dub" else "Subtitled"
+    val subOrDubLabel = if (media.hasEnglishDub) "Sub | Dub" else "Subtitled"
     val totalEps = media.latestAiredEpisode ?: media.episodes ?: 12
-    val progressFrac = if (totalEps > 0) (media.progress.toFloat() / totalEps.toFloat()).coerceIn(0.04f, 1f) else 0.1f
+    val progressFrac = if (totalEps > 0) (media.progress.toFloat() / totalEps.toFloat()).coerceIn(0.05f, 1f) else 0.1f
 
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(4.dp),
+        shape = RoundedCornerShape(6.dp),
         color = CrunchyCardBg,
         border = BorderStroke(1.dp, CrunchyBorder),
         modifier = modifier
-            .width(150.dp)
-            .height(225.dp)
+            .width(156.dp)
+            .height(234.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             Box(
@@ -273,17 +272,16 @@ fun PosterCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val hasDub = media.externalLinks.any { it.isEnglishDub }
-    val subOrDubLabel = if (hasDub) "Sub | Dub" else "Subtitled"
+    val subOrDubLabel = if (media.hasEnglishDub) "Sub | Dub" else "Subtitled"
 
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(4.dp),
+        shape = RoundedCornerShape(6.dp),
         color = CrunchyCardBg,
         border = BorderStroke(1.dp, CrunchyBorder),
         modifier = modifier
             .fillMaxWidth()
-            .height(242.dp)
+            .height(248.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             Box(

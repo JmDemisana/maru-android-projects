@@ -23,6 +23,7 @@ data class StremioStreamResult(
     val url: String?,
     val infoHash: String?,
     val fileIdx: Int? = null,
+    val sources: List<String> = emptyList(),
     val behaviorHints: Map<String, Any> = emptyMap()
 )
 
@@ -35,9 +36,16 @@ class StremioAddonClient(
 ) {
     private val cleanBase = baseUrl.trimEnd('/')
 
+    companion object {
+        const val BROWSER_UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+    }
+
     suspend fun getManifest(): StremioManifest = withContext(Dispatchers.IO) {
         val url = if (cleanBase.endsWith("/manifest.json")) cleanBase else "$cleanBase/manifest.json"
-        val req = Request.Builder().url(url).build()
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", BROWSER_UA)
+            .build()
         val resp = client.newCall(req).execute()
         val body = resp.body?.string() ?: throw Exception("Empty manifest response")
         val json = JSONObject(body)
@@ -70,11 +78,13 @@ class StremioAddonClient(
     }
 
     suspend fun getStreams(type: String, id: String): List<StremioStreamResult> = withContext(Dispatchers.IO) {
-        // Stream URL endpoint: /stream/{type}/{id}.json
         val root = if (cleanBase.endsWith("/manifest.json")) cleanBase.substringBeforeLast("/manifest.json") else cleanBase
         val url = "$root/stream/$type/$id.json"
         try {
-            val req = Request.Builder().url(url).build()
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", BROWSER_UA)
+                .build()
             val resp = client.newCall(req).execute()
             val body = resp.body?.string() ?: return@withContext emptyList()
             val json = JSONObject(body)
@@ -87,7 +97,18 @@ class StremioAddonClient(
                 val infoHash = s.optString("infoHash").ifEmpty { null }
                 val title = s.optString("title").ifEmpty { null }
                 val name = s.optString("name").ifEmpty { null }
-                val fileIdx = if (s.has("fileIdx")) s.getInt("fileIdx") else null
+                val fileIdx = if (s.has("fileIdx") && !s.isNull("fileIdx")) s.optInt("fileIdx", -1).takeIf { it >= 0 } else null
+
+                val sourcesList = mutableListOf<String>()
+                val rawSources = s.optJSONArray("sources")
+                if (rawSources != null) {
+                    for (j in 0 until rawSources.length()) {
+                        val src = rawSources.optString(j, "")
+                        if (src.startsWith("tracker:")) {
+                            sourcesList.add(src.removePrefix("tracker:"))
+                        }
+                    }
+                }
 
                 if (streamUrl != null || infoHash != null) {
                     results.add(
@@ -96,7 +117,8 @@ class StremioAddonClient(
                             name = name,
                             url = streamUrl,
                             infoHash = infoHash,
-                            fileIdx = fileIdx
+                            fileIdx = fileIdx,
+                            sources = sourcesList
                         )
                     )
                 }

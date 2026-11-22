@@ -1,10 +1,16 @@
 package io.maru.manime.player
 
 import android.app.Activity
+import android.app.PictureInPictureParams
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import android.graphics.Typeface
 import android.net.Uri
+import android.os.Build
+import android.util.Rational
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.foundation.BorderStroke
@@ -31,20 +37,25 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.util.Consumer
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import io.maru.manime.*
 import io.maru.manime.extensions.AniSkipInterval
 import io.maru.manime.extensions.CrunchyrollStreamEngine
+import io.maru.manime.extensions.ExternalSubtitleItem
 import io.maru.manime.extensions.StreamLink
 import io.maru.manime.torrent.TorrentStreamService
 import kotlinx.coroutines.delay
@@ -59,6 +70,7 @@ fun PlayerScreen(
     episodeNum: Int,
     episodeTitle: String,
     initialAudioMode: String, // "SUB" | "DUB"
+    hasEnglishDub: Boolean = true,
     prefs: MAnimePrefs,
     onEpisodeWatched: (Int) -> Unit = {},
     onSwitchEpisode: (Int) -> Unit = {},
@@ -67,7 +79,9 @@ fun PlayerScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var activeAudioMode by remember(initialAudioMode) { mutableStateOf(initialAudioMode) }
+    var activeAudioMode by remember(initialAudioMode, hasEnglishDub) {
+        mutableStateOf(if (!hasEnglishDub) "SUB" else initialAudioMode)
+    }
     var activeQuality by remember { mutableStateOf("1080p") }
     var rankedStreams by remember { mutableStateOf<List<StreamLink>>(emptyList()) }
     var currentStreamIndex by remember { mutableIntStateOf(0) }
@@ -75,12 +89,18 @@ fun PlayerScreen(
     var resolveError by remember { mutableStateOf<String?>(null) }
     var isOfflinePlayback by remember { mutableStateOf(false) }
 
+    // External OpenSubtitles tracks (ASS / VTT / SRT)
+    var openSubtitlesList by remember { mutableStateOf<List<ExternalSubtitleItem>>(emptyList()) }
+    var selectedOpenSub by remember { mutableStateOf<ExternalSubtitleItem?>(null) }
+
     val serviceStatus by TorrentStreamService.streamStatus.collectAsState()
 
     var isPlaying by remember { mutableStateOf(true) }
+    var isPlayerBuffering by remember { mutableStateOf(false) }
     var currentPosition by remember { mutableLongStateOf(0L) }
     var totalDuration by remember { mutableLongStateOf(0L) }
     var showControls by remember { mutableStateOf(true) }
+    var isInPipMode by remember { mutableStateOf(false) }
     var hasScrobbled85Percent by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
     var hasRestoredPosition by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
 
@@ -95,20 +115,84 @@ fun PlayerScreen(
     val autoSkipIntro by prefs.autoSkipIntro.collectAsState(initial = false)
 
     val exoPlayer = remember {
-        ExoPlayer.Builder(context).build().apply {
+        val renderersFactory = DefaultRenderersFactory(context)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            .setEnableDecoderFallback(true)
+        ExoPlayer.Builder(context, renderersFactory).build().apply {
             playWhenReady = true
         }
     }
 
-    // Load AniSkip OP/ED timestamps
-    LaunchedEffect(media.mediaId, episodeNum) {
-        try {
-            val mappings = CrunchyrollStreamEngine.getAnimeMappings(media.mediaId, media.title)
-            skipIntervals = CrunchyrollStreamEngine.getAniSkipIntervals(mappings.malId, episodeNum)
-        } catch (_: Exception) {}
+    // Helper to build a MediaItem with all discovered OpenSubtitles side-loaded
+    // so Media3's SubtitleView renders positioned ASS/SSA/VTT/SRT subtitles seamlessly.
+    fun buildMediaItemWithSubtitles(videoUri: Uri, mimeType: String?, externalSubs: List<ExternalSubtitleItem>): MediaItem {
+        val subConfigs = externalSubs.mapIndexed { idx, sub ->
+            val subMime = when (sub.format) {
+                "ASS" -> MimeTypes.TEXT_SSA
+                "VTT" -> MimeTypes.TEXT_VTT
+                else -> MimeTypes.APPLICATION_SUBRIP
+            }
+            MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
+                .setMimeType(subMime)
+                .setLanguage(sub.langCode)
+                .setLabel(sub.langName)
+                .setId("ext_sub_${sub.id}_$idx")
+                .build()
+        }
+        val builder = MediaItem.Builder().setUri(videoUri)
+        if (mimeType != null) builder.setMimeType(mimeType)
+        if (subConfigs.isNotEmpty()) builder.setSubtitleConfigurations(subConfigs)
+        return builder.build()
     }
 
-    // Helper to trigger playback of a specific StreamLink
+    // Helper to trigger Picture-in-Picture mode
+    fun enterPip() {
+        val activity = context as? Activity ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val params = PictureInPictureParams.Builder()
+                    .setAspectRatio(Rational(16, 9))
+                    .build()
+                activity.enterPictureInPictureMode(params)
+            } catch (_: Exception) {}
+        }
+    }
+
+    // Listen to Picture-in-Picture mode changes so controls auto-hide in PiP window
+    DisposableEffect(context) {
+        val compActivity = context as? ComponentActivity
+        val pipConsumer = Consumer<androidx.core.app.PictureInPictureModeChangedInfo> { info ->
+            isInPipMode = info.isInPictureInPictureMode
+            if (info.isInPictureInPictureMode) {
+                showControls = false
+                showSettingsSheet = false
+            }
+        }
+        compActivity?.addOnPictureInPictureModeChangedListener(pipConsumer)
+        onDispose {
+            compActivity?.removeOnPictureInPictureModeChangedListener(pipConsumer)
+        }
+    }
+
+    // Load AniSkip OP/ED timestamps & OpenSubtitles in background
+    LaunchedEffect(media.mediaId, episodeNum) {
+        launch {
+            try {
+                val mappings = CrunchyrollStreamEngine.getAnimeMappings(media.mediaId, media.title)
+                skipIntervals = CrunchyrollStreamEngine.getAniSkipIntervals(mappings.malId, episodeNum)
+            } catch (_: Exception) {}
+        }
+        launch {
+            try {
+                openSubtitlesList = CrunchyrollStreamEngine.fetchOpenSubtitles(
+                    anilistId = media.mediaId,
+                    animeTitle = media.title,
+                    episodeNum = episodeNum
+                )
+            } catch (_: Exception) {}
+        }
+    }
+
     fun playStreamAtIndex(index: Int, streams: List<StreamLink>) {
         if (index !in streams.indices) {
             resolveError = "No working stream available for Episode $episodeNum."
@@ -128,7 +212,7 @@ fun PlayerScreen(
                 episodeNum = episodeNum
             )
         } else {
-            val item = MediaItem.fromUri(chosen.url)
+            val item = buildMediaItemWithSubtitles(Uri.parse(chosen.url), null, openSubtitlesList)
             exoPlayer.setMediaItem(item)
             exoPlayer.prepare()
             exoPlayer.playWhenReady = true
@@ -145,10 +229,7 @@ fun PlayerScreen(
             isOfflinePlayback = true
             isResolvingStreams = false
             val file = File(offlineEntry.vaultFilePath)
-            val item = MediaItem.Builder()
-                .setUri(Uri.fromFile(file))
-                .setMimeType(MimeTypes.APPLICATION_MATROSKA)
-                .build()
+            val item = buildMediaItemWithSubtitles(Uri.fromFile(file), MimeTypes.APPLICATION_MATROSKA, openSubtitlesList)
             exoPlayer.setMediaItem(item)
             exoPlayer.prepare()
             exoPlayer.playWhenReady = true
@@ -174,12 +255,11 @@ fun PlayerScreen(
         }
     }
 
-    // When TorrentStreamService reports ready with localhost URL, feed it into ExoPlayer
+    // Feed localhost HTTP Byte-Range stream into ExoPlayer as soon as pre-buffer finishes
     LaunchedEffect(serviceStatus.isReady, serviceStatus.streamUrl, serviceStatus.error) {
         if (!isOfflinePlayback) {
             val err = serviceStatus.error
             if (err != null) {
-                // Silent auto-failover to next ranked stream if available
                 if (currentStreamIndex + 1 < rankedStreams.size) {
                     playStreamAtIndex(currentStreamIndex + 1, rankedStreams)
                 } else {
@@ -188,10 +268,7 @@ fun PlayerScreen(
             } else if (serviceStatus.isReady && !serviceStatus.streamUrl.isNullOrBlank()) {
                 val url = serviceStatus.streamUrl!!
                 val mime = if (url.endsWith(".mp4")) MimeTypes.VIDEO_MP4 else MimeTypes.APPLICATION_MATROSKA
-                val item = MediaItem.Builder()
-                    .setUri(url)
-                    .setMimeType(mime)
-                    .build()
+                val item = buildMediaItemWithSubtitles(Uri.parse(url), mime, openSubtitlesList)
                 exoPlayer.setMediaItem(item)
                 exoPlayer.prepare()
                 exoPlayer.playWhenReady = true
@@ -199,7 +276,7 @@ fun PlayerScreen(
         }
     }
 
-    // Force landscape & immersive fullscreen
+    // Force landscape & immersive fullscreen + Auto-failover on ExoPlayer decode/container error
     DisposableEffect(Unit) {
         val activity = context as? Activity
         val originalOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -219,13 +296,20 @@ fun PlayerScreen(
             }
 
             override fun onPlaybackStateChanged(state: Int) {
+                isPlayerBuffering = (state == Player.STATE_BUFFERING)
                 if (state == Player.STATE_READY) {
                     totalDuration = exoPlayer.duration.coerceAtLeast(0L)
-
-                    // Automatically select preferred audio language track inside Dual-Audio MKV
                     applyPreferredAudioTrack(exoPlayer, activeAudioMode)
 
-                    // Restore saved timestamp once
+                    // Ensure subtitles are enabled by default in SUB mode (or if embedded ASS exists)
+                    if (activeAudioMode == "SUB") {
+                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                            .buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                            .setPreferredTextLanguage("en")
+                            .build()
+                    }
+
                     if (!hasRestoredPosition && rememberPosition) {
                         hasRestoredPosition = true
                         scope.launch {
@@ -237,6 +321,15 @@ fun PlayerScreen(
                     }
                 } else if (state == Player.STATE_ENDED) {
                     onEpisodeWatched(episodeNum)
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                // Automatic silent failover to next ranked stream if a stream has an unsupported codec (e.g. Dolby Vision)
+                if (!isOfflinePlayback && currentStreamIndex + 1 < rankedStreams.size) {
+                    playStreamAtIndex(currentStreamIndex + 1, rankedStreams)
+                } else {
+                    resolveError = "Playback error (${error.errorCodeName}). Tap Try Next Server."
                 }
             }
         }
@@ -324,7 +417,11 @@ fun PlayerScreen(
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
-            ) { showControls = !showControls }
+            ) {
+                if (!isInPipMode) {
+                    showControls = !showControls
+                }
+            }
     ) {
         AndroidView(
             factory = { ctx ->
@@ -335,45 +432,63 @@ fun PlayerScreen(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
+                    // Configure SubtitleView to preserve ASS/SSA positioned cues (\pos, \an1-9, signs, and styling)
+                    subtitleView?.apply {
+                        setApplyEmbeddedStyles(true)
+                        setApplyEmbeddedFontSizes(true)
+                        setBottomPaddingFraction(0.06f)
+                        setStyle(
+                            CaptionStyleCompat(
+                                android.graphics.Color.WHITE,
+                                android.graphics.Color.TRANSPARENT,
+                                android.graphics.Color.TRANSPARENT,
+                                CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                                android.graphics.Color.BLACK,
+                                Typeface.DEFAULT_BOLD
+                            )
+                        )
+                    }
                 }
             },
             modifier = Modifier.fillMaxSize()
         )
 
-        // Crunchyroll Buffering / Connecting Overlay (Zero technical jargon)
-        if (isLoadingOverlay && resolveError == null) {
+        // Crunchyroll Buffering / Connecting Overlay
+        if ((isLoadingOverlay || isPlayerBuffering) && resolveError == null && !isInPipMode) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0xAA0B0C0F)),
+                    .background(if (isLoadingOverlay) Color(0xBB0B0C0F) else Color(0x44000000)),
                 contentAlignment = Alignment.Center
             ) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     CircularProgressIndicator(
                         color = CrunchyOrange,
                         strokeWidth = 3.5.dp,
                         modifier = Modifier.size(48.dp)
                     )
-                    Text(
-                        text = if (isResolvingStreams) "Starting Episode $episodeNum..." else serviceStatus.statusMessage,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp
-                    )
-                    Text(
-                        text = "${media.title} • ${if (activeAudioMode == "DUB") "English Dub" else "Japanese (Subtitled)"}",
-                        color = MaruTextMuted,
-                        fontSize = 12.sp
-                    )
+                    if (isLoadingOverlay) {
+                        Text(
+                            text = if (isResolvingStreams) "Starting Episode $episodeNum..." else serviceStatus.statusMessage,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                        Text(
+                            text = "${media.title} • ${if (activeAudioMode == "DUB") "English Dub" else "Japanese (Subtitled)"}",
+                            color = MaruTextMuted,
+                            fontSize = 12.sp
+                        )
+                    }
                 }
             }
         }
 
-        // Clean Error Overlay with 1-Click Retry / Switch Audio
-        if (resolveError != null) {
+        // Clean Error Overlay with 1-Click Retry
+        if (resolveError != null && !isInPipMode) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -420,7 +535,7 @@ fun PlayerScreen(
 
         // Crunchyroll Floating "SKIP INTRO" / "SKIP ENDING" Button
         AnimatedVisibility(
-            visible = activeSkipInterval != null,
+            visible = activeSkipInterval != null && !isInPipMode,
             enter = fadeIn() + slideInHorizontally(initialOffsetX = { it / 2 }),
             exit = fadeOut(),
             modifier = Modifier
@@ -455,9 +570,9 @@ fun PlayerScreen(
             }
         }
 
-        // Custom Crunchyroll Overlay Controls
+        // Custom Crunchyroll Overlay Controls (hidden automatically when inside Picture-in-Picture window)
         AnimatedVisibility(
-            visible = showControls,
+            visible = showControls && !isInPipMode,
             enter = fadeIn(),
             exit = fadeOut()
         ) {
@@ -506,61 +621,55 @@ fun PlayerScreen(
                         )
                     }
 
-                    if (isOfflinePlayback) {
+                    // Instant SUB / DUB Toggle Pill (Only allows toggling to DUB if the anime actually has an English Dub!)
+                    if (hasEnglishDub) {
                         Surface(
-                            color = CrunchyTeal.copy(alpha = 0.2f),
-                            border = BorderStroke(1.dp, CrunchyTeal),
+                            onClick = {
+                                val newMode = if (activeAudioMode == "SUB") "DUB" else "SUB"
+                                activeAudioMode = newMode
+                                scope.launch { prefs.setPreferredAudio(newMode) }
+                                val switchedInternally = applyPreferredAudioTrack(exoPlayer, newMode)
+                                if (!switchedInternally && !isOfflinePlayback) {
+                                    isResolvingStreams = true
+                                }
+                            },
                             shape = RoundedCornerShape(4.dp),
-                            modifier = Modifier.padding(end = 10.dp)
+                            color = CrunchySurface,
+                            border = BorderStroke(1.dp, CrunchyOrange),
+                            modifier = Modifier.padding(end = 6.dp)
                         ) {
-                            Text(
-                                text = "OFFLINE VAULT",
-                                color = CrunchyTeal,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
-
-                    // Instant SUB / DUB Toggle Pill in Top Bar
-                    Surface(
-                        onClick = {
-                            val newMode = if (activeAudioMode == "SUB") "DUB" else "SUB"
-                            activeAudioMode = newMode
-                            scope.launch { prefs.setPreferredAudio(newMode) }
-                            // First check if current MKV already has the target language track
-                            val switchedInternally = applyPreferredAudioTrack(exoPlayer, newMode)
-                            if (!switchedInternally && !isOfflinePlayback) {
-                                // Otherwise re-resolve stream for the requested audio
-                                isResolvingStreams = true
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(Icons.Default.GraphicEq, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(15.dp))
+                                Text(
+                                    text = if (activeAudioMode == "DUB") "ENG DUB" else "JP SUB",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
                             }
-                        },
-                        shape = RoundedCornerShape(4.dp),
-                        color = CrunchySurface,
-                        border = BorderStroke(1.dp, CrunchyOrange),
-                        modifier = Modifier.padding(end = 8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(Icons.Default.GraphicEq, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(15.dp))
-                            Text(
-                                text = if (activeAudioMode == "DUB") "AUDIO: ENG DUB" else "AUDIO: JP SUB",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.ExtraBold
+                        }
+                    }
+
+                    // Picture-in-Picture (PiP) Button
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        IconButton(onClick = { enterPip() }) {
+                            Icon(
+                                Icons.Default.PictureInPictureAlt,
+                                contentDescription = "Picture in Picture",
+                                tint = Color.White
                             )
                         }
                     }
 
-                    // Audio, Subtitles & Quality Gear Button
+                    // Audio, Subtitles (Embedded ASS + OpenSubtitles) & Quality Gear Button
                     IconButton(onClick = { showSettingsSheet = true }) {
                         Icon(
-                            Icons.Default.Settings,
-                            contentDescription = "Audio & Subtitles",
+                            Icons.Default.Subtitles,
+                            contentDescription = "Subtitles & Audio",
                             tint = Color.White
                         )
                     }
@@ -693,7 +802,7 @@ fun PlayerScreen(
         }
     }
 
-    // Crunchyroll Player Settings Sheet (Audio Track, Subtitles, Video Quality / Backup Server)
+    // Crunchyroll Player Settings Sheet (Audio Track, Embedded Styled ASS Subtitles + OpenSubtitles, Quality)
     if (showSettingsSheet) {
         ModalBottomSheet(
             onDismissRequest = { showSettingsSheet = false },
@@ -710,7 +819,7 @@ fun PlayerScreen(
             ) {
                 item {
                     Text(
-                        text = "AUDIO & SUBTITLES",
+                        text = "AUDIO, SUBTITLES & QUALITY",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = CrunchyOrange,
@@ -718,11 +827,11 @@ fun PlayerScreen(
                     )
                 }
 
-                // Audio Tracks inside current stream + Stream-level SUB/DUB switch
+                // Audio Tracks
                 item {
                     val audioGroups = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Audio Language", fontSize = 12.sp, color = MaruTextMuted, fontWeight = FontWeight.Bold)
+                        Text("Audio Track", fontSize = 12.sp, color = MaruTextMuted, fontWeight = FontWeight.Bold)
 
                         if (audioGroups.sumOf { it.length } > 1) {
                             audioGroups.forEach { group ->
@@ -757,8 +866,13 @@ fun PlayerScreen(
                                 }
                             }
                         } else {
+                            val availableModes = if (hasEnglishDub) {
+                                listOf("SUB" to "Japanese (Original)", "DUB" to "English Dub")
+                            } else {
+                                listOf("SUB" to "Japanese (Original • No English Dub Released)")
+                            }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                listOf("SUB" to "Japanese (Original)", "DUB" to "English Dub").forEach { (mode, label) ->
+                                availableModes.forEach { (mode, label) ->
                                     val selected = activeAudioMode == mode
                                     Surface(
                                         onClick = {
@@ -771,7 +885,7 @@ fun PlayerScreen(
                                         border = BorderStroke(1.dp, if (selected) CrunchyOrange else CrunchyBorder),
                                         modifier = Modifier.weight(1f)
                                     ) {
-                                        Box(modifier = Modifier.padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
+                                        Box(modifier = Modifier.padding(vertical = 12.dp, horizontal = 8.dp), contentAlignment = Alignment.Center) {
                                             Text(
                                                 text = label,
                                                 color = if (selected) CrunchyOrange else Color.White,
@@ -786,11 +900,16 @@ fun PlayerScreen(
                     }
                 }
 
-                // Soft Subtitle Tracks
+                // Embedded ASS/SSA Styled Subtitles + OpenSubtitles
                 item {
                     val subGroups = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Subtitles", fontSize = 12.sp, color = MaruTextMuted, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = "Subtitles (Embedded Styled ASS/SSA & OpenSubtitles)",
+                            fontSize = 12.sp,
+                            color = MaruTextMuted,
+                            fontWeight = FontWeight.Bold
+                        )
 
                         Surface(
                             onClick = {
@@ -805,14 +924,17 @@ fun PlayerScreen(
                             border = BorderStroke(1.dp, CrunchyBorder),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text("None (Off)", color = Color.White, modifier = Modifier.padding(12.dp), fontSize = 13.5.sp)
+                            Text("Subtitles Off", color = Color.White, modifier = Modifier.padding(12.dp), fontSize = 13.5.sp)
                         }
 
                         subGroups.forEach { group ->
                             for (i in 0 until group.length) {
                                 val format = group.getTrackFormat(i)
                                 val isSelected = group.isTrackSelected(i)
-                                val trackName = formatSubtitleTrackName(format.label, format.language, i)
+                                val isAss = format.sampleMimeType == MimeTypes.TEXT_SSA || (format.codecs?.contains("ssa", true) == true) || (format.codecs?.contains("ass", true) == true)
+                                val baseName = formatSubtitleTrackName(format.label, format.language, i)
+                                val trackName = if (isAss) "$baseName • Styled ASS (Positioned)" else baseName
+
                                 Surface(
                                     onClick = {
                                         exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
@@ -832,7 +954,49 @@ fun PlayerScreen(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text(trackName, color = Color.White, fontSize = 13.5.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal)
+                                        Text(trackName, color = Color.White, fontSize = 13.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal)
+                                        if (isSelected) {
+                                            Icon(Icons.Default.Check, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(18.dp))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // If OpenSubtitles fetched tracks that aren't yet active in current item, allow 1-tap load
+                        if (openSubtitlesList.isNotEmpty() && subGroups.isEmpty()) {
+                            openSubtitlesList.take(8).forEach { extSub ->
+                                val isSelected = selectedOpenSub?.url == extSub.url
+                                Surface(
+                                    onClick = {
+                                        selectedOpenSub = extSub
+                                        val currentUri = exoPlayer.currentMediaItem?.localConfiguration?.uri
+                                        val currentMime = exoPlayer.currentMediaItem?.localConfiguration?.mimeType
+                                        if (currentUri != null) {
+                                            val pos = exoPlayer.currentPosition
+                                            val newItem = buildMediaItemWithSubtitles(currentUri, currentMime, listOf(extSub))
+                                            exoPlayer.setMediaItem(newItem, pos)
+                                            exoPlayer.prepare()
+                                            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                                                .buildUpon()
+                                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                                                .setPreferredTextLanguage(extSub.langCode)
+                                                .build()
+                                            exoPlayer.playWhenReady = true
+                                        }
+                                        showSettingsSheet = false
+                                    },
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = if (isSelected) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
+                                    border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else CrunchyBorder),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(12.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("${extSub.langName} (${extSub.format})", color = Color.White, fontSize = 13.sp)
                                         if (isSelected) {
                                             Icon(Icons.Default.Check, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(18.dp))
                                         }
@@ -843,7 +1007,7 @@ fun PlayerScreen(
                     }
                 }
 
-                // Clean Quality / Stream Switcher (No torrent jargon!)
+                // Clean Quality / Stream Server Switcher
                 if (!isOfflinePlayback && rankedStreams.size > 1) {
                     item {
                         Text("Video Quality & Stream Server", fontSize = 12.sp, color = MaruTextMuted, fontWeight = FontWeight.Bold)
@@ -929,11 +1093,11 @@ private fun formatSubtitleTrackName(label: String?, lang: String?, index: Int): 
         "en", "eng" -> "English"
         "es", "spa" -> "Español"
         "pt", "por" -> "Português"
-        "fr", "fre" -> "Français"
-        "de", "ger" -> "Deutsch"
+        "fr", "fre", "fra" -> "Français"
+        "de", "ger", "deu" -> "Deutsch"
         else -> lang?.uppercase() ?: "Subtitle ${index + 1}"
     }
-    return if (!label.isNullOrBlank()) "$cleanLang - $label" else cleanLang
+    return if (!label.isNullOrBlank()) "$cleanLang • $label" else cleanLang
 }
 
 private fun formatTime(ms: Long): String {

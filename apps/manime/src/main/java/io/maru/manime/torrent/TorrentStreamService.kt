@@ -253,6 +253,9 @@ class TorrentStreamService : Service() {
     private var serverSocket: ServerSocket? = null
     @Volatile private var activeStreamFile: File? = null
     @Volatile private var activeExpectedSize: Long = 0L
+    @Volatile private var activeHandle: TorrentHandle? = null
+    @Volatile private var activeTorrentInfo: TorrentInfo? = null
+    @Volatile private var activeFileIndex: Int = 0
     private var streamJob: Job? = null
 
     override fun onCreate() {
@@ -369,7 +372,60 @@ class TorrentStreamService : Service() {
                 }
                 handle.prioritizeFiles(priorities)
             }
+
+            // Prioritize first 4 pieces (MKV header + tracks) and last 2 pieces (MKV Cues index) immediately
+            val pieceLen = tInfo.pieceLength().coerceAtLeast(16384)
+            val fileOffset = files.fileOffset(targetIdx)
+            val fileSize = files.fileSize(targetIdx)
+            val firstPiece = (fileOffset / pieceLen).toInt()
+            val lastPiece = ((fileOffset + fileSize - 1).coerceAtLeast(fileOffset) / pieceLen).toInt()
+            val totalPieces = tInfo.numPieces()
+
+            for (p in firstPiece..(firstPiece + 4).coerceAtMost(lastPiece)) {
+                if (p in 0 until totalPieces) {
+                    handle.piecePriority(p, Priority.TOP_PRIORITY)
+                    handle.setPieceDeadline(p, 1000)
+                }
+            }
+            for (p in (lastPiece - 1).coerceAtLeast(firstPiece)..lastPiece) {
+                if (p in 0 until totalPieces) {
+                    handle.piecePriority(p, Priority.SEVEN)
+                    handle.setPieceDeadline(p, 2500)
+                }
+            }
         } catch (_: Exception) {}
+    }
+
+    private fun hasFileRangeDownloaded(byteOffsetInFile: Long, byteLength: Long): Boolean {
+        val handle = activeHandle ?: return true
+        val tInfo = activeTorrentInfo ?: return true
+        return try {
+            val files = tInfo.files()
+            val fileOffset = files.fileOffset(activeFileIndex)
+            val pieceLen = tInfo.pieceLength().coerceAtLeast(16384).toLong()
+            val totalPieces = tInfo.numPieces()
+
+            val absStart = fileOffset + byteOffsetInFile
+            val absEnd = (absStart + byteLength.coerceAtLeast(1L) - 1L).coerceAtLeast(absStart)
+            val startPiece = (absStart / pieceLen).toInt().coerceIn(0, totalPieces - 1)
+            val endPiece = (absEnd / pieceLen).toInt().coerceIn(0, totalPieces - 1)
+
+            for (p in startPiece..endPiece) {
+                if (!handle.havePiece(p)) {
+                    // Boost missing piece deadline so libtorrent fetches what ExoPlayer is waiting for right now!
+                    handle.piecePriority(p, Priority.TOP_PRIORITY)
+                    handle.setPieceDeadline(p, 600)
+                    if (p + 1 < totalPieces && !handle.havePiece(p + 1)) {
+                        handle.piecePriority(p + 1, Priority.TOP_PRIORITY)
+                        handle.setPieceDeadline(p + 1, 1200)
+                    }
+                    return false
+                }
+            }
+            true
+        } catch (_: Exception) {
+            true
+        }
     }
 
     private fun launchLiveStream(
@@ -413,6 +469,10 @@ class TorrentStreamService : Service() {
 
                 session.download(tInfo, saveDir)
                 val handle = session.find(tInfo.infoHash())
+                activeTorrentInfo = tInfo
+                activeHandle = handle
+                activeFileIndex = targetIdx
+
                 if (handle != null) {
                     configureSequentialVideoDownload(tInfo, handle, targetIdx)
                 }
@@ -421,17 +481,18 @@ class TorrentStreamService : Service() {
                 activeStreamFile = videoFile
                 activeExpectedSize = expectedBytes
 
-                // Wait until at least ~3.5 MB (or 1.5% of the video) is buffered sequentially so ExoPlayer starts cleanly
-                val minPrebufferBytes = minOf(3_500_000L, (expectedBytes / 40).coerceAtLeast(1_500_000L))
+                // Wait until the first 2 pieces (MKV header + first cluster) and at least ~2 MB are downloaded
+                val minPrebufferBytes = minOf(2_500_000L, (expectedBytes / 50).coerceAtLeast(1_200_000L))
                 var waitedMs = 0
                 while (isActive && waitedMs < 35_000) {
                     val status = handle?.status()
-                    val downloaded = status?.totalDone() ?: videoFile.length()
+                    val downloaded = status?.totalDone() ?: 0L
+                    val hasFirstChunk = hasFileRangeDownloaded(0L, 512 * 1024L)
                     val pct = if (minPrebufferBytes > 0) {
                         ((downloaded.toDouble() / minPrebufferBytes.toDouble()) * 100.0).toInt().coerceIn(5, 99)
                     } else 50
 
-                    if (videoFile.exists() && downloaded >= minPrebufferBytes) {
+                    if (videoFile.exists() && hasFirstChunk && downloaded >= minPrebufferBytes) {
                         break
                     }
 
@@ -441,8 +502,8 @@ class TorrentStreamService : Service() {
                         statusMessage = "Buffering Episode $episodeNum ($pct%)...",
                         progressPercent = pct
                     )
-                    delay(450)
-                    waitedMs += 450
+                    delay(400)
+                    waitedMs += 400
                 }
 
                 val ext = if (targetRelPath.lowercase().endsWith(".mp4")) "mp4" else "mkv"
@@ -668,18 +729,28 @@ class TorrentStreamService : Service() {
 
                 val raf = RandomAccessFile(file, "r")
                 try {
-                    raf.seek(startByte)
+                    var currentOffset = startByte
                     val buffer = ByteArray(64 * 1024)
                     var remaining = contentLength
                     while (remaining > 0 && isActive) {
                         val toRead = minOf(buffer.size.toLong(), remaining).toInt()
+
+                        // CRITICAL: Do NOT read un-downloaded sparse zeroes from RandomAccessFile!
+                        // Wait until libtorrent has actually verified the piece covering [currentOffset, currentOffset + toRead)
+                        var waitTicks = 0
+                        while (isActive && !hasFileRangeDownloaded(currentOffset, toRead.toLong()) && waitTicks < 120) {
+                            delay(150)
+                            waitTicks++
+                        }
+
+                        raf.seek(currentOffset)
                         val read = raf.read(buffer, 0, toRead)
                         if (read <= 0) {
-                            // Wait briefly for sequential pieces to arrive
-                            delay(200)
+                            delay(150)
                             continue
                         }
                         output.write(buffer, 0, read)
+                        currentOffset += read
                         remaining -= read
                     }
                 } finally {

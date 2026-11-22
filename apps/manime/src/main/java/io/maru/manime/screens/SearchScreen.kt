@@ -69,7 +69,7 @@ fun SearchScreen(
 
     val filteredAnimeResults = remember(searchResults, dubbedOnly) {
         if (!dubbedOnly) searchResults
-        else searchResults.filter { m -> m.externalLinks.any { it.isEnglishDub } }
+        else searchResults.filter { m -> m.hasEnglishDub }
     }
 
     Column(

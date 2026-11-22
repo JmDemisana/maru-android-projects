@@ -55,9 +55,12 @@ data class AnimeMedia(
     val score: Double?,
     val notes: String?,
     val isPrivate: Boolean,
-    val updatedAt: Long?
+    val updatedAt: Long?,
+    val hasEnglishDubCast: Boolean = false
 ) {
     val isReleasing: Boolean get() = status.equals("RELEASING", ignoreCase = true)
+
+    val hasEnglishDub: Boolean get() = hasEnglishDubCast || externalLinks.any { it.isEnglishDub }
 
     val latestAiredEpisode: Int? get() {
         if (!isReleasing) return episodes
@@ -151,6 +154,10 @@ data class SearchPage(
 
 object AniListClient {
     private const val ENDPOINT = "https://graphql.anilist.co"
+    const val MASTER_CLIENT_ID = "52524"
+    const val REDIRECT_URI = "https://maruchan.pages.dev/anilist-integration"
+    private const val TOKEN_EXCHANGE_URL = "https://maruchan.pages.dev/api/anilist-token"
+    private const val TOKEN_EXCHANGE_FALLBACK_URL = "https://maru-api-wine.vercel.app/api/anilist-token"
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -158,6 +165,33 @@ object AniListClient {
         .build()
 
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+    suspend fun exchangeAuthCode(code: String): String? = withContext(Dispatchers.IO) {
+        val payload = JSONObject().apply {
+            put("code", code)
+            put("clientId", MASTER_CLIENT_ID)
+            put("redirectUri", REDIRECT_URI)
+        }.toString().toRequestBody(JSON_MEDIA_TYPE)
+
+        for (endpoint in listOf(TOKEN_EXCHANGE_URL, TOKEN_EXCHANGE_FALLBACK_URL)) {
+            try {
+                val req = Request.Builder()
+                    .url(endpoint)
+                    .post(payload)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .build()
+                val resp = client.newCall(req).execute()
+                val body = resp.body?.string() ?: continue
+                if (resp.isSuccessful) {
+                    val json = JSONObject(body)
+                    val token = json.optNullableString("access_token")
+                    if (!token.isNullOrBlank()) return@withContext token
+                }
+            } catch (_: Exception) {}
+        }
+        null
+    }
 
     fun JSONObject?.optNullableString(name: String): String? {
         if (this == null || isNull(name)) return null
@@ -233,6 +267,18 @@ object AniListClient {
 
         val displayTitle = titleEng ?: titleRom ?: titlePref ?: titleNative ?: "Untitled"
 
+        var hasEngVa = false
+        val charEdges = obj.optJSONObject("characters")?.optJSONArray("edges")
+        if (charEdges != null) {
+            for (i in 0 until charEdges.length()) {
+                val vas = charEdges.optJSONObject(i)?.optJSONArray("voiceActors")
+                if (vas != null && vas.length() > 0) {
+                    hasEngVa = true
+                    break
+                }
+            }
+        }
+
         return AnimeMedia(
             mediaId       = obj.getInt("id"),
             title         = displayTitle,
@@ -260,7 +306,8 @@ object AniListClient {
             score         = le?.optDouble("score")?.takeIf { it > 0 },
             notes         = le?.optNullableString("notes"),
             isPrivate     = le?.optBoolean("private") ?: false,
-            updatedAt     = le?.optLong("updatedAt")?.takeIf { it > 0 }
+            updatedAt     = le?.optLong("updatedAt")?.takeIf { it > 0 },
+            hasEnglishDubCast = hasEngVa
         )
     }
 
@@ -270,6 +317,11 @@ object AniListClient {
         coverImage { large color }
         nextAiringEpisode { episode airingAt }
         externalLinks { id url site type language }
+        characters(perPage: 6, sort: [ROLE, RELEVANCE]) {
+          edges {
+            voiceActors(language: ENGLISH) { id }
+          }
+        }
         genres
         description(asHtml: false)
         mediaListEntry { id status score progress private notes updatedAt }
@@ -888,16 +940,26 @@ object AniListClient {
         val eps = data.optJSONObject("Media")?.optJSONArray("streamingEpisodes")
             ?: return emptyList()
 
-        return (0 until eps.length()).map { i ->
+        val parsed = mutableListOf<StreamingEpisode>()
+        val numRegex = Regex("Episode\\s*(\\d+)", RegexOption.IGNORE_CASE)
+
+        for (i in 0 until eps.length()) {
             val ep = eps.getJSONObject(i)
-            StreamingEpisode(
-                episodeNumber = i + 1,
-                title = ep.optNullableString("title"),
-                thumbnail = ep.optNullableString("thumbnail"),
-                site = ep.optNullableString("site"),
-                url = ep.optNullableString("url")
+            val rawTitle = ep.optNullableString("title")
+            val extractedNum = rawTitle?.let { numRegex.find(it)?.groupValues?.getOrNull(1)?.toIntOrNull() }
+                ?: (i + 1)
+
+            parsed.add(
+                StreamingEpisode(
+                    episodeNumber = extractedNum,
+                    title = rawTitle,
+                    thumbnail = ep.optNullableString("thumbnail"),
+                    site = ep.optNullableString("site"),
+                    url = ep.optNullableString("url")
+                )
             )
         }
+        return parsed.distinctBy { it.episodeNumber }.sortedBy { it.episodeNumber }
     }
 
     suspend fun getCast(mediaId: Int): List<CastMember> {

@@ -36,33 +36,50 @@ data class AniSkipInterval(
     val skipType: String // "op" | "ed"
 )
 
+data class ExternalSubtitleItem(
+    val id: String,
+    val url: String,
+    val langCode: String,
+    val langName: String,
+    val format: String // "ASS" | "VTT" | "SRT"
+)
+
 object CrunchyrollStreamEngine {
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
         .build()
 
-    // Built-in public trackers for fast magnet discovery without exposing technical settings
+    // High-availability anime & global trackers for fast peer discovery
     private val FAST_TRACKERS = listOf(
         "http://nyaa.tracker.wf:7777/announce",
+        "http://anidex.moe:6969/announce",
+        "http://tracker.anirena.com:80/announce",
         "udp://open.stealth.si:80/announce",
         "udp://tracker.opentrackr.org:1337/announce",
         "udp://exodus.desync.com:6969/announce",
         "udp://tracker.torrent.eu.org:451/announce",
-        "udp://open.demonii.com:1337/announce"
+        "udp://open.demonii.com:1337/announce",
+        "udp://explodie.org:6969/announce",
+        "http://t.nyaatracker.com:80/announce"
     )
 
-    // Built-in invisible streaming providers (Torrentio + AnimeKitsu)
     private val BUILTIN_PROVIDERS = listOf(
         "https://torrentio.strem.fun",
         "https://animekitsu.strem.fun"
     )
 
+    private val OPENSUBTITLES_ADDONS = listOf(
+        "https://opensubtitles-v3.strem.io",
+        "https://opensubtitles.strem.io"
+    )
+
     private val mappingCache = ConcurrentHashMap<Int, AnimeIdMappings>()
 
     /**
-     * Resolves AniList ID -> Kitsu ID, MAL ID, IMDb ID, and rich Crunchyroll-style Episode metadata via api.ani.zip
+     * Resolves AniList ID -> Kitsu ID, MAL ID, IMDb ID, and rich Crunchyroll-style Episode metadata
+     * via api.ani.zip, with Kitsu API fallback so episode titles/thumbnails/overviews are always populated.
      */
     suspend fun getAnimeMappings(anilistId: Int, fallbackTitle: String = ""): AnimeIdMappings = withContext(Dispatchers.IO) {
         mappingCache[anilistId]?.let { return@withContext it }
@@ -77,7 +94,7 @@ object CrunchyrollStreamEngine {
         try {
             val req = Request.Builder()
                 .url("https://api.ani.zip/mappings?anilist_id=$anilistId")
-                .header("User-Agent", "NanamiAnime/2.0")
+                .header("User-Agent", StremioAddonClient.BROWSER_UA)
                 .build()
             val resp = httpClient.newCall(req).execute()
             val body = resp.body?.string()
@@ -108,9 +125,9 @@ object CrunchyrollStreamEngine {
                         val epObj = epsJson.optJSONObject(key) ?: continue
 
                         val titleObj = epObj.optJSONObject("title")
-                        val epTitle = titleObj?.optString("en")?.takeIf { it.isNotBlank() }
-                            ?: titleObj?.optString("x-jat")?.takeIf { it.isNotBlank() }
-                            ?: titleObj?.optString("ja")?.takeIf { it.isNotBlank() }
+                        val epTitle = titleObj?.optString("en")?.takeIf { it.isNotBlank() && it != "null" }
+                            ?: titleObj?.optString("x-jat")?.takeIf { it.isNotBlank() && it != "null" }
+                            ?: titleObj?.optString("ja")?.takeIf { it.isNotBlank() && it != "null" }
                             ?: "Episode $epNum"
 
                         val image = epObj.optString("image").takeIf { it.isNotBlank() && it != "null" }
@@ -133,9 +150,13 @@ object CrunchyrollStreamEngine {
             }
         } catch (_: Exception) {}
 
-        // Fallback Kitsu lookup by title if AniZip didn't have kitsu_id
         if (kitsuId.isNullOrBlank() && fallbackTitle.isNotBlank()) {
             kitsuId = resolveKitsuIdByTitle(fallbackTitle)
+        }
+
+        // If AniZip didn't return rich episode metadata, fetch episode titles/thumbnails/synopses from Kitsu API
+        if (episodesList.isEmpty() && !kitsuId.isNullOrBlank()) {
+            episodesList.addAll(fetchKitsuEpisodes(kitsuId!!))
         }
 
         val sortedEps = episodesList.sortedBy { it.episodeNumber }
@@ -159,6 +180,7 @@ object CrunchyrollStreamEngine {
             val encoded = URLEncoder.encode(clean, "UTF-8")
             val req = Request.Builder()
                 .url("https://kitsu.io/api/edge/anime?filter[text]=$encoded&page[limit]=1")
+                .header("User-Agent", StremioAddonClient.BROWSER_UA)
                 .build()
             val resp = httpClient.newCall(req).execute()
             val body = resp.body?.string() ?: return null
@@ -171,9 +193,43 @@ object CrunchyrollStreamEngine {
         }
     }
 
+    private fun fetchKitsuEpisodes(kitsuId: String): List<CrunchyEpisodeMeta> {
+        val list = mutableListOf<CrunchyEpisodeMeta>()
+        try {
+            val req = Request.Builder()
+                .url("https://kitsu.io/api/edge/anime/$kitsuId/episodes?page[limit]=20&sort=number")
+                .header("User-Agent", StremioAddonClient.BROWSER_UA)
+                .build()
+            val resp = httpClient.newCall(req).execute()
+            val body = resp.body?.string() ?: return emptyList()
+            val data = JSONObject(body).optJSONArray("data") ?: return emptyList()
+            for (i in 0 until data.length()) {
+                val attr = data.getJSONObject(i).optJSONObject("attributes") ?: continue
+                val num = attr.optInt("number", i + 1)
+                val canonical = attr.optString("canonicalTitle", "").takeIf { it.isNotBlank() && it != "null" }
+                    ?: "Episode $num"
+                val synopsis = attr.optString("synopsis", "").takeIf { it.isNotBlank() && it != "null" }
+                val thumb = attr.optJSONObject("thumbnail")?.optString("original")?.takeIf { it.isNotBlank() && it != "null" }
+                val airDate = attr.optString("airdate", "").takeIf { it.isNotBlank() && it != "null" }
+                val length = attr.optInt("length", 24).takeIf { it > 0 } ?: 24
+                list.add(
+                    CrunchyEpisodeMeta(
+                        episodeNumber = num,
+                        title = canonical,
+                        overview = synopsis,
+                        thumbnail = thumb,
+                        airDate = airDate,
+                        durationMinutes = length
+                    )
+                )
+            }
+        } catch (_: Exception) {}
+        return list
+    }
+
     /**
-     * Merges AniList streamingEpisodes with AniZip episode metadata so every anime has a complete,
-     * Crunchyroll-style episode list with thumbnails and synopses.
+     * Merges AniList streamingEpisodes with AniZip/Kitsu episode metadata so every anime has a complete,
+     * Crunchyroll-style episode list with thumbnails, air dates, and episode synopses.
      */
     fun buildCompleteEpisodeList(
         mappings: AnimeIdMappings?,
@@ -201,7 +257,7 @@ object CrunchyrollStreamEngine {
 
             val rawAlTitle = al?.title?.replaceFirst(Regex("^Episode\\s*\\d+\\s*[-:\\.]\\s*", RegexOption.IGNORE_CASE), "")?.trim()
             val finalTitle = when {
-                !az?.title.isNullOrBlank() && az!!.title != "Episode $epNum" -> az.title
+                !az?.title.isNullOrBlank() && !az!!.title.equals("Episode $epNum", ignoreCase = true) -> az.title
                 !rawAlTitle.isNullOrBlank() -> rawAlTitle
                 else -> "Episode $epNum"
             }
@@ -221,6 +277,89 @@ object CrunchyrollStreamEngine {
     }
 
     /**
+     * Fetches external subtitles from OpenSubtitles Stremio v3 Addon for the given anime & episode.
+     */
+    suspend fun fetchOpenSubtitles(
+        anilistId: Int,
+        animeTitle: String,
+        episodeNum: Int
+    ): List<ExternalSubtitleItem> = withContext(Dispatchers.IO) {
+        val mappings = getAnimeMappings(anilistId, animeTitle)
+        val queryIds = mutableListOf<String>()
+        if (!mappings.imdbId.isNullOrBlank()) {
+            queryIds.add("${mappings.imdbId}:1:$episodeNum")
+        }
+        if (!mappings.kitsuId.isNullOrBlank()) {
+            queryIds.add("kitsu:${mappings.kitsuId}:$episodeNum")
+        }
+        if (queryIds.isEmpty()) return@withContext emptyList()
+
+        val results = mutableListOf<ExternalSubtitleItem>()
+        for (addon in OPENSUBTITLES_ADDONS) {
+            for (qid in queryIds) {
+                try {
+                    val req = Request.Builder()
+                        .url("$addon/subtitles/series/$qid.json")
+                        .header("User-Agent", StremioAddonClient.BROWSER_UA)
+                        .build()
+                    val resp = httpClient.newCall(req).execute()
+                    val body = resp.body?.string() ?: continue
+                    val subsArr = JSONObject(body).optJSONArray("subtitles") ?: continue
+
+                    for (i in 0 until subsArr.length()) {
+                        val s = subsArr.getJSONObject(i)
+                        val subUrl = s.optString("url", "").trim()
+                        if (subUrl.isEmpty()) continue
+                        val lang = s.optString("lang", "eng").lowercase()
+                        val id = s.optString("id", "os_$i")
+                        val fileName = s.optString("subtitleFileName", "").lowercase()
+                        val fmt = when {
+                            fileName.endsWith(".ass") || fileName.endsWith(".ssa") || subUrl.endsWith(".ass") -> "ASS"
+                            fileName.endsWith(".vtt") || subUrl.endsWith(".vtt") -> "VTT"
+                            else -> "SRT"
+                        }
+
+                        val readableLang = when (lang) {
+                            "eng", "en" -> "English (OpenSubtitles)"
+                            "spa", "es" -> "Español (OpenSubtitles)"
+                            "por", "pt", "pob" -> "Português (OpenSubtitles)"
+                            "fre", "fra", "fr" -> "Français (OpenSubtitles)"
+                            "ger", "deu", "de" -> "Deutsch (OpenSubtitles)"
+                            "ita", "it" -> "Italiano (OpenSubtitles)"
+                            "ara", "ar" -> "العربية (OpenSubtitles)"
+                            "ind", "id" -> "Indonesia (OpenSubtitles)"
+                            "jpn", "ja" -> "Japanese CC (OpenSubtitles)"
+                            else -> "${lang.uppercase()} (OpenSubtitles)"
+                        }
+
+                        results.add(
+                            ExternalSubtitleItem(
+                                id = id,
+                                url = subUrl,
+                                langCode = lang,
+                                langName = readableLang,
+                                format = fmt
+                            )
+                        )
+                    }
+                    if (results.isNotEmpty()) break
+                } catch (_: Exception) {}
+            }
+            if (results.isNotEmpty()) break
+        }
+
+        // Prioritize English first, then other languages
+        results
+            .distinctBy { it.url }
+            .sortedWith(
+                compareByDescending<ExternalSubtitleItem> { it.langCode == "eng" || it.langCode == "en" }
+                    .thenByDescending { it.format == "ASS" }
+                    .thenBy { it.langName }
+            )
+            .take(25)
+    }
+
+    /**
      * Fetches OP/ED skip timestamps from AniSkip using the MAL ID
      */
     suspend fun getAniSkipIntervals(malId: Int?, episodeNumber: Int): List<AniSkipInterval> = withContext(Dispatchers.IO) {
@@ -228,7 +367,10 @@ object CrunchyrollStreamEngine {
         val results = mutableListOf<AniSkipInterval>()
         try {
             val url = "https://api.aniskip.com/v2/skip-times/$malId/$episodeNumber?types[]=op&types[]=ed&episodeLength=0"
-            val req = Request.Builder().url(url).build()
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", StremioAddonClient.BROWSER_UA)
+                .build()
             val resp = httpClient.newCall(req).execute()
             val body = resp.body?.string() ?: return@withContext emptyList()
             val json = JSONObject(body)
@@ -262,20 +404,19 @@ object CrunchyrollStreamEngine {
     ): List<StreamLink> = coroutineScope {
         val mappings = getAnimeMappings(anilistId, animeTitle)
 
-        val queryIds = mutableListOf<String>()
+        // Kitsu ID MUST be queried first and prioritized over IMDb so live-action remakes (e.g. Netflix One Piece) never pollute anime
+        val queryIds = mutableListOf<Pair<String, Boolean>>() // (queryId, isKitsu)
         if (!mappings.kitsuId.isNullOrBlank()) {
-            queryIds.add("kitsu:${mappings.kitsuId}:$episodeNum")
+            queryIds.add("kitsu:${mappings.kitsuId}:$episodeNum" to true)
         }
         if (!mappings.imdbId.isNullOrBlank()) {
-            queryIds.add("${mappings.imdbId}:1:$episodeNum")
+            queryIds.add("${mappings.imdbId}:1:$episodeNum" to false)
         }
 
         if (queryIds.isEmpty()) return@coroutineScope emptyList()
 
-        val trackerParams = FAST_TRACKERS.joinToString("") { "&tr=${URLEncoder.encode(it, "UTF-8")}" }
-
         val jobs = BUILTIN_PROVIDERS.flatMap { providerUrl ->
-            queryIds.map { qid ->
+            queryIds.map { (qid, isKitsuSource) ->
                 async(Dispatchers.IO) {
                     val found = mutableListOf<StreamLink>()
                     try {
@@ -287,7 +428,7 @@ object CrunchyrollStreamEngine {
                             val quality = detectQuality(combinedText)
                             val seeds = detectSeeders(combinedText) ?: 0
 
-                            val score = scoreStream(
+                            var score = scoreStream(
                                 rawText = combinedText,
                                 audioType = audio,
                                 quality = quality,
@@ -295,6 +436,7 @@ object CrunchyrollStreamEngine {
                                 preferredAudio = preferredAudio,
                                 preferredQuality = preferredQuality
                             )
+                            if (isKitsuSource) score += 200 // Strongly prefer exact Kitsu anime ID match
 
                             if (!s.url.isNullOrBlank()) {
                                 found.add(
@@ -308,12 +450,14 @@ object CrunchyrollStreamEngine {
                                         seeders = seeds,
                                         filename = s.title,
                                         formatBadge = quality,
-                                        score = score + 50
+                                        score = score + 80
                                     )
                                 )
                             } else if (!s.infoHash.isNullOrBlank()) {
                                 val hash = s.infoHash.lowercase().trim()
                                 val dn = URLEncoder.encode("$animeTitle - Episode $episodeNum", "UTF-8")
+                                val allTrackers = (s.sources + FAST_TRACKERS).distinct()
+                                val trackerParams = allTrackers.joinToString("") { "&tr=${URLEncoder.encode(it, "UTF-8")}" }
                                 val magnet = "magnet:?xt=urn:btih:$hash&dn=$dn$trackerParams"
                                 found.add(
                                     StreamLink(
@@ -366,57 +510,64 @@ object CrunchyrollStreamEngine {
         var score = 0
         val lower = rawText.lowercase()
 
-        // 1. Seeders health (up to 400 pts, critical for instant start)
+        // 1. Seeders health
         score += when {
-            seeders >= 100 -> 400
-            seeders >= 50 -> 340
-            seeders >= 20 -> 280
-            seeders >= 10 -> 220
-            seeders >= 5 -> 150
+            seeders >= 100 -> 450
+            seeders >= 50 -> 380
+            seeders >= 20 -> 310
+            seeders >= 10 -> 240
+            seeders >= 5 -> 160
             seeders >= 2 -> 80
             seeders == 1 -> 20
-            else -> -300
+            else -> -400
         }
         score += (seeders.coerceAtMost(300) / 3)
 
-        // 2. Audio preference matching
+        // 2. Single-episode torrents connect & prebuffer MUCH faster than 1000-episode mega-batches
+        val isMegaBatch = lower.contains("[batch]") || lower.contains("0001-") || lower.contains("season 01 -")
+        if (isMegaBatch) {
+            score -= 180
+        } else {
+            score += 140
+        }
+
+        // 3. Audio preference matching
         if (preferredAudio.equals("DUB", ignoreCase = true)) {
             score += when (audioType) {
-                "DUAL_AUDIO" -> 350
-                "DUB" -> 320
-                else -> -120
+                "DUAL_AUDIO" -> 380
+                "DUB" -> 350
+                else -> -150
             }
         } else {
-            // SUB preferred
             score += when (audioType) {
-                "SUB" -> 300
-                "DUAL_AUDIO" -> 280
-                "DUB" -> -150
+                "SUB" -> 320
+                "DUAL_AUDIO" -> 300
+                "DUB" -> -180
                 else -> 100
             }
         }
 
-        // 3. Resolution matching
+        // 4. Resolution matching
         if (quality.equals(preferredQuality, ignoreCase = true)) {
-            score += 220
+            score += 240
         } else if (quality == "1080p") {
-            score += 180
+            score += 200
         } else if (quality == "720p") {
-            score += 140
+            score += 150
         } else if (quality == "4K") {
-            score += 90
+            score += 60
         }
 
-        // 4. Trusted fast-playback release groups (H.264 / fast-decode HEVC with clean soft subs)
+        // 5. Trusted fast-playback release groups (H.264 / 8-bit / fast-decode with full ASS positioned subtitles)
         if (lower.contains("subsplease") || lower.contains("erai-raws") || lower.contains("horriblesubs")) {
+            score += 220
+        } else if (lower.contains("judas") || lower.contains("ember") || lower.contains("dkb") || lower.contains("asw") || lower.contains(" ToonsHub".lowercase())) {
             score += 160
-        } else if (lower.contains("judas") || lower.contains("ember") || lower.contains("dkb") || lower.contains("asw")) {
-            score += 130
         }
 
-        // 5. Avoid 10-bit Hi10P legacy encodes or huge BD remuxes (> 3 GB per ep) that buffer on mobile
-        if (lower.contains("remux") || lower.contains("bdrip 1080p flac")) {
-            score -= 100
+        // 6. Penalize Dolby Vision (DV) / live-action NF WEB-DL / huge remuxes that fail hardware decoding on mobile
+        if (lower.contains(" dv ") || lower.contains(".dv.") || lower.contains("dolby vision") || lower.contains("remux")) {
+            score -= 350
         }
 
         return score

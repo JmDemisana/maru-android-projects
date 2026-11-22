@@ -93,53 +93,8 @@ fun DashboardScreen(
         modifier = Modifier.fillMaxSize()
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Sub Tabs: [CRUNCHYROLL FEED] [ANILIST SOCIAL]
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(CrunchySurface)
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Surface(
-                    onClick = { selectedSubTab = 0 },
-                    shape = RoundedCornerShape(4.dp),
-                    color = if (selectedSubTab == 0) CrunchyOrange else CrunchyCardBg,
-                    border = BorderStroke(1.dp, if (selectedSubTab == 0) CrunchyOrange else CrunchyBorder),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Box(modifier = Modifier.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
-                        Text(
-                            "FEATURED & SIMULCASTS",
-                            fontSize = 10.5.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = if (selectedSubTab == 0) Color.Black else MaruTextStrong
-                        )
-                    }
-                }
-
-                Surface(
-                    onClick = { selectedSubTab = 1 },
-                    shape = RoundedCornerShape(4.dp),
-                    color = if (selectedSubTab == 1) CrunchyOrange else CrunchyCardBg,
-                    border = BorderStroke(1.dp, if (selectedSubTab == 1) CrunchyOrange else CrunchyBorder),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Box(modifier = Modifier.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
-                        Text(
-                            "ANILIST SOCIAL FEED",
-                            fontSize = 10.5.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = if (selectedSubTab == 1) Color.Black else MaruTextStrong
-                        )
-                    }
-                }
-            }
-
-            HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
-
+            // Spacious Crunchyroll Home Feed
             if (selectedSubTab == 0) {
-                // ================= CRUNCHYROLL HOME FEED =================
                 val heroItems = remember(trendingList) { trendingList.take(5) }
                 val activeHero = heroItems.getOrNull(heroIndex.coerceIn(0, (heroItems.size - 1).coerceAtLeast(0)))
 
@@ -147,10 +102,10 @@ fun DashboardScreen(
                     columns = GridCells.Fixed(2),
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(horizontal = 12.dp),
-                    contentPadding = PaddingValues(top = 10.dp, bottom = 36.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                        .padding(horizontal = 16.dp),
+                    contentPadding = PaddingValues(top = 14.dp, bottom = 36.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     // Crunchyroll Top Hero Spotlight Banner
                     if (activeHero != null) {
@@ -163,12 +118,12 @@ fun DashboardScreen(
 
                             Surface(
                                 onClick = { onAnimeClick(activeHero) },
-                                shape = RoundedCornerShape(6.dp),
+                                shape = RoundedCornerShape(8.dp),
                                 color = CrunchyCardBg,
                                 border = BorderStroke(1.dp, CrunchyBorder),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(235.dp)
+                                    .height(250.dp)
                             ) {
                                 Box(modifier = Modifier.fillMaxSize()) {
                                     AsyncImage(
@@ -183,9 +138,9 @@ fun DashboardScreen(
                                             .background(
                                                 Brush.verticalGradient(
                                                     listOf(
-                                                        Color(0x220B0C0F),
+                                                        Color(0x180B0C0F),
                                                         Color(0xAA0B0C0F),
-                                                        Color(0xF50B0C0F)
+                                                        Color(0xF80B0C0F)
                                                     )
                                                 )
                                             )
@@ -194,10 +149,10 @@ fun DashboardScreen(
                                     // Top Left Crunchyroll Spotlight Tag
                                     Surface(
                                         color = CrunchyOrange,
-                                        shape = RoundedCornerShape(2.dp),
+                                        shape = RoundedCornerShape(3.dp),
                                         modifier = Modifier
                                             .align(Alignment.TopStart)
-                                            .padding(12.dp)
+                                            .padding(14.dp)
                                     ) {
                                         Text(
                                             text = "TOP PICK FOR YOU",
@@ -205,7 +160,7 @@ fun DashboardScreen(
                                             fontWeight = FontWeight.ExtraBold,
                                             color = Color.Black,
                                             letterSpacing = 0.8.sp,
-                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                         )
                                     }
 
@@ -213,15 +168,15 @@ fun DashboardScreen(
                                     Row(
                                         modifier = Modifier
                                             .align(Alignment.TopEnd)
-                                            .padding(12.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                            .padding(14.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
                                         heroItems.forEachIndexed { idx, _ ->
                                             Box(
                                                 modifier = Modifier
-                                                    .width(if (idx == heroIndex) 18.dp else 7.dp)
+                                                    .width(if (idx == heroIndex) 20.dp else 7.dp)
                                                     .height(7.dp)
-                                                    .clip(RoundedCornerShape(3.dp))
+                                                    .clip(RoundedCornerShape(3.5.dp))
                                                     .background(if (idx == heroIndex) CrunchyOrange else Color(0x66FFFFFF))
                                                     .clickable { heroIndex = idx }
                                             )
@@ -231,12 +186,12 @@ fun DashboardScreen(
                                     Column(
                                         modifier = Modifier
                                             .align(Alignment.BottomStart)
-                                            .padding(14.dp),
-                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                            .padding(16.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
                                         Text(
                                             text = activeHero.title,
-                                            fontSize = 17.sp,
+                                            fontSize = 18.sp,
                                             fontWeight = FontWeight.ExtraBold,
                                             color = Color.White,
                                             maxLines = 1,
@@ -245,15 +200,15 @@ fun DashboardScreen(
                                         if (cleanHeroDesc.isNotBlank()) {
                                             Text(
                                                 text = cleanHeroDesc,
-                                                fontSize = 11.5.sp,
+                                                fontSize = 12.sp,
                                                 color = Color(0xFFD0D4DF),
                                                 maxLines = 2,
                                                 overflow = TextOverflow.Ellipsis,
-                                                lineHeight = 15.sp
+                                                lineHeight = 16.sp
                                             )
                                         }
                                         Row(
-                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(12.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Surface(
@@ -262,22 +217,22 @@ fun DashboardScreen(
                                                 color = CrunchyOrange
                                             ) {
                                                 Row(
-                                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                                                     verticalAlignment = Alignment.CenterVertically,
                                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                                 ) {
-                                                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                                                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.Black, modifier = Modifier.size(17.dp))
                                                     Text(
                                                         text = "START WATCHING S1 E1",
-                                                        fontSize = 11.sp,
+                                                        fontSize = 11.5.sp,
                                                         fontWeight = FontWeight.ExtraBold,
                                                         color = Color.Black
                                                     )
                                                 }
                                             }
                                             Text(
-                                                text = "Sub | Dub",
-                                                fontSize = 11.sp,
+                                                text = if (activeHero.hasEnglishDub) "Sub | Dub" else "Subtitled",
+                                                fontSize = 11.5.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = CrunchyTeal
                                             )
@@ -293,7 +248,8 @@ fun DashboardScreen(
                             GlassSectionHeader(
                                 title = "CONTINUE WATCHING",
                                 icon = Icons.Default.PlayCircle,
-                                color = CrunchyOrange
+                                color = CrunchyOrange,
+                                modifier = Modifier.padding(top = 6.dp)
                             )
                         }
 
@@ -302,7 +258,7 @@ fun DashboardScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
                                 watchingList.forEach { anime ->
                                     WatchingCard(media = anime, onClick = { onAnimeClick(anime) })
@@ -312,11 +268,33 @@ fun DashboardScreen(
                     }
 
                     item(span = { GridItemSpan(2) }, key = "trending_header") {
-                        GlassSectionHeader(
-                            title = "MOST POPULAR & SIMULCASTS",
-                            icon = Icons.Default.LocalFireDepartment,
-                            color = CrunchyOrange
-                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            GlassSectionHeader(
+                                title = "MOST POPULAR & SIMULCASTS",
+                                icon = Icons.Default.LocalFireDepartment,
+                                color = CrunchyOrange
+                            )
+                            Surface(
+                                onClick = { selectedSubTab = 1 },
+                                shape = RoundedCornerShape(4.dp),
+                                color = CrunchyCardBg,
+                                border = BorderStroke(1.dp, CrunchyBorder)
+                            ) {
+                                Text(
+                                    text = "SOCIAL FEED →",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaruTextMuted,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
                     }
 
                     items(trendingList, key = { "trend_${it.mediaId}" }) { anime ->
@@ -325,6 +303,32 @@ fun DashboardScreen(
                 }
             } else {
                 // ================= ANILIST COMMUNITY FEED =================
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    GlassSectionHeader(
+                        title = "ANILIST COMMUNITY FEED",
+                        icon = Icons.Default.People,
+                        color = CrunchyOrange
+                    )
+                    Surface(
+                        onClick = { selectedSubTab = 0 },
+                        shape = RoundedCornerShape(4.dp),
+                        color = CrunchyOrange
+                    ) {
+                        Text(
+                            text = "← BACK TO HOME",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.Black,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                }
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxSize()
