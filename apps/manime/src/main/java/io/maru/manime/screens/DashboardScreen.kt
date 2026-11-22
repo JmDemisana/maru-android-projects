@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -36,6 +37,7 @@ import io.maru.manime.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.jsoup.Jsoup
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,10 +56,10 @@ fun DashboardScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // 0: AniList Community Feed (Swapped to first!), 1: Discovery
+    // 0: Crunchyroll Home Feed (Default!), 1: AniList Social Feed
     var selectedSubTab by remember { mutableIntStateOf(0) }
+    var heroIndex by remember { mutableIntStateOf(0) }
 
-    // Post creation state
     var postText by remember { mutableStateOf("") }
     var isPosting by remember { mutableStateOf(false) }
 
@@ -91,51 +93,237 @@ fun DashboardScreen(
         modifier = Modifier.fillMaxSize()
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Sub Tabs: [ANILIST COMMUNITY] [DISCOVERY]
+            // Sub Tabs: [CRUNCHYROLL FEED] [ANILIST SOCIAL]
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                    .background(CrunchySurface)
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Surface(
                     onClick = { selectedSubTab = 0 },
-                    shape = MaruPillShape,
-                    color = if (selectedSubTab == 0) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
-                    border = BorderStroke(1.dp, if (selectedSubTab == 0) MaruAccentPink else MaruGlassBorderSoft),
+                    shape = RoundedCornerShape(4.dp),
+                    color = if (selectedSubTab == 0) CrunchyOrange else CrunchyCardBg,
+                    border = BorderStroke(1.dp, if (selectedSubTab == 0) CrunchyOrange else CrunchyBorder),
                     modifier = Modifier.weight(1f)
                 ) {
                     Box(modifier = Modifier.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
                         Text(
-                            "ANILIST COMMUNITY",
+                            "FEATURED & SIMULCASTS",
                             fontSize = 10.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (selectedSubTab == 0) MaruAccentPink else MaruTextMuted
+                            fontWeight = FontWeight.ExtraBold,
+                            color = if (selectedSubTab == 0) Color.Black else MaruTextStrong
                         )
                     }
                 }
 
                 Surface(
                     onClick = { selectedSubTab = 1 },
-                    shape = MaruPillShape,
-                    color = if (selectedSubTab == 1) MaruAccentBlue.copy(alpha = 0.25f) else MaruGlassSubtleBg,
-                    border = BorderStroke(1.dp, if (selectedSubTab == 1) MaruAccentBlue else MaruGlassBorderSoft),
+                    shape = RoundedCornerShape(4.dp),
+                    color = if (selectedSubTab == 1) CrunchyOrange else CrunchyCardBg,
+                    border = BorderStroke(1.dp, if (selectedSubTab == 1) CrunchyOrange else CrunchyBorder),
                     modifier = Modifier.weight(1f)
                 ) {
                     Box(modifier = Modifier.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
                         Text(
-                            "DISCOVERY",
+                            "ANILIST SOCIAL FEED",
                             fontSize = 10.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (selectedSubTab == 1) MaruAccentBlue else MaruTextMuted
+                            fontWeight = FontWeight.ExtraBold,
+                            color = if (selectedSubTab == 1) Color.Black else MaruTextStrong
                         )
                     }
                 }
             }
 
-            HorizontalDivider(color = MaruGlassBorderSoft, thickness = 1.dp)
+            HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
 
             if (selectedSubTab == 0) {
+                // ================= CRUNCHYROLL HOME FEED =================
+                val heroItems = remember(trendingList) { trendingList.take(5) }
+                val activeHero = heroItems.getOrNull(heroIndex.coerceIn(0, (heroItems.size - 1).coerceAtLeast(0)))
+
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(2),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 12.dp),
+                    contentPadding = PaddingValues(top = 10.dp, bottom = 36.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // Crunchyroll Top Hero Spotlight Banner
+                    if (activeHero != null) {
+                        item(span = { GridItemSpan(2) }, key = "crunchy_hero_banner") {
+                            val cleanHeroDesc = remember(activeHero.description) {
+                                activeHero.description?.let {
+                                    try { Jsoup.parse(it).text() } catch (_: Exception) { it }
+                                } ?: ""
+                            }
+
+                            Surface(
+                                onClick = { onAnimeClick(activeHero) },
+                                shape = RoundedCornerShape(6.dp),
+                                color = CrunchyCardBg,
+                                border = BorderStroke(1.dp, CrunchyBorder),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(235.dp)
+                            ) {
+                                Box(modifier = Modifier.fillMaxSize()) {
+                                    AsyncImage(
+                                        model = activeHero.bannerUrl ?: activeHero.coverUrl,
+                                        contentDescription = activeHero.title,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(
+                                                Brush.verticalGradient(
+                                                    listOf(
+                                                        Color(0x220B0C0F),
+                                                        Color(0xAA0B0C0F),
+                                                        Color(0xF50B0C0F)
+                                                    )
+                                                )
+                                            )
+                                    )
+
+                                    // Top Left Crunchyroll Spotlight Tag
+                                    Surface(
+                                        color = CrunchyOrange,
+                                        shape = RoundedCornerShape(2.dp),
+                                        modifier = Modifier
+                                            .align(Alignment.TopStart)
+                                            .padding(12.dp)
+                                    ) {
+                                        Text(
+                                            text = "TOP PICK FOR YOU",
+                                            fontSize = 9.5.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = Color.Black,
+                                            letterSpacing = 0.8.sp,
+                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                        )
+                                    }
+
+                                    // Hero Slide Selector Dots
+                                    Row(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .padding(12.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        heroItems.forEachIndexed { idx, _ ->
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(if (idx == heroIndex) 18.dp else 7.dp)
+                                                    .height(7.dp)
+                                                    .clip(RoundedCornerShape(3.dp))
+                                                    .background(if (idx == heroIndex) CrunchyOrange else Color(0x66FFFFFF))
+                                                    .clickable { heroIndex = idx }
+                                            )
+                                        }
+                                    }
+
+                                    Column(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomStart)
+                                            .padding(14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = activeHero.title,
+                                            fontSize = 17.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = Color.White,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (cleanHeroDesc.isNotBlank()) {
+                                            Text(
+                                                text = cleanHeroDesc,
+                                                fontSize = 11.5.sp,
+                                                color = Color(0xFFD0D4DF),
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                                lineHeight = 15.sp
+                                            )
+                                        }
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Surface(
+                                                onClick = { onAnimeClick(activeHero) },
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = CrunchyOrange
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                                                    Text(
+                                                        text = "START WATCHING S1 E1",
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.ExtraBold,
+                                                        color = Color.Black
+                                                    )
+                                                }
+                                            }
+                                            Text(
+                                                text = "Sub | Dub",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = CrunchyTeal
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (watchingList.isNotEmpty()) {
+                        item(span = { GridItemSpan(2) }, key = "watching_rail_header") {
+                            GlassSectionHeader(
+                                title = "CONTINUE WATCHING",
+                                icon = Icons.Default.PlayCircle,
+                                color = CrunchyOrange
+                            )
+                        }
+
+                        item(span = { GridItemSpan(2) }, key = "watching_rail") {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                watchingList.forEach { anime ->
+                                    WatchingCard(media = anime, onClick = { onAnimeClick(anime) })
+                                }
+                            }
+                        }
+                    }
+
+                    item(span = { GridItemSpan(2) }, key = "trending_header") {
+                        GlassSectionHeader(
+                            title = "MOST POPULAR & SIMULCASTS",
+                            icon = Icons.Default.LocalFireDepartment,
+                            color = CrunchyOrange
+                        )
+                    }
+
+                    items(trendingList, key = { "trend_${it.mediaId}" }) { anime ->
+                        PosterCard(media = anime, onClick = { onAnimeClick(anime) })
+                    }
+                }
+            } else {
                 // ================= ANILIST COMMUNITY FEED =================
                 LazyColumn(
                     modifier = Modifier
@@ -144,7 +332,6 @@ fun DashboardScreen(
                     contentPadding = PaddingValues(top = 10.dp, bottom = 36.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // Create Post Box
                     item(key = "create_post_box") {
                         GlassCard(modifier = Modifier.fillMaxWidth()) {
                             Column(modifier = Modifier.padding(12.dp)) {
@@ -162,7 +349,7 @@ fun DashboardScreen(
                                                 .clip(CircleShape)
                                         )
                                     } else {
-                                        Icon(Icons.Default.AccountCircle, contentDescription = null, tint = MaruAccentPink, modifier = Modifier.size(32.dp))
+                                        Icon(Icons.Default.AccountCircle, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(32.dp))
                                     }
 
                                     OutlinedTextField(
@@ -173,8 +360,8 @@ fun DashboardScreen(
                                         maxLines = 3,
                                         modifier = Modifier.weight(1f),
                                         colors = OutlinedTextFieldDefaults.colors(
-                                            focusedBorderColor = MaruAccentPink,
-                                            unfocusedBorderColor = MaruGlassBorderSoft,
+                                            focusedBorderColor = CrunchyOrange,
+                                            unfocusedBorderColor = CrunchyBorder,
                                             focusedTextColor = MaruTextStrong,
                                             unfocusedTextColor = MaruTextStrong
                                         )
@@ -183,13 +370,13 @@ fun DashboardScreen(
                                     Button(
                                         onClick = { submitPost() },
                                         enabled = !isPosting && postText.isNotBlank(),
-                                        colors = ButtonDefaults.buttonColors(containerColor = MaruAccentPink),
+                                        colors = ButtonDefaults.buttonColors(containerColor = CrunchyOrange),
                                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                                     ) {
                                         if (isPosting) {
-                                            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                            CircularProgressIndicator(color = Color.Black, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                                         } else {
-                                            Icon(Icons.Default.Send, contentDescription = "Post", modifier = Modifier.size(16.dp))
+                                            Icon(Icons.Default.Send, contentDescription = "Post", tint = Color.Black, modifier = Modifier.size(16.dp))
                                         }
                                     }
                                 }
@@ -228,13 +415,13 @@ fun DashboardScreen(
                                                 modifier = Modifier
                                                     .size(34.dp)
                                                     .clip(CircleShape)
-                                                    .border(BorderStroke(1.dp, MaruAccentPink), CircleShape)
+                                                    .border(BorderStroke(1.dp, CrunchyOrange), CircleShape)
                                                     .clickable { onUserClick(act.userName) }
                                             )
                                         } else {
                                             Surface(
                                                 shape = CircleShape,
-                                                color = MaruGlassSubtleBg,
+                                                color = CrunchyCardBg,
                                                 modifier = Modifier
                                                     .size(34.dp)
                                                     .clickable { onUserClick(act.userName) }
@@ -259,7 +446,7 @@ fun DashboardScreen(
                                                 Text(
                                                     text = statusStr,
                                                     fontSize = 11.sp,
-                                                    color = MaruAccentPink
+                                                    color = CrunchyOrange
                                                 )
                                             }
                                         }
@@ -281,9 +468,9 @@ fun DashboardScreen(
                                                     onAnimeClick(act.rawMedia)
                                                 }
                                             },
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = Color(0x33000000),
-                                            border = BorderStroke(1.dp, MaruGlassBorderSoft),
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = CrunchySurface,
+                                            border = BorderStroke(1.dp, CrunchyBorder),
                                             modifier = Modifier.fillMaxWidth()
                                         ) {
                                             Row(
@@ -311,7 +498,7 @@ fun DashboardScreen(
                                                     )
                                                 }
                                                 if (act.rawMedia != null) {
-                                                    Icon(Icons.Default.ChevronRight, contentDescription = "View Anime", tint = MaruAccentPink, modifier = Modifier.size(16.dp))
+                                                    Icon(Icons.Default.ChevronRight, contentDescription = "View Anime", tint = CrunchyOrange, modifier = Modifier.size(16.dp))
                                                 }
                                             }
                                         }
@@ -319,52 +506,6 @@ fun DashboardScreen(
                                 }
                             }
                         }
-                    }
-                }
-            } else {
-                // ================= DISCOVERY FEED =================
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(2),
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 14.dp),
-                    contentPadding = PaddingValues(top = 10.dp, bottom = 36.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    if (watchingList.isNotEmpty()) {
-                        item(span = { GridItemSpan(2) }, key = "watching_rail_header") {
-                            GlassSectionHeader(
-                                title = "CONTINUE WATCHING",
-                                icon = Icons.Default.PlayCircle,
-                                color = MaruAccentPink
-                            )
-                        }
-
-                        item(span = { GridItemSpan(2) }, key = "watching_rail") {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                watchingList.forEach { anime ->
-                                    WatchingCard(media = anime, onClick = { onAnimeClick(anime) })
-                                }
-                            }
-                        }
-                    }
-
-                    item(span = { GridItemSpan(2) }, key = "trending_header") {
-                        GlassSectionHeader(
-                            title = "TRENDING & POPULAR ANIME",
-                            icon = Icons.Default.TrendingUp,
-                            color = MaruAccentBlue
-                        )
-                    }
-
-                    items(trendingList, key = { "trend_${it.mediaId}" }) { anime ->
-                        PosterCard(media = anime, onClick = { onAnimeClick(anime) })
                     }
                 }
             }

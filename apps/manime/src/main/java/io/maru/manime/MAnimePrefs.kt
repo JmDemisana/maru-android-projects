@@ -22,6 +22,9 @@ class MAnimePrefs(private val context: Context) {
         val KEY_REPORT_PROGRESS     = booleanPreferencesKey("report_progress")
         val KEY_REMEMBER_POSITION   = booleanPreferencesKey("remember_position")
         val KEY_TORRENT_MAX_SPEED   = intPreferencesKey("torrent_max_dl_kbps") // 0 = unlimited
+        val KEY_PREFERRED_AUDIO     = stringPreferencesKey("preferred_audio") // "SUB" | "DUB"
+        val KEY_PREFERRED_QUALITY   = stringPreferencesKey("preferred_quality") // "1080p" | "720p" | "4K"
+        val KEY_AUTO_SKIP_INTRO     = booleanPreferencesKey("auto_skip_intro")
 
         const val EXT_CLOUDSTREAM = "CLOUDSTREAM"
         const val EXT_ANIYOMI     = "ANIYOMI"
@@ -50,6 +53,9 @@ class MAnimePrefs(private val context: Context) {
     val reportProgress: Flow<Boolean> = context.dataStore.data.map { it[KEY_REPORT_PROGRESS] ?: true }
     val rememberPosition: Flow<Boolean> = context.dataStore.data.map { it[KEY_REMEMBER_POSITION] ?: true }
     val torrentMaxSpeed: Flow<Int> = context.dataStore.data.map { it[KEY_TORRENT_MAX_SPEED] ?: 0 }
+    val preferredAudio: Flow<String> = context.dataStore.data.map { it[KEY_PREFERRED_AUDIO] ?: "SUB" }
+    val preferredQuality: Flow<String> = context.dataStore.data.map { it[KEY_PREFERRED_QUALITY] ?: "1080p" }
+    val autoSkipIntro: Flow<Boolean> = context.dataStore.data.map { it[KEY_AUTO_SKIP_INTRO] ?: false }
 
     // --- Suspend setters ---
     suspend fun setAnilistToken(value: String) = context.dataStore.edit { it[KEY_ANILIST_TOKEN] = value }
@@ -63,6 +69,9 @@ class MAnimePrefs(private val context: Context) {
     suspend fun setReportProgress(value: Boolean) = context.dataStore.edit { it[KEY_REPORT_PROGRESS] = value }
     suspend fun setRememberPosition(value: Boolean) = context.dataStore.edit { it[KEY_REMEMBER_POSITION] = value }
     suspend fun setTorrentMaxSpeed(value: Int) = context.dataStore.edit { it[KEY_TORRENT_MAX_SPEED] = value }
+    suspend fun setPreferredAudio(value: String) = context.dataStore.edit { it[KEY_PREFERRED_AUDIO] = value }
+    suspend fun setPreferredQuality(value: String) = context.dataStore.edit { it[KEY_PREFERRED_QUALITY] = value }
+    suspend fun setAutoSkipIntro(value: Boolean) = context.dataStore.edit { it[KEY_AUTO_SKIP_INTRO] = value }
 
     // Episode watch position cache: "mediaId:ep" -> seconds
     private fun posKey(mediaId: Int, ep: Int) = longPreferencesKey("pos_${mediaId}_$ep")

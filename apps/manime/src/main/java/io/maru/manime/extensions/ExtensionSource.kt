@@ -23,17 +23,20 @@ data class SubtitleTrack(
 
 data class StreamLink(
     val url: String,               // Direct HTTP URL (mp4/m3u8) or magnet: link
-    val quality: String,           // e.g. "1080p", "720p", "4K", "Auto", "Torrent"
+    val quality: String,           // e.g. "1080p", "720p", "4K", "Auto"
     val sourceName: String,
     val isTorrent: Boolean = false,
+    val infoHash: String? = null,
+    val fileIdx: Int? = null,
     val audioType: String = "SUB", // "SUB" | "DUB" | "DUAL_AUDIO"
-    val methodType: String = "TORRENT", // "TORRENT" | "STREMIO" | "CLOUDSTREAM" | "ANIYOMI"
+    val methodType: String = "TORRENT",
     val seeders: Int? = null,
     val filename: String? = null,
-    val formatBadge: String? = null, // "MKV (Soft Subs)", "HLS", "MP4"
+    val formatBadge: String? = null,
     val headers: Map<String, String> = emptyMap(),
     val subtitles: List<SubtitleTrack> = emptyList(),
-    val sizeBytes: Long? = null
+    val sizeBytes: Long? = null,
+    val score: Int = 0
 )
 
 sealed interface ExtensionSource {

@@ -10,8 +10,8 @@ android {
 
     defaultConfig {
         applicationId = "io.maru.manime"
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = System.getenv("NANAMI_ANIME_VERSION_CODE")?.toIntOrNull() ?: 2
+        versionName = System.getenv("NANAMI_ANIME_VERSION_NAME") ?: "2.0.0"
     }
 
     val keystorePropsFile = rootProject.file("apps/manime/keystore.properties")
@@ -34,7 +34,11 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (keystorePropsFile.exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

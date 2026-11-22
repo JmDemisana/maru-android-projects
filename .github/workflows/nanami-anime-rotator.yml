@@ -1,0 +1,118 @@
+name: Nanami Anime Rotator
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/manime/**"
+      - ".github/workflows/nanami-anime-rotator.yml"
+    tags:
+      - "nanami-anime-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: gradle
+
+      - name: Prepare Android SDK
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$(command -v sdkmanager || find "$SDK" -name sdkmanager -type f | head -n 1)"
+          echo "Using SDK at $SDK"
+          echo "Using sdkmanager at $SDKMANAGER"
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --sdk_root="$SDK" "platforms;android-36" "build-tools;36.1.0" > /dev/null
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
+      - name: Resolve version
+        run: |
+          VERSION_NAME="${GITHUB_REF_NAME#nanami-anime-v}"
+          if [ "$VERSION_NAME" = "main" ] || [ -z "$VERSION_NAME" ]; then
+            VERSION_NAME="2.0.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "NANAMI_ANIME_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "NANAMI_ANIME_VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          echo "Building Nanami Anime $VERSION_NAME (code ${GITHUB_RUN_NUMBER})"
+
+      - name: Prepare signing key
+        env:
+          MARU_STUDY_KEYSTORE_B64: ${{ secrets.MARU_STUDY_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MARU_STUDY_KEYSTORE_B64:-}" ]; then
+            mkdir -p apps/manime/keystore
+            KEYSTORE=apps/manime/keystore/nanami-anime-release.jks
+            printf '%s' "$MARU_STUDY_KEYSTORE_B64" | base64 --decode > "$KEYSTORE"
+            cat > apps/manime/keystore.properties <<'EOF'
+          storeFile=keystore/nanami-anime-release.jks
+          storePassword=maru-study-release
+          keyAlias=maru-study
+          keyPassword=maru-study-release
+          EOF
+            echo "Configured permanent release keystore."
+          else
+            echo "Using fallback debug signing key."
+          fi
+
+      - name: Build Nanami Anime release APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :apps:manime:assembleRelease --console=plain
+
+      - name: Verify signature
+        run: |
+          APK=$(find apps/manime/build/outputs/apk/release -name "*.apk" | head -n 1)
+          test -f "$APK"
+          APKSIGNER=$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f | sort | tail -n 1)
+          "$APKSIGNER" verify --print-certs "$APK"
+          echo "BUILT_APK=$APK" >> "$GITHUB_ENV"
+
+      - name: Stage APK
+        run: |
+          mkdir -p out
+          cp "$BUILT_APK" "out/nanami-anime-${NANAMI_ANIME_VERSION_NAME}.apk"
+          cp "$BUILT_APK" "out/nanami-anime-latest.apk"
+          ls -lh out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanami-anime-${{ env.NANAMI_ANIME_VERSION_NAME }}
+          path: out/*.apk
+
+      - name: Update rolling nanami-anime-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nanami-anime-latest
+          name: Nanami Anime Latest (${{ env.NANAMI_ANIME_VERSION_NAME }})
+          make_latest: "true"
+          files: |
+            out/nanami-anime-latest.apk
+            out/nanami-anime-${{ env.NANAMI_ANIME_VERSION_NAME }}.apk
+          body: |
+            Rolling Rotator build for **Nanami Anime** (v${{ env.NANAMI_ANIME_VERSION_NAME }}).
+
+            What's inside:
+            - Authentic Crunchyroll Dark & Orange (#F47521) interface
+            - Built-in silent episode streaming engine (zero addon setup or torrent jargon)
+            - 1-Tap Japanese (Sub) and English (Dub) audio & soft-subtitle switching
+            - AniSkip "SKIP INTRO" / "SKIP ENDING" button
+            - Private app-only Offline Vault (`.nanami` internal storage, hidden from external gallery/video players)
+            - Full AniList Watchlist & 85% auto-scrobble sync

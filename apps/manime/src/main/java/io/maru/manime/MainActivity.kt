@@ -10,14 +10,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -25,11 +22,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,23 +40,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-enum class NavigationGroup(val title: String, val color: Color) {
-    RECOMMENDATION_ENGINE("RECOMMENDATION ENGINE", MaruAccentPink),
-    ANIME_TRACKING("ANIME LIBRARY & TRACKING", MaruAccentBlue),
-    SYSTEM("CLIENT & SYSTEM", MaruAccentPurple)
-}
-
 enum class NavigationScreen(
     val title: String,
     val subtitle: String,
-    val icon: ImageVector,
-    val group: NavigationGroup
+    val icon: ImageVector
 ) {
-    DASHBOARD("Discovery", "Community & Trending Feed", Icons.Default.AutoAwesome, NavigationGroup.RECOMMENDATION_ENGINE),
-    RECOMMENDATIONS("Taste", "Personalized Recommendations", Icons.Default.Recommend, NavigationGroup.RECOMMENDATION_ENGINE),
-    PROFILE("Library", "AniList Watchlist & Progress", Icons.Default.CollectionsBookmark, NavigationGroup.ANIME_TRACKING),
-    SEARCH("Search", "Anime, Studios & Voice Cast", Icons.Default.Search, NavigationGroup.ANIME_TRACKING),
-    SETTINGS("Settings", "Layout, Extensions & AniList", Icons.Default.Settings, NavigationGroup.SYSTEM)
+    DASHBOARD("Home", "Featured & Simulcasts", Icons.Default.Home),
+    PROFILE("My Lists", "Watchlist & Offline Vault", Icons.Default.BookmarkBorder),
+    RECOMMENDATIONS("Browse", "Genres, Seasons & Dubs", Icons.Default.GridView),
+    SEARCH("Search", "Find Series & Cast", Icons.Default.Search),
+    SETTINGS("Account", "Audio, Sync & Preferences", Icons.Default.PersonOutline)
 }
 
 class MainActivity : ComponentActivity() {
@@ -125,11 +115,14 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
     val anilistAvatar by prefs.anilistAvatar.collectAsStateWithLifecycle(initialValue = "")
     val reportProgress by prefs.reportProgress.collectAsStateWithLifecycle(initialValue = true)
     val rememberPosition by prefs.rememberPosition.collectAsStateWithLifecycle(initialValue = true)
+    val preferredAudio by prefs.preferredAudio.collectAsStateWithLifecycle(initialValue = "SUB")
+    val preferredQuality by prefs.preferredQuality.collectAsStateWithLifecycle(initialValue = "1080p")
+    val autoSkipIntro by prefs.autoSkipIntro.collectAsStateWithLifecycle(initialValue = false)
 
-    var selectedScreen by remember { mutableStateOf(NavigationScreen.PROFILE) }
+    // Crunchyroll launches directly onto Home feed!
+    var selectedScreen by remember { mutableStateOf(NavigationScreen.DASHBOARD) }
     var selectedAnimeDetail by remember { mutableStateOf<AnimeMedia?>(null) }
     var selectedUserProfile by remember { mutableStateOf<String?>(null) }
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
     // User library list disk cache for 0ms instant startup
     val cacheFile = remember { File(context.filesDir, "cached_user_lists.json") }
@@ -238,7 +231,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                 watchingList = totalWatching.distinctBy { it.mediaId }
                 completedCount = totalCompleted
                 planningCount = totalPlanning
-            } catch (e: Exception) {}
+            } catch (_: Exception) {}
         }
     }
 
@@ -271,7 +264,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                 }
                 recommendations = recs
             } catch (e: Exception) {
-                Toast.makeText(context, "Error fetching recommendations: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Error fetching catalog: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
             } finally {
                 isRecLoading = false
             }
@@ -311,381 +304,297 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
         }
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet(
-                drawerContainerColor = Color(0xFF0E0A1A),
-                drawerContentColor = MaruTextStrong,
-                drawerShape = RoundedCornerShape(topEnd = 16.dp, bottomEnd = 16.dp),
-                modifier = Modifier.width(300.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color(0xFF1E1433), Color(0xFF100B1D), Color(0xFF07050A))
-                            )
-                        )
-                        .statusBarsPadding()
-                        .verticalScroll(rememberScrollState())
-                        .padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    // Header Brand & User Profile (Matches MAudio perfectly)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Surface(
-                            shape = CircleShape,
-                            color = MaruAccentPink.copy(alpha = 0.2f),
-                            border = BorderStroke(1.dp, MaruAccentPink.copy(alpha = 0.6f)),
-                            modifier = Modifier.size(38.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    Icons.Default.PlayCircleFilled,
-                                    contentDescription = null,
-                                    tint = MaruAccentPink,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                "MANIME",
-                                style = MaterialTheme.typography.titleMedium.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaruTextStrong,
-                                    letterSpacing = 1.2.sp
-                                )
-                            )
-                            val userTag = effectiveUser?.name?.takeIf { it.isNotBlank() } ?: "PpolHi"
-                            Text(
-                                "Logged in as @$userTag",
-                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
-                                color = MaruAccentPink
-                            )
-                        }
-                    }
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = CrunchyBgBlack
+    ) {
+        Scaffold(
+            containerColor = CrunchyBgBlack,
+            topBar = {
+                if (selectedAnimeDetail == null && selectedUserProfile == null) {
+                    Column {
+                        TopAppBar(
+                            title = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Image(
+                                        painter = painterResource(id = R.drawable.ic_nanami_anime_logo),
+                                        contentDescription = "Nanami Anime",
+                                        modifier = Modifier.size(34.dp)
+                                    )
+                                    Column {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = "nanami",
+                                                fontWeight = FontWeight.ExtraBold,
+                                                fontSize = 19.sp,
+                                                color = CrunchyOrange,
+                                                letterSpacing = 0.5.sp
+                                            )
+                                            Text(
+                                                text = "anime",
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 19.sp,
+                                                color = Color.White,
+                                                letterSpacing = 0.5.sp
+                                            )
+                                        }
+                                    }
+                                }
+                            },
+                            actions = {
+                                // Quick Audio Mode Indicator Pill (SUB / DUB)
+                                Surface(
+                                    onClick = {
+                                        val nextMode = if (preferredAudio == "SUB") "DUB" else "SUB"
+                                        scope.launch { prefs.setPreferredAudio(nextMode) }
+                                    },
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = CrunchyCardBg,
+                                    border = BorderStroke(1.dp, CrunchyOrange),
+                                    modifier = Modifier.padding(end = 8.dp)
+                                ) {
+                                    Text(
+                                        text = if (preferredAudio == "DUB") "DUB" else "SUB",
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = CrunchyOrange,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
 
-                    HorizontalDivider(color = MaruGlassBorderSoft, thickness = 1.dp)
+                                IconButton(
+                                    onClick = {
+                                        selectedAnimeDetail = null
+                                        selectedUserProfile = null
+                                        selectedScreen = NavigationScreen.SEARCH
+                                    }
+                                ) {
+                                    Icon(Icons.Default.Search, contentDescription = "Search", tint = Color.White)
+                                }
 
-                    // Navigation Groups and Items
-                    NavigationGroup.values().forEach { group ->
-                        val screensInGroup = NavigationScreen.values().filter { it.group == group }
-                        if (screensInGroup.isNotEmpty()) {
-                            Text(
-                                group.title,
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = group.color,
-                                    letterSpacing = 1.sp,
-                                    fontSize = 10.sp
-                                )
-                            )
-                            Spacer(Modifier.height(4.dp))
-                            screensInGroup.forEach { screen ->
-                                val isSelected = selectedScreen == screen && selectedAnimeDetail == null && selectedUserProfile == null
                                 Surface(
                                     onClick = {
                                         selectedAnimeDetail = null
                                         selectedUserProfile = null
-                                        selectedScreen = screen
-                                        scope.launch { drawerState.close() }
+                                        selectedScreen = NavigationScreen.SETTINGS
                                     },
-                                    shape = MaruInputShape,
-                                    color = if (isSelected) MaruAccentPink.copy(alpha = 0.16f) else Color.Transparent,
-                                    border = BorderStroke(
-                                        1.dp,
-                                        if (isSelected) MaruAccentPink.copy(alpha = 0.6f) else Color.Transparent
-                                    ),
-                                    modifier = Modifier.fillMaxWidth()
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = CrunchyCardBg,
+                                    border = BorderStroke(1.dp, CrunchyBorder),
+                                    modifier = Modifier.padding(end = 12.dp)
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                                        verticalAlignment = Alignment.CenterVertically
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        Icon(
-                                            screen.icon,
-                                            contentDescription = null,
-                                            tint = if (isSelected) MaruAccentPink else MaruTextMuted,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                        Spacer(Modifier.width(14.dp))
-                                        Column {
-                                            Text(
-                                                screen.title,
-                                                style = MaterialTheme.typography.bodyMedium.copy(
-                                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                                                ),
-                                                color = if (isSelected) MaruTextStrong else MaruTextMuted
+                                        if (effectiveUser?.avatarUrl != null) {
+                                            AsyncImage(
+                                                model = effectiveUser?.avatarUrl,
+                                                contentDescription = effectiveUser?.name,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier
+                                                    .size(22.dp)
+                                                    .clip(CircleShape)
                                             )
-                                            Text(
-                                                screen.subtitle,
-                                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                                                color = MaruTextMuted.copy(alpha = 0.6f)
+                                        } else {
+                                            Icon(
+                                                Icons.Default.AccountCircle,
+                                                contentDescription = null,
+                                                tint = CrunchyOrange,
+                                                modifier = Modifier.size(20.dp)
                                             )
                                         }
+                                        Text(
+                                            text = effectiveUser?.name ?: "Guest",
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaruTextStrong
+                                        )
                                     }
                                 }
+                            },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = CrunchySurface,
+                                titleContentColor = MaruTextStrong
+                            )
+                        )
+                        HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
+                    }
+                }
+            },
+            bottomBar = {
+                if (selectedAnimeDetail == null && selectedUserProfile == null) {
+                    Column {
+                        HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
+                        NavigationBar(
+                            containerColor = CrunchySurface,
+                            contentColor = MaruTextStrong,
+                            tonalElevation = 0.dp
+                        ) {
+                            NavigationScreen.values().forEach { screen ->
+                                val isSelected = selectedScreen == screen
+                                NavigationBarItem(
+                                    selected = isSelected,
+                                    onClick = {
+                                        selectedAnimeDetail = null
+                                        selectedUserProfile = null
+                                        selectedScreen = screen
+                                    },
+                                    icon = {
+                                        Icon(
+                                            imageVector = screen.icon,
+                                            contentDescription = screen.title,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = screen.title,
+                                            fontSize = 10.5.sp,
+                                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                                        )
+                                    },
+                                    colors = NavigationBarItemDefaults.colors(
+                                        selectedIconColor = CrunchyOrange,
+                                        selectedTextColor = CrunchyOrange,
+                                        indicatorColor = CrunchyOrange.copy(alpha = 0.14f),
+                                        unselectedIconColor = MaruTextMuted,
+                                        unselectedTextColor = MaruTextMuted
+                                    )
+                                )
                             }
-                            Spacer(Modifier.height(8.dp))
                         }
-                    }
-
-                    Spacer(Modifier.weight(1f))
-
-                    // Bottom Service / AniList Sync Status
-                    val isSyncActive = anilistToken.isNotBlank()
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(if (isSyncActive) MaruAccentGreen.copy(alpha = 0.12f) else MaruGlassSubtleBg, MaruPillShape)
-                            .border(BorderStroke(1.dp, if (isSyncActive) MaruAccentGreen.copy(alpha = 0.4f) else MaruGlassBorderSoft), MaruPillShape)
-                            .padding(horizontal = 14.dp, vertical = 8.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .background(if (isSyncActive) MaruAccentGreen else MaruTextMuted, CircleShape)
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Text(
-                            if (isSyncActive) "ANILIST SYNC ACTIVE" else "GUEST MODE",
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                            color = if (isSyncActive) MaruAccentGreen else MaruTextMuted
-                        )
-                    }
-
-                    Spacer(Modifier.height(10.dp))
-
-                    Box(
-                        modifier = Modifier.fillMaxWidth(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "with <3, Maru & Nanami",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                                letterSpacing = 0.5.sp
-                            ),
-                            color = MaruTextMuted.copy(alpha = 0.65f)
-                        )
                     }
                 }
             }
-        }
-    ) {
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = MaruBgBase
-        ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(
-                                    Color(0xFF140D26),
-                                    Color(0xFF090611),
-                                    Color(0xFF040208)
-                                )
-                            )
-                        )
-                )
-
-                Scaffold(
-                    containerColor = Color.Transparent,
-                    topBar = {
-                        if (selectedAnimeDetail == null && selectedUserProfile == null) {
-                            TopAppBar(
-                                title = {
-                                    Text(
-                                        text = selectedScreen.title,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 19.sp,
-                                        color = MaruTextStrong
-                                    )
-                                },
-                                navigationIcon = {
-                                    IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                        Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaruTextStrong)
-                                    }
-                                },
-                                actions = {
-                                    Surface(
-                                        onClick = {
-                                            selectedAnimeDetail = null
-                                            selectedUserProfile = null
-                                            selectedScreen = NavigationScreen.SETTINGS
-                                        },
-                                        shape = MaruPillShape,
-                                        color = Color(0x2218122B),
-                                        border = BorderStroke(1.dp, MaruGlassBorderSoft),
-                                        modifier = Modifier.padding(end = 12.dp)
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                        ) {
-                                            if (effectiveUser?.avatarUrl != null) {
-                                                AsyncImage(
-                                                    model = effectiveUser?.avatarUrl,
-                                                    contentDescription = effectiveUser?.name,
-                                                    contentScale = ContentScale.Crop,
-                                                    modifier = Modifier
-                                                        .size(24.dp)
-                                                        .clip(CircleShape)
-                                                )
-                                            } else {
-                                                Icon(
-                                                    Icons.Default.AccountCircle,
-                                                    contentDescription = null,
-                                                    tint = MaruAccentPink,
-                                                    modifier = Modifier.size(20.dp)
-                                                )
-                                            }
-                                            Text(
-                                                text = effectiveUser?.name ?: "Guest",
-                                                fontSize = 11.5.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = MaruTextStrong
-                                            )
-                                        }
-                                    }
-                                },
-                                colors = TopAppBarDefaults.topAppBarColors(
-                                    containerColor = Color.Transparent,
-                                    titleContentColor = MaruTextStrong
-                                )
-                            )
+        ) { paddingValues ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues)
+            ) {
+                if (selectedAnimeDetail != null) {
+                    AnimeDetailScreen(
+                        media = selectedAnimeDetail!!,
+                        anilistToken = anilistToken,
+                        prefs = prefs,
+                        onBack = { selectedAnimeDetail = null },
+                        onMediaUpdated = { updated ->
+                            selectedAnimeDetail = updated
+                            refreshProfile()
+                        },
+                        onUserClick = { userClicked ->
+                            selectedUserProfile = userClicked
                         }
-                    }
-                ) { paddingValues ->
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(paddingValues)
-                    ) {
-                        if (selectedAnimeDetail != null) {
-                            AnimeDetailScreen(
-                                media = selectedAnimeDetail!!,
+                    )
+                } else if (selectedUserProfile != null) {
+                    UserProfileScreen(
+                        username = selectedUserProfile!!,
+                        anilistToken = anilistToken,
+                        onBack = { selectedUserProfile = null },
+                        onAnimeClick = { selectedAnimeDetail = it },
+                        onUserClick = { newProfile -> selectedUserProfile = newProfile }
+                    )
+                } else {
+                    AnimatedContent(
+                        targetState = selectedScreen,
+                        transitionSpec = {
+                            val enter = fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing))
+                            val exit = fadeOut(animationSpec = tween(140, easing = FastOutLinearInEasing))
+                            enter togetherWith exit
+                        },
+                        label = "CrunchyMainScreenTransition"
+                    ) { screen ->
+                        when (screen) {
+                            NavigationScreen.DASHBOARD -> DashboardScreen(
+                                user = effectiveUser,
                                 anilistToken = anilistToken,
-                                onBack = { selectedAnimeDetail = null },
-                                onMediaUpdated = { updated ->
-                                    selectedAnimeDetail = updated
-                                    refreshProfile()
+                                watchingList = watchingList,
+                                trendingList = trendingList,
+                                activitiesList = activitiesList,
+                                isLoading = isDashboardLoading,
+                                onRefresh = refreshDashboard,
+                                onPostCreated = { newAct ->
+                                    activitiesList = listOf(newAct) + activitiesList
                                 },
-                                onUserClick = { userClicked ->
-                                    selectedUserProfile = userClicked
-                                }
-                            )
-                        } else if (selectedUserProfile != null) {
-                            UserProfileScreen(
-                                username = selectedUserProfile!!,
-                                anilistToken = anilistToken,
-                                onBack = { selectedUserProfile = null },
                                 onAnimeClick = { selectedAnimeDetail = it },
-                                onUserClick = { newProfile -> selectedUserProfile = newProfile }
+                                onUserClick = { selectedUserProfile = it }
                             )
-                        } else {
-                            AnimatedContent(
-                                targetState = selectedScreen,
-                                transitionSpec = {
-                                    val enter = fadeIn(animationSpec = tween(240, easing = FastOutSlowInEasing)) +
-                                            scaleIn(initialScale = 0.97f, animationSpec = tween(240, easing = FastOutSlowInEasing))
-                                    val exit = fadeOut(animationSpec = tween(160, easing = FastOutLinearInEasing)) +
-                                            scaleOut(targetScale = 1.02f, animationSpec = tween(160, easing = FastOutLinearInEasing))
-                                    enter togetherWith exit
+                            NavigationScreen.PROFILE -> ProfileScreen(
+                                user = effectiveUser,
+                                allLists = userAnimeLists,
+                                watchingCount = watchingList.size,
+                                completedCount = completedCount,
+                                planningCount = planningCount,
+                                anilistToken = anilistToken,
+                                prefs = prefs,
+                                isLoading = isDashboardLoading,
+                                onLoginClick = {
+                                    val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=22736&response_type=token"
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
+                                    context.startActivity(intent)
                                 },
-                                label = "MainScreenTransition"
-                            ) { screen ->
-                                when (screen) {
-                                    NavigationScreen.DASHBOARD -> DashboardScreen(
-                                        user = effectiveUser,
-                                        anilistToken = anilistToken,
-                                        watchingList = watchingList,
-                                        trendingList = trendingList,
-                                        activitiesList = activitiesList,
-                                        isLoading = isDashboardLoading,
-                                        onRefresh = refreshDashboard,
-                                        onPostCreated = { newAct ->
-                                            activitiesList = listOf(newAct) + activitiesList
-                                        },
-                                        onAnimeClick = { selectedAnimeDetail = it },
-                                        onUserClick = { selectedUserProfile = it }
-                                    )
-                                    NavigationScreen.PROFILE -> ProfileScreen(
-                                        user = effectiveUser,
-                                        allLists = userAnimeLists,
-                                        watchingCount = watchingList.size,
-                                        completedCount = completedCount,
-                                        planningCount = planningCount,
-                                        anilistToken = anilistToken,
-                                        isLoading = isDashboardLoading,
-                                        onLoginClick = {
-                                            val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=22736&response_type=token"
-                                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
-                                            context.startActivity(intent)
-                                        },
-                                        onLogoutClick = {
-                                            scope.launch {
-                                                prefs.setAnilistToken("")
-                                                prefs.setAnilistUsername("")
-                                                prefs.setAnilistAvatar("")
-                                            }
-                                        },
-                                        onAnimeClick = { selectedAnimeDetail = it }
-                                    )
-                                    NavigationScreen.RECOMMENDATIONS -> RecommendationsScreen(
-                                        recommendations = recommendations,
-                                        isLoading = isRecLoading,
-                                        isLoggedIn = anilistToken.isNotBlank(),
-                                        username = effectiveUser?.name ?: "PpolHi",
-                                        selectedCategory = selectedRecCategory,
-                                        onSelectCategory = fetchRecommendations,
-                                        onLoginClick = {
-                                            val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=22736&response_type=token"
-                                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
-                                            context.startActivity(intent)
-                                        },
-                                        onAnimeClick = { selectedAnimeDetail = it }
-                                    )
-                                    NavigationScreen.SEARCH -> SearchScreen(
-                                        searchResults = searchResults,
-                                        isSearching = isSearching,
-                                        onSearch = performSearch,
-                                        onAnimeClick = { selectedAnimeDetail = it },
-                                        onUserClick = { selectedUserProfile = it }
-                                    )
-                                    NavigationScreen.SETTINGS -> SettingsScreen(
-                                        user = effectiveUser,
-                                        anilistUsername = anilistUsername,
-                                        isLoggedIn = anilistToken.isNotBlank(),
-                                        reportProgress = reportProgress,
-                                        onToggleReportProgress = { scope.launch { prefs.setReportProgress(it) } },
-                                        rememberPosition = rememberPosition,
-                                        onToggleRememberPosition = { scope.launch { prefs.setRememberPosition(it) } },
-                                        onLoginClick = {
-                                            val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=22736&response_type=token"
-                                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
-                                            context.startActivity(intent)
-                                        },
-                                        onLogoutClick = {
-                                            scope.launch {
-                                                prefs.setAnilistToken("")
-                                                prefs.setAnilistUsername("")
-                                                prefs.setAnilistAvatar("")
-                                            }
-                                        }
-                                    )
+                                onLogoutClick = {
+                                    scope.launch {
+                                        prefs.setAnilistToken("")
+                                        prefs.setAnilistUsername("")
+                                        prefs.setAnilistAvatar("")
+                                    }
+                                },
+                                onAnimeClick = { selectedAnimeDetail = it }
+                            )
+                            NavigationScreen.RECOMMENDATIONS -> RecommendationsScreen(
+                                recommendations = recommendations,
+                                isLoading = isRecLoading,
+                                isLoggedIn = anilistToken.isNotBlank(),
+                                username = effectiveUser?.name ?: "PpolHi",
+                                selectedCategory = selectedRecCategory,
+                                onSelectCategory = fetchRecommendations,
+                                onLoginClick = {
+                                    val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=22736&response_type=token"
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
+                                    context.startActivity(intent)
+                                },
+                                onAnimeClick = { selectedAnimeDetail = it }
+                            )
+                            NavigationScreen.SEARCH -> SearchScreen(
+                                searchResults = searchResults,
+                                isSearching = isSearching,
+                                onSearch = performSearch,
+                                onAnimeClick = { selectedAnimeDetail = it },
+                                onUserClick = { selectedUserProfile = it }
+                            )
+                            NavigationScreen.SETTINGS -> SettingsScreen(
+                                user = effectiveUser,
+                                anilistUsername = anilistUsername,
+                                isLoggedIn = anilistToken.isNotBlank(),
+                                preferredAudio = preferredAudio,
+                                onSelectPreferredAudio = { scope.launch { prefs.setPreferredAudio(it) } },
+                                preferredQuality = preferredQuality,
+                                onSelectPreferredQuality = { scope.launch { prefs.setPreferredQuality(it) } },
+                                autoSkipIntro = autoSkipIntro,
+                                onToggleAutoSkipIntro = { scope.launch { prefs.setAutoSkipIntro(it) } },
+                                reportProgress = reportProgress,
+                                onToggleReportProgress = { scope.launch { prefs.setReportProgress(it) } },
+                                rememberPosition = rememberPosition,
+                                onToggleRememberPosition = { scope.launch { prefs.setRememberPosition(it) } },
+                                onLoginClick = {
+                                    val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=22736&response_type=token"
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
+                                    context.startActivity(intent)
+                                },
+                                onLogoutClick = {
+                                    scope.launch {
+                                        prefs.setAnilistToken("")
+                                        prefs.setAnilistUsername("")
+                                        prefs.setAnilistAvatar("")
+                                    }
                                 }
-                            }
+                            )
                         }
                     }
                 }

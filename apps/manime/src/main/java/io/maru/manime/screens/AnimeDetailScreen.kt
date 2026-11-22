@@ -31,6 +31,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import io.maru.manime.*
+import io.maru.manime.extensions.AnimeIdMappings
+import io.maru.manime.extensions.CrunchyEpisodeMeta
+import io.maru.manime.extensions.CrunchyrollStreamEngine
+import io.maru.manime.player.PlayerScreen
+import io.maru.manime.torrent.TorrentStreamService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -41,6 +46,7 @@ import org.jsoup.Jsoup
 fun AnimeDetailScreen(
     media: AnimeMedia,
     anilistToken: String,
+    prefs: MAnimePrefs,
     onBack: () -> Unit,
     onMediaUpdated: (AnimeMedia) -> Unit = {},
     onUserClick: (String) -> Unit = {}
@@ -52,6 +58,14 @@ fun AnimeDetailScreen(
     var isSynopsisExpanded by remember { mutableStateOf(false) }
     var isUpdatingList by remember { mutableStateOf(false) }
     var showEditSheet by remember { mutableStateOf(false) }
+
+    val preferredAudioFlow by prefs.preferredAudio.collectAsState(initial = "SUB")
+    var selectedAudioMode by remember(preferredAudioFlow) { mutableStateOf(preferredAudioFlow) }
+
+    var activePlayingEp by remember { mutableStateOf<CrunchyEpisodeMeta?>(null) }
+    var animeMappings by remember { mutableStateOf<AnimeIdMappings?>(null) }
+
+    val offlineVaultList by TorrentStreamService.offlineEpisodes.collectAsState()
 
     var streamingEpisodes by remember { mutableStateOf<List<StreamingEpisode>>(emptyList()) }
     var isEpisodesLoading by remember { mutableStateOf(true) }
@@ -74,6 +88,15 @@ fun AnimeDetailScreen(
         isCastLoading = true
         isSimilarLoading = true
         isFriendsLoading = true
+        TorrentStreamService.loadOfflineVault(context)
+
+        scope.launch {
+            try {
+                animeMappings = withContext(Dispatchers.IO) {
+                    CrunchyrollStreamEngine.getAnimeMappings(currentMedia.mediaId, currentMedia.title)
+                }
+            } catch (_: Exception) {}
+        }
 
         scope.launch {
             try {
@@ -121,17 +144,25 @@ fun AnimeDetailScreen(
         }
     }
 
-    // Dynamic tabs: if no streaming episodes, hide Episodes tab completely!
-    val availableTabs = remember(streamingEpisodes) {
-        if (streamingEpisodes.isNotEmpty()) {
-            listOf("Overview", "Episodes (${streamingEpisodes.size})", "Cast")
-        } else {
-            listOf("Overview", "Cast")
-        }
+    val isReleasing = currentMedia.status?.equals("RELEASING", ignoreCase = true) == true
+    val latestAiredEp = currentMedia.latestAiredEpisode
+
+    val completeEpisodes = remember(animeMappings, streamingEpisodes, currentMedia.episodes, latestAiredEp) {
+        CrunchyrollStreamEngine.buildCompleteEpisodeList(
+            mappings = animeMappings,
+            anilistStreamingEps = streamingEpisodes,
+            totalEpisodes = currentMedia.episodes,
+            latestAired = latestAiredEp
+        )
+    }
+
+    // Crunchyroll puts EPISODES right up front!
+    val availableTabs = remember(completeEpisodes) {
+        listOf("Episodes (${completeEpisodes.size})", "Overview", "Cast")
     }
 
     var selectedTabIndex by remember { mutableIntStateOf(0) }
-    val currentTabName = availableTabs.getOrElse(selectedTabIndex) { "Overview" }
+    val currentTabName = availableTabs.getOrElse(selectedTabIndex) { "Episodes" }
 
     // Accurate English Dub validation: Must have English VA in Cast OR explicit English Dub link
     val hasEnglishDub = remember(castList, currentMedia.externalLinks) {
@@ -215,8 +246,28 @@ fun AnimeDetailScreen(
         }
     }
 
-    val isReleasing = currentMedia.status?.equals("RELEASING", ignoreCase = true) == true
-    val latestAiredEp = currentMedia.latestAiredEpisode
+    if (activePlayingEp != null) {
+        val ep = activePlayingEp!!
+        PlayerScreen(
+            media = currentMedia,
+            episodeNum = ep.episodeNumber,
+            episodeTitle = ep.title,
+            initialAudioMode = selectedAudioMode,
+            prefs = prefs,
+            onEpisodeWatched = { watchedNum ->
+                if (watchedNum > currentMedia.progress) {
+                    updateProgress(watchedNum)
+                }
+            },
+            onSwitchEpisode = { targetNum ->
+                val nextMeta = completeEpisodes.firstOrNull { it.episodeNumber == targetNum }
+                    ?: CrunchyEpisodeMeta(targetNum, "Episode $targetNum")
+                activePlayingEp = nextMeta
+            },
+            onBack = { activePlayingEp = null }
+        )
+        return
+    }
 
     Scaffold(
         containerColor = Color.Transparent,
@@ -491,12 +542,107 @@ fun AnimeDetailScreen(
                 }
             }
 
-            // Sub Navigation Tab Bar: [Overview] [Episodes] [Cast]
+            // Crunchyroll Action Block: START WATCHING CTA + SUB / DUB Audio Switcher
+            item(key = "crunchy_cta_bar") {
+                val nextEpNum = (currentMedia.progress + 1).coerceAtMost((latestAiredEp ?: currentMedia.episodes ?: 9999).coerceAtLeast(1))
+                val targetEpMeta = completeEpisodes.firstOrNull { it.episodeNumber == nextEpNum }
+                    ?: completeEpisodes.firstOrNull()
+                    ?: CrunchyEpisodeMeta(1, "Episode 1")
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // Big Crunchyroll Orange START WATCHING Button
+                    Button(
+                        onClick = { activePlayingEp = targetEpMeta },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                        shape = RoundedCornerShape(4.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = CrunchyOrange)
+                    ) {
+                        Icon(
+                            Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            tint = Color.Black,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        val btnText = if (currentMedia.progress > 0) {
+                            "CONTINUE WATCHING S1 E${targetEpMeta.episodeNumber}"
+                        } else {
+                            "START WATCHING S1 E1"
+                        }
+                        Text(
+                            text = btnText,
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.Black,
+                            letterSpacing = 0.6.sp
+                        )
+                    }
+
+                    // Audio Language Selector: [SUBTITLED (JP)] [ENGLISH DUB]
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "AUDIO:",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaruTextMuted,
+                            letterSpacing = 0.8.sp
+                        )
+                        listOf("SUB" to "Japanese (Sub)", "DUB" to "English Dub").forEach { (mode, label) ->
+                            val isSelected = selectedAudioMode == mode
+                            Surface(
+                                onClick = {
+                                    selectedAudioMode = mode
+                                    scope.launch { prefs.setPreferredAudio(mode) }
+                                },
+                                shape = RoundedCornerShape(4.dp),
+                                color = if (isSelected) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
+                                border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else CrunchyBorder),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    if (isSelected) {
+                                        Icon(
+                                            Icons.Default.Check,
+                                            contentDescription = null,
+                                            tint = CrunchyOrange,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                    }
+                                    Text(
+                                        text = label,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) CrunchyOrange else MaruTextStrong
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sub Navigation Tab Bar: [Episodes] [Overview] [Cast]
             item(key = "sub_tabs") {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     availableTabs.forEachIndexed { index, title ->
@@ -504,8 +650,8 @@ fun AnimeDetailScreen(
                         Surface(
                             onClick = { selectedTabIndex = index },
                             shape = MaruPillShape,
-                            color = if (isSelected) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
-                            border = BorderStroke(1.dp, if (isSelected) MaruAccentPink else MaruGlassBorderSoft),
+                            color = if (isSelected) CrunchyOrange.copy(alpha = 0.22f) else MaruGlassSubtleBg,
+                            border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else MaruGlassBorderSoft),
                             modifier = Modifier.weight(1f)
                         ) {
                             Box(
@@ -515,8 +661,8 @@ fun AnimeDetailScreen(
                                 Text(
                                     text = title.uppercase(),
                                     fontSize = 10.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSelected) MaruAccentPink else MaruTextMuted
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (isSelected) CrunchyOrange else MaruTextMuted
                                 )
                             }
                         }
@@ -780,23 +926,20 @@ fun AnimeDetailScreen(
                     }
                 }
             } else if (currentTabName.startsWith("Episodes", ignoreCase = true)) {
-                // ================= EPISODES TAB =================
-                items(streamingEpisodes, key = { "stream_ep_${it.episodeNumber}" }) { streamEp ->
+                // ================= CRUNCHYROLL EPISODES TAB =================
+                items(completeEpisodes, key = { "crunchy_ep_${it.episodeNumber}" }) { streamEp ->
                     val episodeNum = streamEp.episodeNumber
                     val isWatched = episodeNum <= currentMedia.progress
-
-                    val rawTitle = streamEp.title?.trim()
-                    val cleanSubTitle = if (!rawTitle.isNullOrBlank()) {
-                        rawTitle.replaceFirst(Regex("^Episode\\s*\\d+\\s*[-:\\.]\\s*", RegexOption.IGNORE_CASE), "").trim()
-                    } else ""
-
-                    val displayTitle = if (cleanSubTitle.isNotBlank()) cleanSubTitle else if (!rawTitle.isNullOrBlank()) rawTitle else "Episode $episodeNum"
+                    val displayTitle = streamEp.title.ifBlank { "Episode $episodeNum" }
+                    val offlineEntry = offlineVaultList.firstOrNull {
+                        it.mediaId == currentMedia.mediaId && it.episodeNumber == episodeNum
+                    }
 
                     GlassCard(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 4.dp)
-                            .clickable { updateProgress(episodeNum) }
+                            .clickable { activePlayingEp = streamEp }
                     ) {
                         Row(
                             modifier = Modifier
@@ -805,52 +948,59 @@ fun AnimeDetailScreen(
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            // 16:9 Episode Thumbnail with Play Badge
                             Box(
                                 modifier = Modifier
-                                    .width(112.dp)
-                                    .height(66.dp)
-                                    .clip(MaruInputShape)
-                                    .background(Color(0x33000000)),
+                                    .width(124.dp)
+                                    .height(70.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color(0xFF0B0C0F)),
                                 contentAlignment = Alignment.Center
                             ) {
-                                if (!streamEp.thumbnail.isNullOrBlank()) {
-                                    AsyncImage(
-                                        model = streamEp.thumbnail,
-                                        contentDescription = displayTitle,
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier.fillMaxSize()
-                                    )
-                                    if (isWatched) {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxSize()
-                                                .background(Color(0x66000000))
+                                AsyncImage(
+                                    model = streamEp.thumbnail ?: currentMedia.bannerUrl ?: currentMedia.coverUrl,
+                                    contentDescription = displayTitle,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(if (isWatched) Color(0x88000000) else Color(0x33000000))
+                                )
+
+                                // Center Play Icon
+                                Surface(
+                                    color = if (isWatched) Color(0xCC2ECC71) else Color(0xDD0B0C0F),
+                                    shape = CircleShape,
+                                    border = BorderStroke(1.dp, if (isWatched) Color.Transparent else CrunchyOrange),
+                                    modifier = Modifier.size(30.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = if (isWatched) Icons.Default.Check else Icons.Default.PlayArrow,
+                                            contentDescription = "Play",
+                                            tint = if (isWatched) Color.Black else CrunchyOrange,
+                                            modifier = Modifier.size(18.dp)
                                         )
                                     }
                                 }
 
+                                // Duration pill on bottom right
                                 Surface(
-                                    color = if (isWatched) Color(0xDD4ADE80) else Color(0xCC0E0A1A),
-                                    shape = CircleShape,
-                                    modifier = Modifier.size(28.dp)
+                                    color = Color(0xCC0B0C0F),
+                                    shape = RoundedCornerShape(2.dp),
+                                    modifier = Modifier
+                                        .align(Alignment.BottomEnd)
+                                        .padding(4.dp)
                                 ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        if (isWatched) {
-                                            Icon(
-                                                Icons.Default.Check,
-                                                contentDescription = "Watched",
-                                                tint = Color(0xFF0E0A1A),
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                        } else {
-                                            Text(
-                                                text = "$episodeNum",
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.ExtraBold,
-                                                color = MaruTextStrong
-                                            )
-                                        }
-                                    }
+                                    Text(
+                                        text = "${streamEp.durationMinutes ?: 24}m",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White,
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                    )
                                 }
                             }
 
@@ -860,23 +1010,112 @@ fun AnimeDetailScreen(
                                     .padding(vertical = 2.dp),
                                 verticalArrangement = Arrangement.spacedBy(3.dp)
                             ) {
-                                Text(
-                                    text = "Episode $episodeNum",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 10.5.sp,
-                                        letterSpacing = 0.5.sp
-                                    ),
-                                    color = if (isWatched) MaruAccentGreen else MaruAccentBlue
-                                )
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "S1 E$episodeNum",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            fontSize = 10.5.sp,
+                                            letterSpacing = 0.5.sp
+                                        ),
+                                        color = if (isWatched) MaruAccentGreen else CrunchyOrange
+                                    )
+                                    Text(
+                                        text = "•",
+                                        fontSize = 10.sp,
+                                        color = MaruTextMuted
+                                    )
+                                    Text(
+                                        text = if (selectedAudioMode == "DUB") "Sub | Dub" else "Subtitled",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = CrunchyTeal
+                                    )
+                                }
 
                                 Text(
                                     text = displayTitle,
-                                    fontSize = 13.5.sp,
-                                    fontWeight = if (isWatched) FontWeight.SemiBold else FontWeight.Normal,
-                                    color = if (isWatched) MaruTextStrong else MaruTextStrong.copy(alpha = 0.9f),
-                                    lineHeight = 18.sp
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaruTextStrong,
+                                    maxLines = 2,
+                                    lineHeight = 16.sp
                                 )
+
+                                if (offlineEntry != null) {
+                                    Text(
+                                        text = if (offlineEntry.isCompleted) "Saved in Offline Vault" else "Syncing Offline (${offlineEntry.progressPercent}%)",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (offlineEntry.isCompleted) CrunchyTeal else CrunchyOrange
+                                    )
+                                }
+                            }
+
+                            // 1-Tap Private Offline Vault Download Button
+                            IconButton(
+                                onClick = {
+                                    if (offlineEntry != null) {
+                                        TorrentStreamService.deleteOfflineEpisode(context, currentMedia.mediaId, episodeNum)
+                                        Toast.makeText(context, "Removed Episode $episodeNum from Offline Vault", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        Toast.makeText(context, "Saving Episode $episodeNum to Offline Vault...", Toast.LENGTH_SHORT).show()
+                                        scope.launch {
+                                            val streams = CrunchyrollStreamEngine.resolveRankedStreams(
+                                                anilistId = currentMedia.mediaId,
+                                                animeTitle = currentMedia.title,
+                                                episodeNum = episodeNum,
+                                                preferredAudio = selectedAudioMode
+                                            )
+                                            val bestTorrent = streams.firstOrNull { it.isTorrent }
+                                            if (bestTorrent != null) {
+                                                TorrentStreamService.startOfflineDownload(
+                                                    context = context,
+                                                    magnetUri = bestTorrent.url,
+                                                    fileIdx = bestTorrent.fileIdx,
+                                                    mediaId = currentMedia.mediaId,
+                                                    animeTitle = currentMedia.title,
+                                                    episodeNum = episodeNum,
+                                                    episodeTitle = displayTitle,
+                                                    coverUrl = currentMedia.coverUrl,
+                                                    thumbnailUrl = streamEp.thumbnail ?: currentMedia.bannerUrl ?: currentMedia.coverUrl,
+                                                    audioType = bestTorrent.audioType,
+                                                    quality = bestTorrent.quality
+                                                )
+                                            } else {
+                                                Toast.makeText(context, "Offline stream not available for Episode $episodeNum yet", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    }
+                                }
+                            ) {
+                                when {
+                                    offlineEntry?.isCompleted == true -> {
+                                        Icon(
+                                            Icons.Default.DownloadDone,
+                                            contentDescription = "Offline Ready",
+                                            tint = CrunchyTeal
+                                        )
+                                    }
+                                    offlineEntry != null -> {
+                                        CircularProgressIndicator(
+                                            progress = { (offlineEntry.progressPercent / 100f).coerceIn(0.05f, 1f) },
+                                            color = CrunchyOrange,
+                                            strokeWidth = 2.dp,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    }
+                                    else -> {
+                                        Icon(
+                                            Icons.Default.Download,
+                                            contentDescription = "Download Offline",
+                                            tint = MaruTextMuted
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
