@@ -66,13 +66,14 @@ internal fun PlayerLoading(
         val status = if (torrentRequest == null) null
             else serviceStatus.value.takeIf { it.requestId == torrentRequest && !it.isReady }
         val stateLabel = when {
+            status?.phase == "prebuffer" -> "Buffering the first part"
             status != null -> "Connecting to the source"
             lookingForSource -> "Finding a video source"
             else -> "Preparing the video"
         }
         CircularProgressIndicator(color = CrunchyOrange, strokeWidth = 3.dp, modifier = Modifier.size(32.dp))
         Text(stateLabel, color = Color.White, style = MaterialTheme.typography.titleSmall)
-        if (status != null && status.progressPercent > 0) {
+        if (status?.phase == "prebuffer" && status.progressPercent > 0) {
             LinearProgressIndicator(
                 progress = { (status.progressPercent / 100f).coerceIn(0f, 1f) },
                 modifier = Modifier.widthIn(max = 208.dp).fillMaxWidth(),

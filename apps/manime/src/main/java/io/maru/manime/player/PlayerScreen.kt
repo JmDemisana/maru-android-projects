@@ -144,7 +144,6 @@ private fun EpisodePlayerScreen(
     var playAfterSwitch by remember { mutableStateOf(true) }
     var subtitlesEnabled by remember { mutableStateOf<Boolean?>(null) }
     var selectExternalTrackOnLoad by remember { mutableStateOf(false) }
-    var triedAutomaticSubtitle by remember { mutableStateOf(false) }
 
     val serviceStatus = TorrentStreamService.streamStatus.collectAsState()
     val torrentConnection by remember {
@@ -159,6 +158,7 @@ private fun EpisodePlayerScreen(
     var wantsPlayback by remember { mutableStateOf(true) }
     var isPlayerBuffering by remember { mutableStateOf(true) }
     var hasRenderedFrame by remember { mutableStateOf(false) }
+    var showRebuffering by remember { mutableStateOf(false) }
     val currentPosition = remember { mutableLongStateOf(0L) }
     val bufferedPosition = remember { mutableLongStateOf(0L) }
     val totalDuration = remember { mutableLongStateOf(0L) }
@@ -348,17 +348,15 @@ private fun EpisodePlayerScreen(
         if (requestId != null) TorrentStreamService.stopStream(requestId)
     }
 
-    fun resetPlayback(stopPreviousTorrent: Boolean = true, keepFrame: Boolean = false) {
+    fun resetPlayback(stopPreviousTorrent: Boolean = true) {
         capturePlaybackState()
         playbackAttempt++
         autoPlayCountdown = null
         activeSkipInterval = null
         playbackTracks = Tracks.EMPTY
         isPlayerBuffering = true
-        if (!keepFrame) {
-            hasRenderedFrame = false
-            isSeekable = false
-        }
+        hasRenderedFrame = false
+        isSeekable = false
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
         if (stopPreviousTorrent) stopTorrent()
@@ -368,7 +366,7 @@ private fun EpisodePlayerScreen(
         val current = exoPlayer.currentMediaItem?.localConfiguration ?: return
         selectedOpenSub = sub
         subtitlesEnabled = true
-        resetPlayback(stopPreviousTorrent = false, keepFrame = true)
+        resetPlayback(stopPreviousTorrent = false)
         exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_TEXT)
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
@@ -386,9 +384,10 @@ private fun EpisodePlayerScreen(
         resetPlayback(stopPreviousTorrent = !chosen.isTorrent)
         sourceHeaders = if (chosen.isTorrent) emptyMap() else chosen.headers
         sourceSubtitles = chosen.subtitles
+        val sourceAudio = chosen.audioType.takeIf { it == "SUB" || it == "DUB" } ?: activeAudioMode
         exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
-            .clearOverrides().setPreferredAudioLanguage(if (activeAudioMode == "DUB") "en" else "ja")
-            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !(subtitlesEnabled ?: (activeAudioMode != "DUB")))
+            .clearOverrides().setPreferredAudioLanguage(if (sourceAudio == "DUB") "en" else "ja")
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !(subtitlesEnabled ?: (sourceAudio != "DUB")))
             .setPreferredTextLanguage(selectedOpenSub?.langCode ?: "en").build()
 
         if (chosen.isTorrent) {
@@ -546,16 +545,6 @@ private fun EpisodePlayerScreen(
         }
     }
 
-    LaunchedEffect(playbackTracks, isPlayerBuffering, openSubtitlesList) {
-        if (triedAutomaticSubtitle || activeAudioMode != "SUB" || subtitlesEnabled == false ||
-            selectedOpenSub != null || exoPlayer.playbackState != Player.STATE_READY) return@LaunchedEffect
-        if (playbackTracks.groups.any { it.type == C.TRACK_TYPE_TEXT }) return@LaunchedEffect
-        val englishSubtitle = openSubtitlesList.firstOrNull { it.langCode.lowercase() in setOf("en", "eng") }
-            ?: return@LaunchedEffect
-        triedAutomaticSubtitle = true
-        useOpenSubtitle(englishSubtitle)
-    }
-
     val latestListener by rememberUpdatedState(object : Player.Listener {
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 wantsPlayback = playWhenReady
@@ -612,7 +601,6 @@ private fun EpisodePlayerScreen(
                     // The engine and Media3 can both report the same failure.
                     if (failedAttempt != playbackAttempt.toString()) return@launch
                     if (selectedOpenSub != null) {
-                        triedAutomaticSubtitle = true
                         useOpenSubtitle(null)
                         return@launch
                     }
@@ -718,6 +706,14 @@ private fun EpisodePlayerScreen(
         }
     }
 
+    LaunchedEffect(isPlayerBuffering, hasRenderedFrame) {
+        showRebuffering = false
+        if (isPlayerBuffering && hasRenderedFrame) {
+            delay(250)
+            showRebuffering = true
+        }
+    }
+
     BackHandler {
         if (showFullSettingsPage) {
             showFullSettingsPage = false
@@ -731,6 +727,11 @@ private fun EpisodePlayerScreen(
     val episodeLabel = if (episodeTitle.equals("Episode $episodeNum", true) || episodeTitle.isBlank()) {
         "Episode $episodeNum"
     } else "Episode $episodeNum · $episodeTitle"
+    val sourceAudio = selectedStream?.audioType?.takeIf { it == "SUB" || it == "DUB" } ?: activeAudioMode
+    val englishSubtitle = if (sourceAudio == "SUB" && subtitlesEnabled != false && selectedOpenSub == null &&
+        playbackTracks.groups.none { it.type == C.TRACK_TYPE_TEXT }) {
+        openSubtitlesList.firstOrNull { it.langCode.equals("en", true) || it.langCode.equals("eng", true) }
+    } else null
 
     fun jumpBy(offsetMs: Long) {
         if (!isSeekable) return
@@ -883,11 +884,19 @@ private fun EpisodePlayerScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                if (isPlayerBuffering) "Buffering…" else if (isOfflinePlayback) "Offline" else "",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = if (isPlayerBuffering) CrunchyOrange else Color.White
-                            )
+                            Box(Modifier.weight(1f)) {
+                                if (englishSubtitle != null && !showRebuffering) {
+                                    TextButton(onClick = { useOpenSubtitle(englishSubtitle) }) {
+                                        Text("English subtitles")
+                                    }
+                                } else if (showRebuffering || isOfflinePlayback) {
+                                    Text(
+                                        if (showRebuffering) "Buffering…" else "Offline",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = if (showRebuffering) CrunchyOrange else Color.White
+                                    )
+                                }
+                            }
                             val interval = activeSkipInterval
                             TextButton(
                                 enabled = isSeekable,
@@ -909,7 +918,7 @@ private fun EpisodePlayerScreen(
                         buffered = bufferedPosition,
                         duration = totalDuration,
                         isSeekable = isSeekable,
-                        label = "$activeQuality · ${if (activeAudioMode == "DUB") "Dub" else "Sub"}",
+                        label = "$activeQuality · ${if (sourceAudio == "DUB") "Dub" else "Sub"}",
                         onScrub = { scrubbing ->
                             isScrubbing = scrubbing
                             if (!scrubbing) controlsInteraction++
@@ -923,7 +932,7 @@ private fun EpisodePlayerScreen(
             }
             else -> {
                 Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
-                    if (isPlayerBuffering) {
+                    if (showRebuffering) {
                         CircularProgressIndicator(
                             color = CrunchyOrange,
                             strokeWidth = 3.dp,
@@ -1079,7 +1088,7 @@ private fun EpisodePlayerScreen(
                                     }
                                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                         modes.forEach { (mode, label) ->
-                                            val selected = activeAudioMode == mode
+                                            val selected = sourceAudio == mode
                                             Surface(
                                                 onClick = {
                                                     if (!selected) {
