@@ -5,8 +5,39 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.TimeoutCancellationException
 import org.junit.Assert.*
 import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.RandomAccessFile
 
 class StreamSafetyTest {
+    @Test fun batchEpisodeNamesHandleExactNumbersAndVersionSuffixes() {
+        assertEquals(10, torrentEpisodeNumber("Series.S02E010.mkv"))
+        assertEquals(1, torrentEpisodeNumber("[Group] Series - 01v2 [1080p].mkv"))
+        assertEquals(2, torrentEpisodeNumber("02.mp4"))
+        assertNull(torrentEpisodeNumber("Sample - 1080p.mkv"))
+    }
+
+    @Test fun sparseByteRangesStopWhereARequestedPieceIsMissing() = runBlocking {
+        val file = File.createTempFile("nanami-torrent", ".mkv")
+        try {
+            val firstChunk = ByteArray(64 * 1024) { 7 }
+            val output = ByteArrayOutputStream()
+            RandomAccessFile(file, "rw").use { input ->
+                input.write(firstChunk)
+                input.setLength(firstChunk.size * 2L)
+                try {
+                    copyVerifiedRange(input, output, ByteRange(0, input.length() - 1),
+                        isCurrent = { true }, isVerified = { position, _ -> position < firstChunk.size },
+                        timeoutMillis = 30, pollMillis = 1)
+                    fail("An incomplete range must time out")
+                } catch (_: TimeoutCancellationException) {}
+            }
+            assertArrayEquals(firstChunk, output.toByteArray())
+        } finally {
+            file.delete()
+        }
+    }
+
     @Test fun rangesSupportSuffixOpenAndClampedEnds() {
         assertEquals(ByteRange(0, 99), parseByteRange(null, 100))
         assertEquals(ByteRange(80, 99), parseByteRange("bytes=-20", 100))

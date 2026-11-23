@@ -1,6 +1,5 @@
 ﻿package io.maru.manime.screens
 
-import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -26,82 +25,72 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import io.maru.manime.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
 fun UserProfileScreen(
     username: String,
     anilistToken: String,
+    isActive: Boolean = true,
     onBack: () -> Unit,
     onAnimeClick: (AnimeMedia) -> Unit,
     onUserClick: (String) -> Unit
 ) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    var profile by remember(username, anilistToken) { mutableStateOf<AniListProfile?>(null) }
+    var isLoading by remember(username, anilistToken) { mutableStateOf(true) }
+    var profileLoadFailed by remember(username, anilistToken) { mutableStateOf(false) }
+    var retryProfile by remember { mutableIntStateOf(0) }
 
-    var profile by remember(username) { mutableStateOf<AniListProfile?>(null) }
-    var isLoading by remember(username) { mutableStateOf(true) }
+    var selectedTab by remember(username) { mutableIntStateOf(0) }
+    var following by remember(username, anilistToken) { mutableStateOf<List<AniListProfile>?>(null) }
+    var followers by remember(username, anilistToken) { mutableStateOf<List<AniListProfile>?>(null) }
+    var peopleLoadFailed by remember(selectedTab, username, anilistToken) { mutableStateOf(false) }
+    var retryPeople by remember { mutableIntStateOf(0) }
 
-    var selectedTab by remember { mutableIntStateOf(0) } // 0: Watchlist, 1: Following, 2: Followers
-    var followingList by remember { mutableStateOf<List<AniListProfile>>(emptyList()) }
-    var isFollowingLoading by remember { mutableStateOf(false) }
-    var followersList by remember { mutableStateOf<List<AniListProfile>>(emptyList()) }
-    var isFollowersLoading by remember { mutableStateOf(false) }
-
-    androidx.activity.compose.BackHandler {
+    androidx.activity.compose.BackHandler(enabled = isActive) {
         onBack()
     }
 
-    LaunchedEffect(username) {
+    LaunchedEffect(username, anilistToken, retryProfile) {
         isLoading = true
-        withContext(Dispatchers.IO) {
-            try {
-                profile = AniListClient.getUserProfile(username, anilistToken.ifEmpty { null })
-            } catch (_: Exception) {
-                profile = null
-            } finally {
-                isLoading = false
+        profileLoadFailed = false
+        try {
+            profile = withContext(Dispatchers.IO) {
+                AniListClient.getUserProfile(username, anilistToken.ifEmpty { null })
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            profileLoadFailed = true
         }
+        isLoading = false
     }
 
-    fun loadFollowing(userId: Int) {
-        isFollowingLoading = true
-        scope.launch {
-            try {
-                val list = withContext(Dispatchers.IO) {
-                    AniListClient.getUserFollowing(userId, 1, anilistToken.ifEmpty { null })
-                }
-                followingList = list
-            } catch (_: Exception) {
-                followingList = emptyList()
-            } finally {
-                isFollowingLoading = false
+    LaunchedEffect(profile?.id, selectedTab, anilistToken, retryPeople) {
+        val userId = profile?.id ?: return@LaunchedEffect
+        val tab = selectedTab
+        if (tab == 0 || (tab == 1 && following != null) ||
+            (tab == 2 && followers != null)) return@LaunchedEffect
+        peopleLoadFailed = false
+        try {
+            val list = withContext(Dispatchers.IO) {
+                val token = anilistToken.ifEmpty { null }
+                if (tab == 1) AniListClient.getUserFollowing(userId, 1, token)
+                else AniListClient.getUserFollowers(userId, 1, token)
             }
-        }
-    }
-
-    fun loadFollowers(userId: Int) {
-        isFollowersLoading = true
-        scope.launch {
-            try {
-                val list = withContext(Dispatchers.IO) {
-                    AniListClient.getUserFollowers(userId, 1, anilistToken.ifEmpty { null })
-                }
-                followersList = list
-            } catch (_: Exception) {
-                followersList = emptyList()
-            } finally {
-                isFollowersLoading = false
-            }
+            if (tab == 1) following = list.distinctBy { it.id }
+            else followers = list.distinctBy { it.id }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            peopleLoadFailed = true
         }
     }
 
@@ -112,7 +101,11 @@ fun UserProfileScreen(
     } else if (profile == null) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("User not found or profile is private.", color = MaruTextMuted)
+                Text(
+                    if (profileLoadFailed) "Couldn't load this AniList profile." else "User not found or profile is private.",
+                    color = MaruTextMuted
+                )
+                if (profileLoadFailed) TextButton(onClick = { retryProfile++ }) { Text("Try again") }
                 Button(onClick = onBack, colors = ButtonDefaults.buttonColors(containerColor = MaruAccentPink)) {
                     Text("Go Back")
                 }
@@ -126,10 +119,10 @@ fun UserProfileScreen(
         }
         var selectedCategory by remember(availableCategories) { mutableStateOf(availableCategories.firstOrNull() ?: "Watching") }
         val currentCategoryList = remember(u.userLists, selectedCategory) {
-            u.userLists[selectedCategory] ?: emptyList()
+            u.userLists[selectedCategory].orEmpty().distinctBy { it.mediaId }
         }
 
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize().navigationBarsPadding()) {
             // Header with banner & avatar
             Box(
                 modifier = Modifier
@@ -223,11 +216,7 @@ fun UserProfileScreen(
                 listOf("WATCHLIST", "FOLLOWING", "FOLLOWERS").forEachIndexed { idx, title ->
                     val isSelected = selectedTab == idx
                     Surface(
-                        onClick = {
-                            selectedTab = idx
-                            if (idx == 1 && followingList.isEmpty()) loadFollowing(u.id)
-                            if (idx == 2 && followersList.isEmpty()) loadFollowers(u.id)
-                        },
+                        onClick = { selectedTab = idx },
                         shape = MaruPillShape,
                         color = if (isSelected) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
                         border = BorderStroke(1.dp, if (isSelected) MaruAccentPink else MaruGlassBorderSoft),
@@ -309,38 +298,23 @@ fun UserProfileScreen(
                     }
                 }
 
-                1 -> {
-                    // Following Tab
-                    if (isFollowingLoading) {
+                1, 2 -> {
+                    val people = if (selectedTab == 1) following else followers
+                    if (peopleLoadFailed) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(color = MaruAccentPink)
-                        }
-                    } else if (followingList.isEmpty()) {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("Not following anyone.", color = MaruTextMuted, fontSize = 13.sp)
-                        }
-                    } else {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            items(followingList, key = { "f_${it.id}" }) { userItem ->
-                                UserCardRow(user = userItem, onClick = { onUserClick(userItem.name) })
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("Couldn't load this list.", color = MaruTextMuted)
+                                TextButton(onClick = { retryPeople++ }) { Text("Try again") }
                             }
                         }
-                    }
-                }
-
-                2 -> {
-                    // Followers Tab
-                    if (isFollowersLoading) {
+                    } else if (people == null) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             CircularProgressIndicator(color = MaruAccentPink)
                         }
-                    } else if (followersList.isEmpty()) {
+                    } else if (people.isEmpty()) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("No followers found.", color = MaruTextMuted, fontSize = 13.sp)
+                            Text(if (selectedTab == 1) "Not following anyone." else "No followers found.",
+                                color = MaruTextMuted, fontSize = 13.sp)
                         }
                     } else {
                         LazyColumn(
@@ -348,7 +322,7 @@ fun UserProfileScreen(
                             contentPadding = PaddingValues(16.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            items(followersList, key = { "fl_${it.id}" }) { userItem ->
+                            items(people, key = { it.id }) { userItem ->
                                 UserCardRow(user = userItem, onClick = { onUserClick(userItem.name) })
                             }
                         }

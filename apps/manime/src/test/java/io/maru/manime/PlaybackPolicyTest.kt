@@ -26,6 +26,22 @@ class PlaybackPolicyTest {
         assertEquals(2, CrunchyrollStreamEngine.buildCompleteEpisodeList(future, emptyList(), 12, 2, true).size)
     }
 
+    @Test fun pausedAndCancelledShowsRequireReleaseEvidence() {
+        assertNull(latestReleasedEpisode("HIATUS", 12, null))
+        assertNull(latestReleasedEpisode("CANCELLED", 12, null))
+        assertNull(latestReleasedEpisode(null, 12, null))
+        assertEquals(4, latestReleasedEpisode("HIATUS", 12, 5))
+
+        val mappings = AnimeIdMappings(1, episodeCount = 12, episodes = listOf(
+            CrunchyEpisodeMeta(1, title = "Released", airDate = "2000-01-01"),
+            CrunchyEpisodeMeta(2, title = "Scheduled", airDate = "2999-01-01"),
+            CrunchyEpisodeMeta(3, title = "Unknown", airDate = "TBA")
+        ))
+        assertEquals(listOf(1), CrunchyrollStreamEngine.buildCompleteEpisodeList(
+            mappings, emptyList(), 12, null, true
+        ).map { it.episodeNumber })
+    }
+
     @Test fun releaseDatesUseSingaporeEvenBeforeUtcMidnight() {
         assertEquals("2026-11-24", singaporeDate(Instant.parse("2026-11-23T16:01:00Z")))
         assertEquals("2026-11-23", singaporeDate(Instant.parse("2026-11-23T15:59:00Z")))

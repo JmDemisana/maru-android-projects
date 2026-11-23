@@ -13,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -25,6 +26,8 @@ import io.maru.manime.*
 fun RecommendationsScreen(
     recommendations: List<AnimeMedia>,
     isLoading: Boolean,
+    loadFailed: Boolean,
+    onRetry: () -> Unit,
     isLoggedIn: Boolean,
     username: String,
     selectedCategory: String,
@@ -32,7 +35,7 @@ fun RecommendationsScreen(
     onLoginClick: () -> Unit,
     onAnimeClick: (AnimeMedia) -> Unit
 ) {
-    var dubbedOnlyFilter by remember { mutableStateOf(false) }
+    var dubbedOnlyFilter by rememberSaveable { mutableStateOf(false) }
 
     val categories = listOf(
         "For You",
@@ -49,10 +52,7 @@ fun RecommendationsScreen(
 
     val displayedRecs = remember(recommendations, dubbedOnlyFilter) {
         if (!dubbedOnlyFilter) recommendations
-        else {
-            val filtered = recommendations.filter { media -> media.hasEnglishDub }
-            if (filtered.isNotEmpty()) filtered else recommendations
-        }
+        else recommendations.filter { it.hasEnglishDub }
     }
 
     LazyVerticalGrid(
@@ -193,6 +193,16 @@ fun RecommendationsScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     CircularProgressIndicator(color = MaruAccentPink)
+                }
+            }
+        } else if (loadFailed) {
+            item(span = { GridItemSpan(2) }, key = "error") {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("Couldn't load this category.", color = MaruTextMuted)
+                    TextButton(onClick = onRetry) { Text("Try again") }
                 }
             }
         } else if (displayedRecs.isEmpty()) {

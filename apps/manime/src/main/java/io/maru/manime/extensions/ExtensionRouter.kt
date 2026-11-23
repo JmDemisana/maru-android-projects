@@ -2,6 +2,7 @@ package io.maru.manime.extensions
 
 import android.content.Context
 import io.maru.manime.MAnimePrefs
+import io.maru.manime.readResponse
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import okhttp3.OkHttpClient
@@ -51,13 +52,16 @@ class ExtensionRouter(
                 val encoded = URLEncoder.encode(query, "UTF-8")
                 val url = "https://kitsu.io/api/edge/anime?filter[text]=$encoded&page[limit]=1"
                 val req = Request.Builder().url(url).build()
-                val resp = httpClient.newCall(req).execute()
-                val body = resp.body?.string() ?: continue
+                val body = httpClient.newCall(req).readResponse { response ->
+                    if (response.isSuccessful) response.body?.string() else null
+                } ?: continue
                 val json = JSONObject(body)
                 val data = json.optJSONArray("data")
                 if (data != null && data.length() > 0) {
                     return@withContext data.getJSONObject(0).optString("id")
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {}
         }
         null
@@ -84,8 +88,8 @@ class ExtensionRouter(
     }
 
     private fun detectSeeders(raw: String): Int? {
-        val matcher = Pattern.compile("(\\d+)\\s*(?:seed|👤|peers|p)").matcher(raw.lowercase())
-        return if (matcher.find()) matcher.group(1)?.toIntOrNull() else null
+        val matcher = Pattern.compile("(?:👤|seeders|seeds|peers)\\s*:?\\s*(\\d+)|(\\d+)\\s*(?:seed|👤|peers)").matcher(raw.lowercase())
+        return if (matcher.find()) matcher.group(1)?.toIntOrNull() ?: matcher.group(2)?.toIntOrNull() else null
     }
 
     suspend fun resolveStreamsForEpisode(
@@ -101,7 +105,7 @@ class ExtensionRouter(
             if (newLinks.isEmpty()) return
             synchronized(syncResults) {
                 syncResults.addAll(newLinks)
-                val sorted = syncResults.distinctBy { it.url }.sortedWith(
+                val sorted = syncResults.distinctBy { (it.infoHash ?: it.url) to it.fileIdx }.sortedWith(
                     compareByDescending<StreamLink> { it.seeders ?: 0 }
                         .thenByDescending { it.quality == "1080p" }
                         .thenByDescending { it.quality == "4K" }
@@ -112,11 +116,7 @@ class ExtensionRouter(
         }
 
         // 1. Resolve Kitsu ID asynchronously
-        val resolvedKitsuIdDeferred = async(Dispatchers.IO) {
-            kitsuId ?: resolveKitsuId(animeTitle)
-        }
-
-        val resolvedKitsuId = withTimeoutOrNull(3000) { resolvedKitsuIdDeferred.await() }
+        val resolvedKitsuId = kitsuId ?: withTimeoutOrNull(3000) { resolveKitsuId(animeTitle) }
 
         // 2. Query Stremio Addons
         val stremioAddons = prefs.stremioAddons.first()
@@ -133,7 +133,7 @@ class ExtensionRouter(
                         for (qid in queryIds) {
                             val streams = stremioClient.getStreams("series", qid)
                             for (s in streams) {
-                                val fullTitle = "${s.name ?: ""} ${s.title ?: ""}"
+                                val fullTitle = listOfNotNull(s.name, s.title, s.filename).joinToString(" ")
                                 val audio = detectAudioType(fullTitle)
                                 val quality = detectQuality(fullTitle)
                                 val seeds = detectSeeders(fullTitle)
@@ -148,22 +148,31 @@ class ExtensionRouter(
                                             audioType = audio,
                                             methodType = "STREMIO",
                                             seeders = null,
-                                            filename = s.title,
+                                            filename = s.filename ?: s.title,
+                                            headers = s.headers,
+                                            subtitles = s.subtitles,
+                                            sizeBytes = s.sizeBytes,
                                             formatBadge = "HTTP Stream"
                                         )
                                     )
                                 } else if (!s.infoHash.isNullOrEmpty()) {
-                                    val magnet = "magnet:?xt=urn:btih:${s.infoHash}&dn=${URLEncoder.encode(animeTitle, "UTF-8")}"
+                                    val hash = s.infoHash.trim().lowercase()
+                                    val trackers = s.sources.distinct().joinToString("") { "&tr=${URLEncoder.encode(it, "UTF-8")}" }
+                                    val magnet = "magnet:?xt=urn:btih:$hash&dn=${URLEncoder.encode(animeTitle, "UTF-8")}$trackers"
                                     results.add(
                                         StreamLink(
                                             url = magnet,
                                             quality = quality,
                                             sourceName = s.name ?: "Torrentio P2P",
                                             isTorrent = true,
+                                            infoHash = hash,
+                                            fileIdx = s.fileIdx,
                                             audioType = audio,
                                             methodType = "TORRENT",
                                             seeders = seeds,
-                                            filename = s.title,
+                                            filename = s.filename ?: s.title,
+                                            subtitles = s.subtitles,
+                                            sizeBytes = s.sizeBytes,
                                             formatBadge = "MKV (Soft Subs)"
                                         )
                                     )
@@ -171,6 +180,8 @@ class ExtensionRouter(
                             }
                         }
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (_: Exception) {}
                 pushResults(results)
                 results
@@ -203,7 +214,6 @@ class ExtensionRouter(
                                 if (firstMatch != null) {
                                     val episodes = source.getEpisodes(firstMatch.url)
                                     val targetEp = episodes.firstOrNull { it.episodeNumber == episodeNum }
-                                        ?: episodes.firstOrNull()
                                     if (targetEp != null) {
                                         val links = source.getStreamLinks(targetEp.url)
                                         for (link in links) {
@@ -219,11 +229,13 @@ class ExtensionRouter(
                                     }
                                 }
                             } catch (t: Throwable) {
+                                if (t is CancellationException) throw t
                                 android.util.Log.e("ExtensionRouter", "Error running CS source ${source.name}", t)
                             }
                         }
                     }
                 } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
                     android.util.Log.e("ExtensionRouter", "Error in CS plugin execution for ${jar.name}", t)
                 }
                 pushResults(results)
@@ -254,7 +266,6 @@ class ExtensionRouter(
                             if (firstMatch != null) {
                                 val episodes = source.getEpisodes(firstMatch.url)
                                 val targetEp = episodes.firstOrNull { it.episodeNumber == episodeNum }
-                                    ?: episodes.firstOrNull()
                                 if (targetEp != null) {
                                     val links = source.getStreamLinks(targetEp.url)
                                     for (link in links) {
@@ -272,6 +283,7 @@ class ExtensionRouter(
                         }
                     }
                 } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
                     android.util.Log.e("ExtensionRouter", "Error in Aniyomi extension execution for ${extInfo.sourceName}", t)
                 }
                 pushResults(results)
@@ -285,7 +297,7 @@ class ExtensionRouter(
         aniyomiDeferreds.awaitAll()
 
         synchronized(syncResults) {
-            syncResults.distinctBy { it.url }.sortedWith(
+            syncResults.distinctBy { (it.infoHash ?: it.url) to it.fileIdx }.sortedWith(
                 compareByDescending<StreamLink> { it.seeders ?: 0 }
                     .thenByDescending { it.quality == "1080p" }
                     .thenByDescending { it.quality == "4K" }

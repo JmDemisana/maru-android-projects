@@ -9,6 +9,7 @@ import eu.kanade.tachiyomi.animesource.model.SAnimeImpl
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.SEpisodeImpl
 import eu.kanade.tachiyomi.animesource.model.Video
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -118,6 +119,8 @@ class AniyomiExtensionLoader(private val context: Context) {
                         } else null
                     }
                 } else emptyList()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 android.util.Log.e("AniyomiSource", "search error on $name", e)
                 emptyList()
@@ -154,6 +157,8 @@ class AniyomiExtensionLoader(private val context: Context) {
                         } else null
                     }
                 } else emptyList()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 android.util.Log.e("AniyomiSource", "getEpisodes error on $name", e)
                 emptyList()
@@ -175,7 +180,7 @@ class AniyomiExtensionLoader(private val context: Context) {
                     } else emptyList()
                 }
 
-                videos.map { video ->
+                videos.filter { it.videoUrl.isNotBlank() }.map { video ->
                     StreamLink(
                         url = video.videoUrl,
                         quality = video.quality.ifBlank { "HD" },
@@ -184,9 +189,14 @@ class AniyomiExtensionLoader(private val context: Context) {
                         audioType = "SUB",
                         methodType = "ANIYOMI",
                         filename = null,
-                        formatBadge = "Direct Stream"
+                        formatBadge = "Direct Stream",
+                        headers = video.headers.orEmpty(),
+                        subtitles = video.subtitleTracks.filter { it.url.isNotBlank() }
+                            .map { SubtitleTrack(it.url, it.lang) }
                     )
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 android.util.Log.e("AniyomiSource", "getStreamLinks error on $name", e)
                 emptyList()

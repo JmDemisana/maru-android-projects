@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import dalvik.system.DexClassLoader
 import dalvik.system.DexFile
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -137,6 +138,7 @@ class CloudstreamExtensionLoader(private val context: Context) {
                     )
                 }
             } catch (t: Throwable) {
+                if (t is CancellationException) throw t
                 android.util.Log.e("CloudstreamSource", "[$name] Search error for $query", t)
                 emptyList()
             }
@@ -221,23 +223,31 @@ class CloudstreamExtensionLoader(private val context: Context) {
                 android.util.Log.d("CloudstreamSource", "[$name] Found ${results.size} episodes")
                 results
             } catch (t: Throwable) {
+                if (t is CancellationException) throw t
                 android.util.Log.e("CloudstreamSource", "[$name] getEpisodes error for $mediaUrl", t)
                 emptyList()
             }
         }
 
         override suspend fun getStreamLinks(episodeUrl: String): List<StreamLink> = withContext(Dispatchers.IO) {
-            val collectedLinks = mutableListOf<StreamLink>()
+            val collectedLinks = java.util.Collections.synchronizedList(mutableListOf<StreamLink>())
+            val subtitles = java.util.Collections.synchronizedList(mutableListOf<SubtitleTrack>())
             try {
                 android.util.Log.d("CloudstreamSource", "[$name] getStreamLinks for episodeUrl: $episodeUrl")
                 api.loadLinks(
                     data = episodeUrl,
                     isCasting = false,
-                    subtitleCallback = {},
+                    subtitleCallback = { subtitle ->
+                        if (subtitle.url.isNotBlank()) subtitles.add(SubtitleTrack(subtitle.url, subtitle.lang))
+                    },
                     callback = { extractorLink ->
                         val isTorrent = extractorLink.type == ExtractorLinkType.TORRENT ||
                                 extractorLink.type == ExtractorLinkType.MAGNET
 
+                        val headers = extractorLink.headers.toMutableMap()
+                        if (extractorLink.referer.isNotBlank() && headers.keys.none { it.equals("Referer", true) }) {
+                            headers["Referer"] = extractorLink.referer
+                        }
                         collectedLinks.add(
                             StreamLink(
                                 url = extractorLink.url,
@@ -247,16 +257,19 @@ class CloudstreamExtensionLoader(private val context: Context) {
                                 audioType = "SUB",
                                 methodType = "CLOUDSTREAM",
                                 filename = extractorLink.name,
-                                formatBadge = if (isTorrent) "P2P Torrent" else "Direct Stream"
+                                formatBadge = if (isTorrent) "P2P Torrent" else "Direct Stream",
+                                headers = headers
                             )
                         )
                     }
                 )
                 android.util.Log.d("CloudstreamSource", "[$name] Found ${collectedLinks.size} stream links")
             } catch (t: Throwable) {
+                if (t is CancellationException) throw t
                 android.util.Log.e("CloudstreamSource", "[$name] getStreamLinks error for $episodeUrl", t)
             }
-            collectedLinks
+            val tracks = synchronized(subtitles) { subtitles.distinctBy { it.url } }
+            synchronized(collectedLinks) { collectedLinks.map { it.copy(subtitles = tracks) } }
         }
     }
 }

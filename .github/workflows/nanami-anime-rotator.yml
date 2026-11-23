@@ -71,10 +71,10 @@ jobs:
             echo "Using fallback debug signing key."
           fi
 
-      - name: Build Nanami Anime release APK
+      - name: Test and build Nanami Anime release APK
         run: |
           chmod +x gradlew
-          ./gradlew :apps:manime:assembleRelease --console=plain
+          ./gradlew :apps:manime:testDebugUnitTest :apps:manime:assembleRelease --console=plain
 
       - name: Verify signature
         run: |

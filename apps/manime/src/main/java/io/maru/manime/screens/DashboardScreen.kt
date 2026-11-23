@@ -33,9 +33,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import io.maru.manime.*
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -48,7 +47,6 @@ fun DashboardScreen(
     activitiesList: List<AniListActivity>,
     isLoading: Boolean,
     onRefresh: () -> Unit,
-    onPostCreated: (AniListActivity) -> Unit = {},
     onAnimeClick: (AnimeMedia) -> Unit,
     onUserClick: (String) -> Unit = {}
 ) {
@@ -56,16 +54,31 @@ fun DashboardScreen(
     val scope = rememberCoroutineScope()
 
     // Social likes & replies local state map
-    val likedStateMap = remember { mutableStateMapOf<Int, Pair<Boolean, Int>>() }
-    var expandedReplyActivityId by remember { mutableStateOf<Int?>(null) }
-    var repliesByActivity by remember { mutableStateOf<Map<Int, List<ActivityReply>>>(emptyMap()) }
-    var isLoadingReplies by remember { mutableStateOf(false) }
-    var replyDraftText by remember { mutableStateOf("") }
-    var isSendingReply by remember { mutableStateOf(false) }
+    val likedStateMap = remember(anilistToken) { mutableStateMapOf<Int, Pair<Boolean, Int>>() }
+    val pendingLikes = remember(anilistToken) { mutableStateMapOf<Int, Boolean>() }
+    var expandedReplyActivityId by remember(anilistToken) { mutableStateOf<Int?>(null) }
+    val repliesByActivity = remember(anilistToken) { mutableStateMapOf<Int, List<ActivityReply>>() }
+    var isLoadingReplies by remember(expandedReplyActivityId) { mutableStateOf(expandedReplyActivityId != null) }
+    var repliesLoadFailed by remember(expandedReplyActivityId) { mutableStateOf(false) }
+    var replyDraftText by remember(anilistToken, expandedReplyActivityId) { mutableStateOf("") }
+    var isSendingReply by remember(anilistToken, expandedReplyActivityId) { mutableStateOf(false) }
+
+    LaunchedEffect(expandedReplyActivityId, anilistToken) {
+        val id = expandedReplyActivityId ?: return@LaunchedEffect
+        try {
+            val replies = AniListClient.getActivityReplies(id, anilistToken.ifBlank { null })
+            repliesByActivity[id] = (replies + repliesByActivity[id].orEmpty()).distinctBy { it.id }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            repliesLoadFailed = true
+        }
+        isLoadingReplies = false
+    }
 
     val effectiveSimulcasts = remember(simulcastList, trendingList) {
         if (simulcastList.isNotEmpty()) simulcastList
-        else trendingList.filter { it.isReleasing }.ifEmpty { trendingList.drop(6) }
+        else trendingList.filter { it.isReleasing }.distinctBy { it.mediaId }
     }
 
     val dubbedFavorites = remember(trendingList, simulcastList) {
@@ -376,18 +389,27 @@ fun DashboardScreen(
                             Row(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(4.dp))
-                                    .clickable {
+                                    .clickable(enabled = pendingLikes[act.id] != true) {
                                         if (anilistToken.isBlank()) {
                                             Toast.makeText(context, "Sign in with AniList to like posts!", Toast.LENGTH_SHORT).show()
                                         } else {
                                             val nextLiked = !isLiked
                                             val nextCount = (currentLikes + if (nextLiked) 1 else -1).coerceAtLeast(0)
+                                            if (pendingLikes[act.id] == true) return@clickable
+                                            pendingLikes[act.id] = true
                                             likedStateMap[act.id] = Pair(nextLiked, nextCount)
                                             scope.launch {
                                                 try {
                                                     val res = AniListClient.toggleActivityLike(act.id, anilistToken)
                                                     likedStateMap[act.id] = res
-                                                } catch (_: Exception) {}
+                                                } catch (e: CancellationException) {
+                                                    throw e
+                                                } catch (_: Exception) {
+                                                    likedStateMap[act.id] = likeInfo
+                                                    Toast.makeText(context, "Couldn't update the like.", Toast.LENGTH_SHORT).show()
+                                                } finally {
+                                                    pendingLikes.remove(act.id)
+                                                }
                                             }
                                         }
                                     }
@@ -413,19 +435,7 @@ fun DashboardScreen(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(4.dp))
                                     .clickable {
-                                        if (isRepliesOpen) {
-                                            expandedReplyActivityId = null
-                                        } else {
-                                            expandedReplyActivityId = act.id
-                                            isLoadingReplies = true
-                                            scope.launch {
-                                                try {
-                                                    val list = AniListClient.getActivityReplies(act.id)
-                                                    repliesByActivity = repliesByActivity + (act.id to list)
-                                                } catch (_: Exception) {}
-                                                isLoadingReplies = false
-                                            }
-                                        }
+                                        expandedReplyActivityId = if (isRepliesOpen) null else act.id
                                     }
                                     .padding(vertical = 4.dp, horizontal = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -495,6 +505,9 @@ fun DashboardScreen(
                                         }
                                     }
                                 }
+                                if (repliesLoadFailed) {
+                                    Text("Couldn't load replies. Reopen to try again.", color = MaruTextMuted, fontSize = 12.sp)
+                                }
 
                                 // Reply Input
                                 Row(
@@ -528,8 +541,10 @@ fun DashboardScreen(
                                                 try {
                                                     val created = AniListClient.postActivityReply(act.id, txt, anilistToken)
                                                     val existing = repliesByActivity[act.id] ?: emptyList()
-                                                    repliesByActivity = repliesByActivity + (act.id to (existing + created))
+                                                    repliesByActivity[act.id] = (existing + created).distinctBy { it.id }
                                                     replyDraftText = ""
+                                                } catch (e: CancellationException) {
+                                                    throw e
                                                 } catch (e: Exception) {
                                                     Toast.makeText(context, "Reply error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
                                                 } finally {

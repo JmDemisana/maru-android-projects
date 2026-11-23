@@ -2,12 +2,22 @@ package io.maru.manime
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
-private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "manime_prefs")
+private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
+    name = "manime_prefs",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() }
+)
+
+internal data class AniListSession(
+    val token: String = "",
+    val username: String = "",
+    val avatarUrl: String? = null
+)
 
 class MAnimePrefs(private val context: Context) {
     companion object {
@@ -44,8 +54,13 @@ class MAnimePrefs(private val context: Context) {
 
     // --- Flows ---
     val anilistToken: Flow<String> = context.dataStore.data.map { it[KEY_ANILIST_TOKEN] ?: "" }
-    val anilistUsername: Flow<String> = context.dataStore.data.map { it[KEY_ANILIST_USERNAME] ?: "" }
-    val anilistAvatar: Flow<String> = context.dataStore.data.map { it[KEY_ANILIST_AVATAR] ?: "" }
+    internal val anilistSession: Flow<AniListSession> = context.dataStore.data.map {
+        AniListSession(
+            token = it[KEY_ANILIST_TOKEN].orEmpty(),
+            username = it[KEY_ANILIST_USERNAME].orEmpty(),
+            avatarUrl = it[KEY_ANILIST_AVATAR]?.takeIf(String::isNotBlank)
+        )
+    }
     val anilistScoreFormat: Flow<String> = context.dataStore.data.map { it[KEY_ANILIST_SCORE_FMT] ?: "POINT_100" }
     val extensionType: Flow<String> = context.dataStore.data.map { it[KEY_EXT_TYPE] ?: EXT_STREMIO }
     val stremioUrl: Flow<String> = context.dataStore.data.map { it[KEY_STREMIO_URL] ?: DEFAULT_STREMIO_URL }
@@ -60,17 +75,25 @@ class MAnimePrefs(private val context: Context) {
     val autoSkipIntro: Flow<Boolean> = context.dataStore.data.map { it[KEY_AUTO_SKIP_INTRO] ?: false }
 
     // --- Suspend setters ---
-    suspend fun setAnilistToken(value: String) = context.dataStore.edit {
-        if (it[KEY_ANILIST_TOKEN] != value) {
-            it.remove(KEY_ANILIST_USERNAME)
-            it.remove(KEY_ANILIST_AVATAR)
-            it.remove(KEY_ANILIST_SCORE_FMT)
-        }
-        it[KEY_ANILIST_TOKEN] = value
+    suspend fun setAnilistSession(token: String, viewer: AniListUser) = context.dataStore.edit {
+        it[KEY_ANILIST_TOKEN] = token
+        it.writeAniListViewer(viewer)
     }
-    suspend fun setAnilistUsername(value: String) = context.dataStore.edit { it[KEY_ANILIST_USERNAME] = value }
-    suspend fun setAnilistAvatar(value: String) = context.dataStore.edit { it[KEY_ANILIST_AVATAR] = value }
-    suspend fun setAnilistScoreFormat(value: String) = context.dataStore.edit { it[KEY_ANILIST_SCORE_FMT] = value }
+    suspend fun updateAnilistViewer(token: String, viewer: AniListUser) = context.dataStore.edit {
+        if (it[KEY_ANILIST_TOKEN] == token) it.writeAniListViewer(viewer)
+    }
+    suspend fun clearAnilistSession() = context.dataStore.edit {
+        it.remove(KEY_ANILIST_TOKEN)
+        it.remove(KEY_ANILIST_USERNAME)
+        it.remove(KEY_ANILIST_AVATAR)
+        it.remove(KEY_ANILIST_SCORE_FMT)
+    }
+    private fun MutablePreferences.writeAniListViewer(viewer: AniListUser) {
+        this[KEY_ANILIST_USERNAME] = viewer.name
+        this[KEY_ANILIST_SCORE_FMT] = viewer.scoreFormat
+        val avatar = viewer.avatarUrl
+        if (avatar.isNullOrBlank()) remove(KEY_ANILIST_AVATAR) else this[KEY_ANILIST_AVATAR] = avatar
+    }
     suspend fun setExtensionType(value: String) = context.dataStore.edit { it[KEY_EXT_TYPE] = value }
     suspend fun setStremioUrl(value: String) = context.dataStore.edit { it[KEY_STREMIO_URL] = value }
     suspend fun setStremioAddons(value: Set<String>) = context.dataStore.edit { it[KEY_STREMIO_ADDONS] = value }

@@ -2,74 +2,70 @@ package io.maru.manime.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
 import io.maru.manime.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 @Composable
 fun SearchScreen(
-    searchResults: List<AnimeMedia>,
-    isSearching: Boolean,
-    onSearch: (String) -> Unit,
+    anilistToken: String,
     onAnimeClick: (AnimeMedia) -> Unit,
     onUserClick: (String) -> Unit = {}
 ) {
-    val scope = rememberCoroutineScope()
-    var query by remember { mutableStateOf("") }
-    var searchType by remember { mutableIntStateOf(0) } // 0: Anime, 1: Users
-    var dubbedOnly by remember { mutableStateOf(false) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var searchUsers by rememberSaveable { mutableStateOf(false) }
+    var dubbedOnly by rememberSaveable { mutableStateOf(false) }
+    var retry by remember { mutableIntStateOf(0) }
+    val term = query.trim()
+    val token = anilistToken.takeUnless { searchUsers || it.isBlank() }
+    var animeResults by remember(term, searchUsers, token) { mutableStateOf<List<AnimeMedia>>(emptyList()) }
+    var userResults by remember(term, searchUsers, token) { mutableStateOf<List<AniListProfile>>(emptyList()) }
+    var isSearching by remember(term, searchUsers, token) { mutableStateOf(term.isNotEmpty()) }
+    var searchFailed by remember(term, searchUsers, token) { mutableStateOf(false) }
 
-    var userResults by remember { mutableStateOf<List<AniListProfile>>(emptyList()) }
-    var isUserSearching by remember { mutableStateOf(false) }
-
-    fun performUserSearch(q: String) {
-        if (q.isBlank()) {
-            userResults = emptyList()
-            return
-        }
-        isUserSearching = true
-        scope.launch {
-            try {
-                val list = withContext(Dispatchers.IO) {
-                    AniListClient.searchUsers(q)
+    LaunchedEffect(term, searchUsers, token, retry) {
+        if (term.isEmpty()) return@LaunchedEffect
+        isSearching = true
+        searchFailed = false
+        try {
+            delay(300)
+            if (searchUsers) {
+                userResults = withContext(Dispatchers.IO) { AniListClient.searchUsers(term).distinctBy { it.id } }
+            } else {
+                animeResults = withContext(Dispatchers.IO) {
+                    AniListClient.search(term, 1, 30, token).results.distinctBy { it.mediaId }
                 }
-                userResults = list
-            } catch (_: Exception) {
-                userResults = emptyList()
-            } finally {
-                isUserSearching = false
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            searchFailed = true
         }
+        isSearching = false
     }
 
-    val filteredAnimeResults = remember(searchResults, dubbedOnly) {
-        if (!dubbedOnly) searchResults
-        else searchResults.filter { m -> m.hasEnglishDub }
+    val filteredAnimeResults = remember(animeResults, dubbedOnly) {
+        if (!dubbedOnly) animeResults
+        else animeResults.filter { it.hasEnglishDub }
     }
 
     Column(
@@ -94,14 +90,10 @@ fun SearchScreen(
                 Spacer(Modifier.width(8.dp))
                 TextField(
                     value = query,
-                    onValueChange = {
-                        query = it
-                        if (searchType == 0) onSearch(it)
-                        else performUserSearch(it)
-                    },
+                    onValueChange = { query = it },
                     placeholder = {
                         Text(
-                            if (searchType == 0) "Search anime, movies, ONAs..." else "Search AniList users...",
+                            if (searchUsers) "Search AniList users..." else "Search anime, movies, ONAs...",
                             color = MaruTextMuted.copy(alpha = 0.6f)
                         )
                     },
@@ -117,11 +109,7 @@ fun SearchScreen(
                     modifier = Modifier.weight(1f)
                 )
                 if (query.isNotEmpty()) {
-                    IconButton(onClick = {
-                        query = ""
-                        if (searchType == 0) onSearch("")
-                        else userResults = emptyList()
-                    }) {
+                    IconButton(onClick = { query = "" }) {
                         Icon(Icons.Default.Clear, contentDescription = "Clear", tint = MaruTextMuted)
                     }
                 }
@@ -136,13 +124,10 @@ fun SearchScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Surface(
-                onClick = {
-                    searchType = 0
-                    if (query.isNotBlank()) onSearch(query)
-                },
+                onClick = { searchUsers = false },
                 shape = MaruPillShape,
-                color = if (searchType == 0) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
-                border = BorderStroke(1.dp, if (searchType == 0) MaruAccentPink else MaruGlassBorderSoft),
+                color = if (!searchUsers) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
+                border = BorderStroke(1.dp, if (!searchUsers) MaruAccentPink else MaruGlassBorderSoft),
                 modifier = Modifier.weight(1f)
             ) {
                 Box(modifier = Modifier.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
@@ -150,19 +135,16 @@ fun SearchScreen(
                         "ANIME",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
-                        color = if (searchType == 0) MaruAccentPink else MaruTextMuted
+                        color = if (!searchUsers) MaruAccentPink else MaruTextMuted
                     )
                 }
             }
 
             Surface(
-                onClick = {
-                    searchType = 1
-                    if (query.isNotBlank()) performUserSearch(query)
-                },
+                onClick = { searchUsers = true },
                 shape = MaruPillShape,
-                color = if (searchType == 1) MaruAccentBlue.copy(alpha = 0.25f) else MaruGlassSubtleBg,
-                border = BorderStroke(1.dp, if (searchType == 1) MaruAccentBlue else MaruGlassBorderSoft),
+                color = if (searchUsers) MaruAccentBlue.copy(alpha = 0.25f) else MaruGlassSubtleBg,
+                border = BorderStroke(1.dp, if (searchUsers) MaruAccentBlue else MaruGlassBorderSoft),
                 modifier = Modifier.weight(1f)
             ) {
                 Box(modifier = Modifier.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
@@ -170,13 +152,13 @@ fun SearchScreen(
                         "USERS",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
-                        color = if (searchType == 1) MaruAccentBlue else MaruTextMuted
+                        color = if (searchUsers) MaruAccentBlue else MaruTextMuted
                     )
                 }
             }
         }
 
-        if (searchType == 0) {
+        if (!searchUsers) {
             // Dubbed Only Toggle Chip for Anime
             Row(
                 modifier = Modifier
@@ -210,7 +192,9 @@ fun SearchScreen(
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = MaruAccentPink)
                 }
-            } else if (filteredAnimeResults.isEmpty() && query.isNotEmpty()) {
+            } else if (searchFailed) {
+                SearchRetry { retry++ }
+            } else if (filteredAnimeResults.isEmpty() && term.isNotEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("No anime found matching '$query'.", color = MaruTextMuted, fontSize = 13.sp)
                 }
@@ -230,11 +214,13 @@ fun SearchScreen(
         } else {
             // User search results
             Spacer(Modifier.height(8.dp))
-            if (isUserSearching) {
+            if (isSearching) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = MaruAccentBlue)
                 }
-            } else if (userResults.isEmpty() && query.isNotEmpty()) {
+            } else if (searchFailed) {
+                SearchRetry { retry++ }
+            } else if (userResults.isEmpty() && term.isNotEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("No users found matching '$query'.", color = MaruTextMuted, fontSize = 13.sp)
                 }
@@ -249,6 +235,16 @@ fun SearchScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SearchRetry(onRetry: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Couldn't load search results.", color = MaruTextMuted)
+            TextButton(onClick = onRetry) { Text("Try again") }
         }
     }
 }

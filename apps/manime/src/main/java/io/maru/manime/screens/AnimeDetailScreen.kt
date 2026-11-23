@@ -39,8 +39,11 @@ import io.maru.manime.extensions.CrunchyEpisodeMeta
 import io.maru.manime.extensions.CrunchyrollStreamEngine
 import io.maru.manime.extensions.StreamDubStatus
 import io.maru.manime.player.PlayerScreen
+import io.maru.manime.torrent.OfflineEpisodeEntry
 import io.maru.manime.torrent.TorrentStreamService
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
@@ -51,19 +54,42 @@ fun AnimeDetailScreen(
     media: AnimeMedia,
     anilistToken: String,
     prefs: MAnimePrefs,
+    isActive: Boolean = true,
     onBack: () -> Unit,
     onMediaUpdated: (AnimeMedia) -> Unit = {},
+    onAnimeClick: (AnimeMedia) -> Unit = {},
     onUserClick: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var currentMedia by remember(media.mediaId) { mutableStateOf(media) }
+    var currentMedia by remember(media.mediaId, anilistToken) {
+        mutableStateOf(media.copy(listEntryId = null, listStatus = null, progress = 0,
+            score = null, notes = null, isPrivate = false, updatedAt = null))
+    }
+    var isEntryReady by remember(media.mediaId, anilistToken) { mutableStateOf(false) }
+    var isEntryLoading by remember(media.mediaId, anilistToken) { mutableStateOf(anilistToken.isNotBlank()) }
+    var entryRetry by remember { mutableIntStateOf(0) }
+    LaunchedEffect(media.mediaId, anilistToken, entryRetry) {
+        if (anilistToken.isBlank()) return@LaunchedEffect
+        isEntryLoading = true
+        try {
+            val detail = withContext(Dispatchers.IO) { AniListClient.getMediaDetail(media.mediaId, anilistToken) }
+            currentMedia = detail.copy(hasEnglishDubCast = detail.hasEnglishDubCast || media.hasEnglishDubCast)
+            isEntryReady = true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            isEntryReady = false
+        }
+        isEntryLoading = false
+    }
     var isSynopsisExpanded by remember { mutableStateOf(false) }
     var isUpdatingList by remember { mutableStateOf(false) }
     var showEditPage by remember { mutableStateOf(false) }
 
     val preferredAudioFlow by prefs.preferredAudio.collectAsState(initial = "SUB")
+    val reportProgress by prefs.reportProgress.collectAsState(initial = true)
     val userScoreFormat by prefs.anilistScoreFormat.collectAsState(initial = "POINT_100")
     var selectedAudioMode by remember(preferredAudioFlow) { mutableStateOf(preferredAudioFlow) }
 
@@ -72,6 +98,65 @@ fun AnimeDetailScreen(
     var streamDubStatus by remember { mutableStateOf(StreamDubStatus()) }
 
     val offlineVaultList by TorrentStreamService.offlineEpisodes.collectAsState()
+    val pendingOfflineActions = remember { mutableStateMapOf<Pair<Int, Int>, Unit>() }
+
+    fun onOfflineAction(episode: CrunchyEpisodeMeta, episodeTitle: String, entry: OfflineEpisodeEntry?, audioMode: String) {
+        val anime = currentMedia
+        val episodeNum = episode.episodeNumber
+        val key = anime.mediaId to episodeNum
+        if (pendingOfflineActions.put(key, Unit) != null) return
+        scope.launch {
+            try {
+                if (entry != null && entry.failure == null) {
+                    val removed = TorrentStreamService.deleteOfflineEpisode(context, anime.mediaId, episodeNum)
+                    val message = when {
+                        !removed -> "Could not remove Episode $episodeNum."
+                        entry.isCompleted -> "Removed Episode $episodeNum from Downloads."
+                        else -> "Canceled download for Episode $episodeNum."
+                    }
+                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                val streams = CrunchyrollStreamEngine.resolveRankedStreams(
+                    anilistId = anime.mediaId,
+                    animeTitle = anime.title,
+                    episodeNum = episodeNum,
+                    preferredAudio = audioMode,
+                    preferredQuality = prefs.preferredQuality.first(),
+                    isMovie = anime.format == "MOVIE"
+                )
+                val source = streams.firstOrNull {
+                    it.isTorrent && it.url.startsWith("magnet:", ignoreCase = true) &&
+                        (it.audioType == audioMode || it.audioType == "DUAL_AUDIO")
+                }
+                if (source == null) {
+                    val audioLabel = if (audioMode == "DUB") "English dub" else "Japanese audio"
+                    Toast.makeText(context, "No $audioLabel download found for Episode $episodeNum.", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                TorrentStreamService.startOfflineDownload(
+                    context = context,
+                    magnetUri = source.url,
+                    fileIdx = source.fileIdx,
+                    mediaId = anime.mediaId,
+                    animeTitle = anime.title,
+                    episodeNum = episodeNum,
+                    episodeTitle = episodeTitle,
+                    coverUrl = anime.coverUrl,
+                    thumbnailUrl = episode.thumbnail ?: anime.bannerUrl ?: anime.coverUrl,
+                    audioType = source.audioType,
+                    quality = source.quality
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                Toast.makeText(context, "Could not change the download for Episode $episodeNum.", Toast.LENGTH_SHORT).show()
+            } finally {
+                pendingOfflineActions.remove(key)
+            }
+        }
+    }
 
     var streamingEpisodes by remember { mutableStateOf<List<StreamingEpisode>>(emptyList()) }
     var castList by remember { mutableStateOf<List<CastMember>>(emptyList()) }
@@ -88,7 +173,6 @@ fun AnimeDetailScreen(
     LaunchedEffect(currentMedia.mediaId) {
         isCastLoading = true
         isSimilarLoading = true
-        isFriendsLoading = true
         streamDubStatus = StreamDubStatus()
         TorrentStreamService.loadOfflineVault(context)
 
@@ -106,7 +190,8 @@ fun AnimeDetailScreen(
                 streamDubStatus = CrunchyrollStreamEngine.checkStreamDubAvailability(
                     anilistId = currentMedia.mediaId,
                     animeTitle = currentMedia.title,
-                    episodeNum = 1
+                    episodeNum = 1,
+                    isMovie = currentMedia.format == "MOVIE"
                 )
             } catch (_: Exception) {}
         }
@@ -142,30 +227,37 @@ fun AnimeDetailScreen(
                 isSimilarLoading = false
             }
         }
-        launch {
+    }
+
+    LaunchedEffect(media.mediaId, anilistToken) {
+        friendsStatus = emptyList()
+        isFriendsLoading = anilistToken.isNotBlank()
+        if (anilistToken.isNotBlank()) {
             try {
                 friendsStatus = withContext(Dispatchers.IO) {
-                    AniListClient.getFriendsMediaStatus(currentMedia.mediaId, anilistToken.ifEmpty { null })
+                    AniListClient.getFriendsMediaStatus(media.mediaId, anilistToken)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
                 friendsStatus = emptyList()
-            } finally {
-                isFriendsLoading = false
             }
         }
+        isFriendsLoading = false
     }
 
     val isReleasing = currentMedia.status?.equals("RELEASING", ignoreCase = true) == true
     val latestAiredEp = currentMedia.latestAiredEpisode
+    val hasUncertainReleaseCount = currentMedia.hasUncertainReleaseCount
 
     // Strictly cap episodes at released count! Never show unreleased future episodes.
-    val completeEpisodes = remember(animeMappings, streamingEpisodes, currentMedia.episodes, latestAiredEp, isReleasing) {
+    val completeEpisodes = remember(animeMappings, streamingEpisodes, currentMedia.episodes, latestAiredEp, hasUncertainReleaseCount) {
         CrunchyrollStreamEngine.buildCompleteEpisodeList(
             mappings = animeMappings,
             anilistStreamingEps = streamingEpisodes,
             totalEpisodes = currentMedia.episodes,
             latestAired = latestAiredEp,
-            isReleasing = isReleasing
+            isReleasing = hasUncertainReleaseCount
         )
     }
 
@@ -185,26 +277,24 @@ fun AnimeDetailScreen(
         currentMedia.hasEnglishDub || castList.any { it.englishVa != null } || streamDubStatus.hasStreamDubOrDual
     }
 
-    LaunchedEffect(hasAnyDub) {
-        if (!hasAnyDub && selectedAudioMode == "DUB") {
-            selectedAudioMode = "SUB"
+    LaunchedEffect(activeVoiceActor?.id) {
+        val actor = activeVoiceActor ?: return@LaunchedEffect
+        activeStaffWorks = null
+        isStaffLoading = true
+        try {
+            activeStaffWorks = withContext(Dispatchers.IO) { AniListClient.getStaffWorks(actor.id) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            activeStaffWorks = null
         }
+        isStaffLoading = false
     }
 
     fun openVoiceActorWorks(va: VoiceActor) {
-        activeVoiceActor = va
         activeStaffWorks = null
         isStaffLoading = true
-        scope.launch {
-            try {
-                val works = withContext(Dispatchers.IO) { AniListClient.getStaffWorks(va.id) }
-                activeStaffWorks = works
-            } catch (_: Exception) {
-                activeStaffWorks = null
-            } finally {
-                isStaffLoading = false
-            }
-        }
+        activeVoiceActor = va
     }
 
     val cleanDescription: String = remember(currentMedia.description) {
@@ -219,6 +309,7 @@ fun AnimeDetailScreen(
             Toast.makeText(context, "Connect your AniList account in Account tab first!", Toast.LENGTH_SHORT).show()
             return
         }
+        if (!isEntryReady) return
         val safeProgress = (newProgress ?: currentMedia.progress).coerceIn(0, currentMedia.episodes ?: 9999)
         val resolvedStatus = newStatus ?: currentMedia.listStatus ?: "CURRENT"
 
@@ -230,19 +321,16 @@ fun AnimeDetailScreen(
             score = newScore ?: currentMedia.score
         )
         currentMedia = optimistic
-        onMediaUpdated(optimistic)
-
         scope.launch {
-            isUpdatingList = true
             try {
                 val updated = withContext(Dispatchers.IO) {
                     AniListClient.saveEntry(
-                        mediaId = currentMedia.mediaId,
+                        mediaId = previous.mediaId,
                         status = resolvedStatus,
                         progress = safeProgress,
                         score = newScore,
-                        notes = currentMedia.notes,
-                        isPrivate = currentMedia.isPrivate,
+                        notes = previous.notes,
+                        isPrivate = previous.isPrivate,
                         token = anilistToken,
                         scoreFormat = userScoreFormat
                     )
@@ -250,9 +338,10 @@ fun AnimeDetailScreen(
                 currentMedia = updated.copy(hasEnglishDubCast = currentMedia.hasEnglishDubCast)
                 onMediaUpdated(currentMedia)
                 Toast.makeText(context, "Updated AniList: ${resolvedStatus.lowercase().replaceFirstChar { it.uppercase() }} (Ep $safeProgress)", Toast.LENGTH_SHORT).show()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 currentMedia = previous
-                onMediaUpdated(previous)
                 Toast.makeText(context, "AniList update failed: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
             } finally {
                 isUpdatingList = false
@@ -273,6 +362,7 @@ fun AnimeDetailScreen(
                 if (watchedNum > currentMedia.progress) {
                     currentMedia = currentMedia.copy(progress = watchedNum)
                 }
+                if (reportProgress && anilistToken.isNotBlank()) onMediaUpdated(currentMedia)
             },
             onSwitchEpisode = { targetNum ->
                 completeEpisodes.firstOrNull { it.episodeNumber == targetNum }?.let { activePlayingEp = it }
@@ -282,7 +372,7 @@ fun AnimeDetailScreen(
         return
     }
 
-    BackHandler {
+    BackHandler(enabled = isActive) {
         when {
             showEditPage -> showEditPage = false
             activeVoiceActor != null -> activeVoiceActor = null
@@ -294,6 +384,7 @@ fun AnimeDetailScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(CrunchyBgBlack)
+            .navigationBarsPadding()
     ) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -447,7 +538,18 @@ fun AnimeDetailScreen(
 
                         // Clean Bookmark / AniList Status & Score Button
                         Surface(
-                            onClick = { showEditPage = true },
+                            onClick = {
+                                when {
+                                    anilistToken.isBlank() -> Toast.makeText(context, "Connect AniList from the Account tab.", Toast.LENGTH_SHORT).show()
+                                    isEntryLoading -> Toast.makeText(context, "Loading your AniList entry…", Toast.LENGTH_SHORT).show()
+                                    isUpdatingList -> Unit
+                                    isEntryReady -> showEditPage = true
+                                    else -> {
+                                        Toast.makeText(context, "Retrying your AniList entry…", Toast.LENGTH_SHORT).show()
+                                        entryRetry++
+                                    }
+                                }
+                            },
                             shape = RoundedCornerShape(4.dp),
                             color = if (currentMedia.listStatus != null) CrunchyOrange.copy(alpha = 0.16f) else CrunchyCardBg,
                             border = BorderStroke(1.dp, if (currentMedia.listStatus != null) CrunchyOrange else CrunchyBorder),
@@ -522,7 +624,7 @@ fun AnimeDetailScreen(
                                 }
                                 Surface(
                                     onClick = {
-                                        currentMedia = rel
+                                        onAnimeClick(rel)
                                         onMediaUpdated(rel)
                                     },
                                     shape = RoundedCornerShape(4.dp),
@@ -638,6 +740,15 @@ fun AnimeDetailScreen(
                         val offlineEntry = offlineVaultList.firstOrNull {
                             it.mediaId == currentMedia.mediaId && it.episodeNumber == episodeNum
                         }
+                        val offlineActionPending = pendingOfflineActions.containsKey(currentMedia.mediaId to episodeNum)
+                        val downloadStatus = when {
+                            offlineActionPending -> "Working…"
+                            offlineEntry == null -> null
+                            offlineEntry.isCompleted -> "Downloaded"
+                            offlineEntry.failure != null -> offlineEntry.failure
+                            offlineEntry.progressPercent == 0 -> "Preparing download…"
+                            else -> "Downloading ${offlineEntry.progressPercent}%"
+                        }
 
                         Column(
                             modifier = Modifier
@@ -736,61 +847,34 @@ fun AnimeDetailScreen(
                                         )
                                     }
 
-                                    if (offlineEntry != null) {
+                                    if (downloadStatus != null) {
                                         Text(
-                                            text = if (offlineEntry.isCompleted) "Downloaded" else "Downloading ${offlineEntry.progressPercent}%",
+                                            text = downloadStatus,
                                             fontSize = 10.5.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = if (offlineEntry.isCompleted) CrunchyTeal else CrunchyOrange
+                                            color = if (offlineEntry?.isCompleted == true) CrunchyTeal else CrunchyOrange
                                         )
                                     }
                                 }
 
-                                // Subtle Download Icon
                                 IconButton(
+                                    enabled = !offlineActionPending,
                                     onClick = {
-                                        if (offlineEntry != null) {
-                                            TorrentStreamService.deleteOfflineEpisode(context, currentMedia.mediaId, episodeNum)
-                                            Toast.makeText(context, "Removed Episode $episodeNum from Downloads", Toast.LENGTH_SHORT).show()
-                                        } else {
-                                            Toast.makeText(context, "Saving Episode $episodeNum for offline viewing...", Toast.LENGTH_SHORT).show()
-                                            scope.launch {
-                                                val streams = CrunchyrollStreamEngine.resolveRankedStreams(
-                                                    anilistId = currentMedia.mediaId,
-                                                    animeTitle = currentMedia.title,
-                                                    episodeNum = episodeNum,
-                                                    preferredAudio = selectedAudioMode
-                                                )
-                                                val bestTorrent = streams.firstOrNull { it.isTorrent }
-                                                if (bestTorrent != null) {
-                                                    TorrentStreamService.startOfflineDownload(
-                                                        context = context,
-                                                        magnetUri = bestTorrent.url,
-                                                        fileIdx = bestTorrent.fileIdx,
-                                                        mediaId = currentMedia.mediaId,
-                                                        animeTitle = currentMedia.title,
-                                                        episodeNum = episodeNum,
-                                                        episodeTitle = displayTitle,
-                                                        coverUrl = currentMedia.coverUrl,
-                                                        thumbnailUrl = streamEp.thumbnail ?: currentMedia.bannerUrl ?: currentMedia.coverUrl,
-                                                        audioType = bestTorrent.audioType,
-                                                        quality = bestTorrent.quality
-                                                    )
-                                                } else {
-                                                    Toast.makeText(context, "Stream not available for Episode $episodeNum yet", Toast.LENGTH_SHORT).show()
-                                                }
-                                            }
-                                        }
+                                        onOfflineAction(streamEp, displayTitle, offlineEntry, if (hasAnyDub) selectedAudioMode else "SUB")
                                     }
                                 ) {
                                     when {
-                                        offlineEntry?.isCompleted == true -> Icon(Icons.Default.DownloadDone, contentDescription = "Downloaded", tint = CrunchyTeal)
-                                        offlineEntry != null -> CircularProgressIndicator(
-                                            progress = { (offlineEntry.progressPercent / 100f).coerceIn(0.05f, 1f) },
+                                        offlineActionPending -> CircularProgressIndicator(
                                             color = CrunchyOrange,
                                             strokeWidth = 2.dp,
                                             modifier = Modifier.size(20.dp)
                                         )
+                                        offlineEntry?.isCompleted == true ->
+                                            Icon(Icons.Default.DownloadDone, contentDescription = "Remove download", tint = CrunchyTeal)
+                                        offlineEntry?.failure != null ->
+                                            Icon(Icons.Default.Refresh, contentDescription = "Retry download", tint = CrunchyOrange)
+                                        offlineEntry != null ->
+                                            Icon(Icons.Default.Close, contentDescription = "Cancel download", tint = CrunchyOrange)
                                         else -> Icon(Icons.Default.Download, contentDescription = "Download", tint = MaruTextMuted)
                                     }
                                 }
@@ -909,7 +993,7 @@ fun AnimeDetailScreen(
                                         PosterCard(
                                             media = sim,
                                             onClick = {
-                                                currentMedia = sim
+                                                onAnimeClick(sim)
                                                 onMediaUpdated(sim)
                                             },
                                             modifier = Modifier.width(136.dp)
@@ -1041,7 +1125,7 @@ fun AnimeDetailScreen(
                                 saveAniListEntry(
                                     newStatus = selectedStatus,
                                     newProgress = selectedProgress,
-                                    newScore = if (selectedScore > 0.0) selectedScore else null
+                                    newScore = selectedScore
                                 )
                             }
                         ) {
@@ -1246,7 +1330,7 @@ fun AnimeDetailScreen(
                                     saveAniListEntry(
                                         newStatus = selectedStatus,
                                         newProgress = selectedProgress,
-                                        newScore = if (selectedScore > 0.0) selectedScore else null
+                                        newScore = selectedScore
                                     )
                                 },
                                 modifier = Modifier
@@ -1304,7 +1388,7 @@ fun AnimeDetailScreen(
                                     media = w,
                                     onClick = {
                                         activeVoiceActor = null
-                                        currentMedia = w
+                                        onAnimeClick(w)
                                         onMediaUpdated(w)
                                     }
                                 )

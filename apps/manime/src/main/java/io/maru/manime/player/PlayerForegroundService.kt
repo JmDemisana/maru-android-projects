@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 
 class PlayerForegroundService : Service() {
@@ -23,10 +24,14 @@ class PlayerForegroundService : Service() {
                 putExtra(EXTRA_TITLE, title)
                 putExtra(EXTRA_EPISODE, episode)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: IllegalStateException) {
+                Log.w("PlayerForegroundService", "Could not show playback notification", e)
             }
         }
 
@@ -70,7 +75,7 @@ class PlayerForegroundService : Service() {
     private fun buildNotification(title: String, episode: Int): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
-            .setContentText("Episode $episode • Playing in MAnime")
+            .setContentText("Episode $episode • Playing in Nanami Anime")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()

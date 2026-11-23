@@ -2,9 +2,58 @@ package io.maru.manime.torrent
 
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
+import java.io.OutputStream
+import java.io.RandomAccessFile
+
+internal const val VERIFIED_RANGE_TIMEOUT_MS = 45_000L
+internal const val STREAM_READ_TIMEOUT_MS = 60_000
+
+private val markedEpisode = Regex("(?i)(?<![a-z0-9])(?:s\\d{1,3}[ ._-]*)?e(?:p(?:isode)?)?[ ._-]*(\\d{1,4})(?:v\\d+)?(?=[^a-z0-9]|$)")
+private val releaseEpisode = Regex("(?i)(?:\\s-\\s*|_)(\\d{1,4})(?:v\\d+)?(?=[\\s._\\[()\\]-]|$)")
+private val numberedEpisode = Regex("(?i)^(\\d{1,4})(?:v\\d+)?$")
+
+internal fun torrentEpisodeNumber(fileName: String): Int? {
+    val stem = fileName.substringBeforeLast('.')
+    val match = markedEpisode.find(stem) ?: releaseEpisode.find(stem) ?: numberedEpisode.matchEntire(stem)
+    return match?.groupValues?.get(1)?.toIntOrNull()
+}
+
+/** Deadlines are relative to now. Polling must never postpone an outstanding request. */
+internal class PieceDemand {
+    private val requested = HashSet<Int>()
+    @Synchronized fun request(piece: Int, schedule: () -> Unit) {
+        if (piece !in requested) {
+            schedule()
+            requested.add(piece)
+        }
+    }
+}
+
+/** Production read path, also exercised with genuinely incomplete files in JVM tests. */
+internal suspend fun copyVerifiedRange(
+    file: RandomAccessFile, output: OutputStream, range: ByteRange,
+    isCurrent: () -> Boolean, isVerified: (Long, Long) -> Boolean,
+    timeoutMillis: Long = VERIFIED_RANGE_TIMEOUT_MS, pollMillis: Long = 150
+) {
+    val buffer = ByteArray(64 * 1024)
+    var offset = range.start
+    var remaining = range.length
+    while (remaining > 0) {
+        val count = minOf(buffer.size.toLong(), remaining).toInt()
+        awaitVerifiedRange(timeoutMillis, pollMillis, isCurrent) { isVerified(offset, count.toLong()) }
+        check(isCurrent()) { "Stream replaced" }
+        check(file.length() >= offset + count) { "Verified bytes not available on disk" }
+        file.seek(offset)
+        file.readFully(buffer, 0, count)
+        check(isCurrent()) { "Stream replaced" }
+        output.write(buffer, 0, count)
+        offset += count
+        remaining -= count
+    }
+}
 
 internal suspend fun awaitVerifiedRange(
-    timeoutMillis: Long = 18_000, pollMillis: Long = 150,
+    timeoutMillis: Long = VERIFIED_RANGE_TIMEOUT_MS, pollMillis: Long = 150,
     isCurrent: () -> Boolean, isVerified: () -> Boolean
 ) = withTimeout(timeoutMillis) {
     while (true) {

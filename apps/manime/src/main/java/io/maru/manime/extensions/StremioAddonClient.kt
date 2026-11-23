@@ -1,5 +1,7 @@
 ﻿package io.maru.manime.extensions
 
+import io.maru.manime.readResponse
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -24,7 +26,10 @@ data class StremioStreamResult(
     val infoHash: String?,
     val fileIdx: Int? = null,
     val sources: List<String> = emptyList(),
-    val behaviorHints: Map<String, Any> = emptyMap()
+    val filename: String? = null,
+    val headers: Map<String, String> = emptyMap(),
+    val subtitles: List<SubtitleTrack> = emptyList(),
+    val sizeBytes: Long? = null
 )
 
 class StremioAddonClient(
@@ -34,7 +39,7 @@ class StremioAddonClient(
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
 ) {
-    private val cleanBase = baseUrl.trimEnd('/')
+    private val cleanBase = baseUrl.trim().trimEnd('/')
 
     companion object {
         const val BROWSER_UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
@@ -46,8 +51,10 @@ class StremioAddonClient(
             .url(url)
             .header("User-Agent", BROWSER_UA)
             .build()
-        val resp = client.newCall(req).execute()
-        val body = resp.body?.string() ?: throw Exception("Empty manifest response")
+        val body = client.newCall(req).readResponse { response ->
+            check(response.isSuccessful) { "Stremio addon HTTP ${response.code}" }
+            response.body?.string() ?: error("Empty manifest response")
+        }
         val json = JSONObject(body)
 
         val resources = mutableListOf<String>()
@@ -85,18 +92,19 @@ class StremioAddonClient(
                 .url(url)
                 .header("User-Agent", BROWSER_UA)
                 .build()
-            val resp = client.newCall(req).execute()
-            val body = resp.body?.string() ?: return@withContext emptyList()
+            val body = client.newCall(req).readResponse { response ->
+                if (response.isSuccessful) response.body?.string() else null
+            } ?: return@withContext emptyList()
             val json = JSONObject(body)
             val streams = json.optJSONArray("streams") ?: return@withContext emptyList()
 
             val results = mutableListOf<StremioStreamResult>()
             for (i in 0 until streams.length()) {
-                val s = streams.getJSONObject(i)
-                val streamUrl = s.optString("url").ifEmpty { null }
-                val infoHash = s.optString("infoHash").ifEmpty { null }
-                val title = s.optString("title").ifEmpty { null }
-                val name = s.optString("name").ifEmpty { null }
+                val s = streams.optJSONObject(i) ?: continue
+                val streamUrl = s.nonBlankString("url")
+                val infoHash = s.nonBlankString("infoHash")
+                val title = s.nonBlankString("description") ?: s.nonBlankString("title")
+                val name = s.nonBlankString("name")
                 val fileIdx = if (s.has("fileIdx") && !s.isNull("fileIdx")) s.optInt("fileIdx", -1).takeIf { it >= 0 } else null
 
                 val sourcesList = mutableListOf<String>()
@@ -111,6 +119,22 @@ class StremioAddonClient(
                 }
 
                 if (streamUrl != null || infoHash != null) {
+                    val hints = s.optJSONObject("behaviorHints")
+                    val requestHeaders = hints?.optJSONObject("proxyHeaders")?.optJSONObject("request")
+                    val headers = buildMap {
+                        if (requestHeaders != null) for (key in requestHeaders.keys()) {
+                            val value = requestHeaders.nonBlankString(key) ?: continue
+                            put(key, value)
+                        }
+                    }
+                    val subtitles = buildList {
+                        val rawSubtitles = s.optJSONArray("subtitles") ?: return@buildList
+                        for (j in 0 until rawSubtitles.length()) {
+                            val sub = rawSubtitles.optJSONObject(j) ?: continue
+                            val subUrl = sub.nonBlankString("url") ?: continue
+                            add(SubtitleTrack(subUrl, sub.nonBlankString("lang") ?: "Unknown"))
+                        }
+                    }
                     results.add(
                         StremioStreamResult(
                             title = title,
@@ -118,14 +142,23 @@ class StremioAddonClient(
                             url = streamUrl,
                             infoHash = infoHash,
                             fileIdx = fileIdx,
-                            sources = sourcesList
+                            sources = sourcesList,
+                            filename = hints?.nonBlankString("filename"),
+                            headers = headers,
+                            subtitles = subtitles,
+                            sizeBytes = hints?.optLong("videoSize")?.takeIf { it > 0 }
                         )
                     )
                 }
             }
             results
-        } catch (e: Exception) {
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
             emptyList()
         }
     }
+
+    private fun JSONObject.nonBlankString(key: String): String? =
+        (opt(key) as? String)?.trim()?.takeIf { it.isNotEmpty() && !it.equals("null", true) }
 }

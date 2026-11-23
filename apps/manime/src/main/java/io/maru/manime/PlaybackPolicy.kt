@@ -6,8 +6,8 @@ import kotlin.math.roundToInt
 
 internal fun latestReleasedEpisode(status: String?, episodes: Int?, nextEpisode: Int?): Int? = when {
     status.equals("NOT_YET_RELEASED", true) -> 0
-    status.equals("RELEASING", true) -> nextEpisode?.let { (it - 1).coerceAtLeast(0) }
-    else -> episodes
+    status.equals("FINISHED", true) -> episodes?.takeIf { it > 0 }
+    else -> nextEpisode?.takeIf { it > 0 }?.let { it - 1 }
 }
 
 internal fun singaporeDate(now: Instant = Instant.now()): String =

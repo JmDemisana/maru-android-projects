@@ -1,7 +1,6 @@
 ﻿package io.maru.manime
 
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -66,6 +65,8 @@ data class AnimeMedia(
 ) {
     val isReleasing: Boolean get() = status.equals("RELEASING", ignoreCase = true)
 
+    val hasUncertainReleaseCount: Boolean get() = !status.equals("FINISHED", ignoreCase = true)
+
     val hasEnglishDub: Boolean get() = hasEnglishDubCast || externalLinks.any { it.isEnglishDub }
 
     val latestAiredEpisode: Int? get() {
@@ -81,6 +82,7 @@ data class ExternalLink(
     val language: String?
 ) {
     val isEnglishDub: Boolean get() {
+        if (!type.equals("STREAMING", ignoreCase = true)) return false
         val isExplicitEnglishLang = language?.equals("ENGLISH", ignoreCase = true) == true
         val isExplicitEnglishSite = site.contains("English", ignoreCase = true) && site.contains("Dub", ignoreCase = true)
         val isExplicitEnglishUrl = (url.contains("english", ignoreCase = true) && url.contains("dub", ignoreCase = true)) ||
@@ -182,7 +184,7 @@ object AniListClient {
 
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
-    suspend fun exchangeAuthCode(code: String): String? = withContext(Dispatchers.IO) {
+    suspend fun exchangeAuthCode(code: String): String? {
         val payload = JSONObject().apply {
             put("code", code)
             put("clientId", MASTER_CLIENT_ID)
@@ -197,16 +199,17 @@ object AniListClient {
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
                     .build()
-                val resp = client.newCall(req).execute()
-                val body = resp.body?.string() ?: continue
-                if (resp.isSuccessful) {
-                    val json = JSONObject(body)
-                    val token = json.optNullableString("access_token")
-                    if (!token.isNullOrBlank()) return@withContext token
+                val token = client.newCall(req).readResponse { response ->
+                    if (response.isSuccessful) {
+                        response.body?.string()?.let { JSONObject(it).optNullableString("access_token") }
+                    } else null
                 }
+                if (token != null) return token
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {}
         }
-        null
+        return null
     }
 
     fun JSONObject?.optNullableString(name: String): String? {
@@ -219,7 +222,7 @@ object AniListClient {
         gql: String,
         variables: Map<String, Any?> = emptyMap(),
         token: String? = null
-    ): JSONObject = withContext(Dispatchers.IO) {
+    ): JSONObject {
         val varsJson = aniListVariables(variables)
         val body = JSONObject().apply {
             put("query", gql)
@@ -233,17 +236,19 @@ object AniListClient {
             .header("Accept", "application/json")
         if (!token.isNullOrBlank()) reqBuilder.header("Authorization", "Bearer $token")
 
-        val resp = client.newCall(reqBuilder.build()).execute()
-        val rawStr = resp.body?.string() ?: "{}"
-        val json = JSONObject(rawStr)
-        if (json.has("errors")) {
-            val msg = json.getJSONArray("errors").getJSONObject(0).optString("message", "AniList error")
-            throw Exception(msg)
+        val payload = client.newCall(reqBuilder.build()).readResponse { response ->
+            val raw = response.body?.string()
+            if (!response.isSuccessful) {
+                val error = raw?.let { runCatching { JSONObject(it) }.getOrNull() }
+                    ?.optJSONArray("errors")?.optJSONObject(0)?.optNullableString("message")
+                throw IllegalStateException(error ?: "AniList HTTP ${response.code}")
+            }
+            raw ?: throw IllegalStateException("AniList returned an empty response")
         }
-        if (!resp.isSuccessful) {
-            throw Exception("AniList HTTP ${resp.code}")
-        }
-        json.getJSONObject("data")
+        val json = JSONObject(payload)
+        val error = json.optJSONArray("errors")?.optJSONObject(0)?.optNullableString("message")
+        if (error != null) throw IllegalStateException(error)
+        return json.getJSONObject("data")
     }
 
     fun isMangaOrNovel(obj: JSONObject): Boolean {
@@ -264,7 +269,7 @@ object AniListClient {
         val links = mutableListOf<ExternalLink>()
         val rawLinks = obj.optJSONArray("externalLinks")
         if (rawLinks != null) for (i in 0 until rawLinks.length()) {
-            val l = rawLinks.getJSONObject(i)
+            val l = rawLinks.optJSONObject(i) ?: continue
             links += ExternalLink(
                 id = l.optInt("id"),
                 url = l.optString("url", ""),
@@ -369,14 +374,14 @@ object AniListClient {
         val collection = data.optJSONObject("MediaListCollection") ?: return emptyMap()
         val lists = collection.optJSONArray("lists") ?: return emptyMap()
         for (i in 0 until lists.length()) {
-            val list = lists.getJSONObject(i)
+            val list = lists.optJSONObject(i) ?: continue
             val listName = list.optString("name", "List")
             val entries = list.optJSONArray("entries") ?: continue
             val bucket = result.getOrPut(listName) { mutableListOf() }
             for (j in 0 until entries.length()) {
-                val entry = entries.getJSONObject(j)
+                val entry = entries.optJSONObject(j) ?: continue
                 val media = entry.optJSONObject("media") ?: continue
-                if (!isMangaOrNovel(media)) {
+                if (media.optInt("id") > 0 && !isMangaOrNovel(media)) {
                     bucket += mapMedia(media, entry)
                 }
             }
@@ -436,7 +441,13 @@ object AniListClient {
             val stats = u.optJSONObject("statistics")?.optJSONObject("anime")
             val avatarObj = u.optJSONObject("avatar")
 
-            val (_, lists) = getUserListRawJson(username, token)
+            val lists = try {
+                getUserList(username, token)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                emptyMap()
+            }
 
             AniListProfile(
                 id = u.getInt("id"),
@@ -450,6 +461,8 @@ object AniListClient {
                 isFollowing = u.optBoolean("isFollowing"),
                 userLists = lists
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             null
         }
@@ -590,6 +603,15 @@ object AniListClient {
         return parsePageMedia(data)
     }
 
+    suspend fun getMediaDetail(mediaId: Int, token: String? = null): AnimeMedia {
+        val data = query("""
+            query (${'$'}id: Int!) {
+              Media(id: ${'$'}id, type: ANIME) { ${mediaFields(includeDubCast = true)} }
+            }
+        """, mapOf("id" to mediaId), token)
+        return mapMedia(data.getJSONObject("Media"))
+    }
+
     suspend fun getSimulcastSchedule(perPage: Int = 20): List<AnimeMedia> {
         val data = query("""
             query {
@@ -626,24 +648,19 @@ object AniListClient {
     }
 
     suspend fun browseCategory(genre: String? = null, tag: String? = null, perPage: Int = 40): List<AnimeMedia> {
-        val vars = mutableMapOf<String, Any?>()
-        val genreFilter = if (genre != null) ", genre: \$genre" else ""
-        val tagFilter   = if (tag != null)   ", tag_in: [\$tag]" else ""
-        if (genre != null) vars["genre"] = genre
-        if (tag != null)   vars["tag"]   = tag
         val data = query("""
-            query (${'$'}genre: String, ${'$'}tag: String) {
-              Page(page: 1, perPage: $perPage) {
-                media(type: ANIME, sort: [TRENDING_DESC, POPULARITY_DESC]$genreFilter$tagFilter) { ${mediaFields()} }
+            query (${'$'}genre: String, ${'$'}tag: String, ${'$'}perPage: Int) {
+              Page(page: 1, perPage: ${'$'}perPage) {
+                media(type: ANIME, genre: ${'$'}genre, tag: ${'$'}tag, sort: [TRENDING_DESC, POPULARITY_DESC]) { ${mediaFields()} }
               }
             }
-        """, vars)
+        """, mapOf("genre" to genre, "tag" to tag, "perPage" to perPage))
         return parsePageMedia(data)
     }
 
     suspend fun getRecommendations(mediaIds: List<Int>): List<AnimeMedia> {
         if (mediaIds.isEmpty()) return emptyList()
-        val ids = mediaIds.take(20)
+        val ids = mediaIds.distinct().take(20)
         val data = query("""
             query (${'$'}ids: [Int]) {
               Page(page: 1, perPage: 50) {
@@ -658,7 +675,7 @@ object AniListClient {
               }
             }
         """, mapOf("ids" to ids))
-        val seen = mutableSetOf<Int>()
+        val seen = mediaIds.toMutableSet()
         val results = mutableListOf<AnimeMedia>()
         val media = data.getJSONObject("Page").optJSONArray("media") ?: return emptyList()
         for (i in 0 until media.length()) {
@@ -729,12 +746,11 @@ object AniListClient {
     }
 
     suspend fun getFriendsMediaStatus(mediaId: Int, token: String? = null): List<FriendAnimeStatus> {
-        val isFollow = !token.isNullOrBlank()
-        val data = try {
-            query("""
-                query (${'$'}mediaId: Int, ${'$'}isFollowing: Boolean) {
+        val followingFilter = if (!token.isNullOrBlank()) ", isFollowing: true" else ""
+        val data = query("""
+                query (${'$'}mediaId: Int!) {
                   Page(page: 1, perPage: 15) {
-                    activities(mediaId: ${'$'}mediaId, isFollowing: ${'$'}isFollowing, type_in: [ANIME_LIST], sort: ID_DESC) {
+                    activities(mediaId: ${'$'}mediaId$followingFilter, type_in: [ANIME_LIST], sort: ID_DESC) {
                       ... on ListActivity {
                         id userId status progress createdAt
                         user { id name avatar { medium } }
@@ -742,21 +758,7 @@ object AniListClient {
                     }
                   }
                 }
-            """, mapOf("mediaId" to mediaId, "isFollowing" to isFollow), token)
-        } catch (_: Exception) {
-            query("""
-                query (${'$'}mediaId: Int) {
-                  Page(page: 1, perPage: 15) {
-                    activities(mediaId: ${'$'}mediaId, sort: ID_DESC) {
-                      ... on ListActivity {
-                        id userId status progress createdAt
-                        user { id name avatar { medium } }
-                      }
-                    }
-                  }
-                }
-            """, mapOf("mediaId" to mediaId))
-        }
+        """, mapOf("mediaId" to mediaId), token)
 
         val pageObj = data.optJSONObject("Page") ?: return emptyList()
         val arr = pageObj.optJSONArray("activities") ?: return emptyList()
@@ -825,33 +827,11 @@ object AniListClient {
     }
 
     suspend fun getActivities(page: Int = 1, perPage: Int = 25, isFollowing: Boolean = false, token: String? = null): List<AniListActivity> {
-        val isFollow = if (isFollowing && !token.isNullOrBlank()) true else false
-        val data = try {
-            query("""
-                query (${'$'}page: Int, ${'$'}perPage: Int, ${'$'}isFollowing: Boolean) {
-                  Page(page: ${'$'}page, perPage: ${'$'}perPage) {
-                    activities(isFollowing: ${'$'}isFollowing, type_in: [TEXT, ANIME_LIST], sort: ID_DESC) {
-                      ... on TextActivity {
-                        id userId text replyCount likeCount isLiked createdAt
-                        user { name avatar { medium } }
-                      }
-                      ... on ListActivity {
-                        id userId status progress replyCount likeCount isLiked createdAt
-                        user { name avatar { medium } }
-                        media {
-                          type
-                          ${mediaFields()}
-                        }
-                      }
-                    }
-                  }
-                }
-            """, mapOf("page" to page, "perPage" to perPage, "isFollowing" to isFollow), token)
-        } catch (_: Exception) {
-            query("""
+        val followingFilter = if (isFollowing && !token.isNullOrBlank()) "isFollowing: true, " else ""
+        val data = query("""
                 query (${'$'}page: Int, ${'$'}perPage: Int) {
                   Page(page: ${'$'}page, perPage: ${'$'}perPage) {
-                    activities(sort: ID_DESC) {
+                    activities(${followingFilter}type_in: [TEXT, ANIME_LIST], sort: ID_DESC) {
                       ... on TextActivity {
                         id userId text replyCount likeCount isLiked createdAt
                         user { name avatar { medium } }
@@ -867,8 +847,7 @@ object AniListClient {
                     }
                   }
                 }
-            """, mapOf("page" to page, "perPage" to perPage))
-        }
+        """, mapOf("page" to page, "perPage" to perPage), token)
 
         val pageObj = data.optJSONObject("Page") ?: return emptyList()
         val activitiesArr = pageObj.optJSONArray("activities") ?: return emptyList()
@@ -951,11 +930,11 @@ object AniListClient {
               }
             }
         """, mapOf("id" to activityId), token)
-        val obj = data.optJSONObject("ToggleLikeV2")
-        return Pair(obj?.optBoolean("isLiked", true) ?: true, obj?.optInt("likeCount", 1) ?: 1)
+        val obj = data.getJSONObject("ToggleLikeV2")
+        return Pair(obj.getBoolean("isLiked"), obj.getInt("likeCount"))
     }
 
-    suspend fun getActivityReplies(activityId: Int): List<ActivityReply> {
+    suspend fun getActivityReplies(activityId: Int, token: String? = null): List<ActivityReply> {
         val data = query("""
             query (${'$'}id: Int) {
               Page(page: 1, perPage: 30) {
@@ -965,7 +944,7 @@ object AniListClient {
                 }
               }
             }
-        """, mapOf("id" to activityId))
+        """, mapOf("id" to activityId), token)
         val arr = data.optJSONObject("Page")?.optJSONArray("activityReplies") ?: return emptyList()
         val list = mutableListOf<ActivityReply>()
         for (i in 0 until arr.length()) {
@@ -1059,7 +1038,7 @@ object AniListClient {
         val numRegex = Regex("Episode\\s*(\\d+)", RegexOption.IGNORE_CASE)
 
         for (i in 0 until eps.length()) {
-            val ep = eps.getJSONObject(i)
+            val ep = eps.optJSONObject(i) ?: continue
             val rawTitle = ep.optNullableString("title")
             val extractedNum = rawTitle?.let { numRegex.find(it)?.groupValues?.getOrNull(1)?.toIntOrNull() }
                 ?: (i + 1)
@@ -1208,7 +1187,7 @@ object AniListClient {
     private fun parseMediaArray(arr: org.json.JSONArray?): List<AnimeMedia> {
         if (arr == null) return emptyList()
         return (0 until arr.length()).mapNotNull { 
-            val obj = arr.getJSONObject(it)
+            val obj = arr.optJSONObject(it) ?: return@mapNotNull null
             if (!isMangaOrNovel(obj)) runCatching { mapMedia(obj) }.getOrNull() else null 
         }
     }

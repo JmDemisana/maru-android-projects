@@ -43,15 +43,21 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.C
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
@@ -60,7 +66,9 @@ import io.maru.manime.extensions.AniSkipInterval
 import io.maru.manime.extensions.CrunchyrollStreamEngine
 import io.maru.manime.extensions.ExternalSubtitleItem
 import io.maru.manime.extensions.StreamLink
+import io.maru.manime.extensions.SubtitleTrack
 import io.maru.manime.torrent.TorrentStreamService
+import io.maru.manime.torrent.STREAM_READ_TIMEOUT_MS
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -82,10 +90,11 @@ fun PlayerScreen(
     prefs: MAnimePrefs,
     onEpisodeWatched: (Int) -> Unit = {},
     onSwitchEpisode: (Int) -> Unit = {},
+    offlineOnly: Boolean = false,
     onBack: () -> Unit
 ) = key(media.mediaId, episodeNum) {
     EpisodePlayerScreen(media, episodeNum, episodeTitle, initialAudioMode, hasEnglishDub,
-        prefs, onEpisodeWatched, onSwitchEpisode, onBack)
+        prefs, onEpisodeWatched, onSwitchEpisode, offlineOnly, onBack)
 }
 
 @OptIn(UnstableApi::class)
@@ -99,6 +108,7 @@ private fun EpisodePlayerScreen(
     prefs: MAnimePrefs,
     onEpisodeWatched: (Int) -> Unit,
     onSwitchEpisode: (Int) -> Unit,
+    offlineOnly: Boolean,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
@@ -116,10 +126,20 @@ private fun EpisodePlayerScreen(
     var isResolvingStreams by remember { mutableStateOf(true) }
     var resolveError by remember { mutableStateOf<String?>(null) }
     var isOfflinePlayback by remember { mutableStateOf(false) }
+    var skipOffline by remember { mutableStateOf(false) }
 
     var openSubtitlesList by remember { mutableStateOf<List<ExternalSubtitleItem>>(emptyList()) }
     var selectedOpenSub by remember { mutableStateOf<ExternalSubtitleItem?>(null) }
     var expectedTorrentRequest by remember { mutableStateOf<String?>(null) }
+    var playbackAttempt by remember { mutableIntStateOf(0) }
+    var playbackTracks by remember { mutableStateOf(Tracks.EMPTY) }
+    var sourceHeaders by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var sourceSubtitles by remember { mutableStateOf<List<SubtitleTrack>>(emptyList()) }
+    var resumeAfterSwitch by remember { mutableLongStateOf(C.TIME_UNSET) }
+    var playAfterSwitch by remember { mutableStateOf(true) }
+    var subtitlesEnabled by remember { mutableStateOf<Boolean?>(null) }
+    var selectExternalTrackOnLoad by remember { mutableStateOf(false) }
+    var triedAutomaticSubtitle by remember { mutableStateOf(false) }
 
     val serviceStatus by TorrentStreamService.streamStatus.collectAsState()
 
@@ -135,7 +155,7 @@ private fun EpisodePlayerScreen(
     var videoResizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
     var autoPlayCountdown by remember { mutableStateOf<Int?>(null) }
     var hasScrobbled85Percent by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
-    var hasRestoredPosition by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
+    var savedPositionMs by remember { mutableStateOf<Long?>(null) }
 
     var skipIntervals by remember { mutableStateOf<List<AniSkipInterval>>(emptyList()) }
     var activeSkipInterval by remember { mutableStateOf<AniSkipInterval?>(null) }
@@ -165,10 +185,16 @@ private fun EpisodePlayerScreen(
             persistenceScope.launch {
                 try {
                     if (!prefs.reportProgress.first() || prefs.anilistToken.first() != auth) return@launch
-                    AniListClient.saveEntry(snapshot.mediaId,
-                        if (snapshot.episodes != null && episodeNum >= snapshot.episodes) "COMPLETED" else "CURRENT",
-                        episodeNum, null, null, null, auth)
+                    val current = AniListClient.getMediaDetail(snapshot.mediaId, auth)
+                    if (episodeNum > current.progress && current.listStatus !in setOf("COMPLETED", "REPEATING")) {
+                        if (!prefs.reportProgress.first() || prefs.anilistToken.first() != auth) return@launch
+                        AniListClient.saveEntry(current.mediaId,
+                            if (current.episodes != null && episodeNum >= current.episodes) "COMPLETED" else "CURRENT",
+                            episodeNum, null, null, null, auth)
+                    }
                     if (isAttached) latestWatchedCallback(episodeNum)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (_: Exception) {
                     android.widget.Toast.makeText(context, "AniList progress sync failed. Your list was not updated.",
                         android.widget.Toast.LENGTH_LONG).show()
@@ -182,6 +208,8 @@ private fun EpisodePlayerScreen(
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
             .setEnableDecoderFallback(true)
         ExoPlayer.Builder(context, renderersFactory).build().apply {
+            setAudioAttributes(AudioAttributes.DEFAULT, true)
+            setHandleAudioBecomingNoisy(true)
             playWhenReady = true
             trackSelectionParameters = trackSelectionParameters.buildUpon()
                 .setPreferredAudioLanguage(if (activeAudioMode == "DUB") "en" else "ja")
@@ -191,24 +219,51 @@ private fun EpisodePlayerScreen(
         }
     }
 
-    fun buildMediaItemWithSubtitles(videoUri: Uri, mimeType: String?, externalSubs: List<ExternalSubtitleItem>): MediaItem {
-        val subConfigs = externalSubs.mapIndexed { idx, sub ->
-            val subMime = when (sub.format) {
+    fun prepareVideo(videoUri: Uri, mimeType: String?) {
+        val externalSub = selectedOpenSub
+        selectExternalTrackOnLoad = externalSub != null && subtitlesEnabled != false
+        val subConfigs = sourceSubtitles.map { sub ->
+            val uri = Uri.parse(sub.url)
+            val subMime = when (uri.lastPathSegment?.substringAfterLast('.')?.lowercase()) {
+                "ass", "ssa" -> MimeTypes.TEXT_SSA
+                "vtt" -> MimeTypes.TEXT_VTT
+                "ttml", "xml" -> MimeTypes.APPLICATION_TTML
+                else -> MimeTypes.APPLICATION_SUBRIP
+            }
+            MediaItem.SubtitleConfiguration.Builder(uri)
+                .setMimeType(subMime)
+                .setLanguage(sub.language)
+                .setLabel(sub.language)
+                .build()
+        }.toMutableList()
+        if (externalSub != null) {
+            val subMime = when (externalSub.format) {
                 "ASS" -> MimeTypes.TEXT_SSA
                 "VTT" -> MimeTypes.TEXT_VTT
                 else -> MimeTypes.APPLICATION_SUBRIP
             }
-            MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
+            subConfigs.removeAll { it.uri.toString() == externalSub.url }
+            subConfigs += MediaItem.SubtitleConfiguration.Builder(Uri.parse(externalSub.url))
                 .setMimeType(subMime)
-                .setLanguage(sub.langCode)
-                .setLabel(sub.langName)
-                .setId("ext_sub_${sub.id}_$idx")
+                .setLanguage(externalSub.langCode)
+                .setLabel("${externalSub.langName} (OpenSubtitles)")
+                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
                 .build()
         }
-        val builder = MediaItem.Builder().setUri(videoUri)
+        val builder = MediaItem.Builder().setMediaId(playbackAttempt.toString()).setUri(videoUri)
         if (mimeType != null) builder.setMimeType(mimeType)
         if (subConfigs.isNotEmpty()) builder.setSubtitleConfigurations(subConfigs)
-        return builder.build()
+        val dataSource = DefaultDataSource.Factory(context, DefaultHttpDataSource.Factory()
+            .setReadTimeoutMs(STREAM_READ_TIMEOUT_MS))
+        val headers = sourceHeaders
+        // Video headers can authorize manifest and segment requests. Keep them off OpenSubtitles.
+        val sourceFactory = if (headers.isEmpty()) dataSource else ResolvingDataSource.Factory(dataSource) { request ->
+            if (request.uri.toString() == externalSub?.url) request else request.withAdditionalHeaders(headers)
+        }
+        val source = DefaultMediaSourceFactory(sourceFactory).createMediaSource(builder.build())
+        exoPlayer.setMediaSource(source, resumeAfterSwitch)
+        exoPlayer.prepare()
+        exoPlayer.playWhenReady = playAfterSwitch
     }
 
     fun enterPip() {
@@ -240,10 +295,13 @@ private fun EpisodePlayerScreen(
     }
 
     LaunchedEffect(media.mediaId, episodeNum) {
+        if (offlineOnly) return@LaunchedEffect
         launch {
             try {
                 val mappings = CrunchyrollStreamEngine.getAnimeMappings(media.mediaId, media.title)
                 skipIntervals = CrunchyrollStreamEngine.getAniSkipIntervals(mappings.malId, episodeNum)
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {}
         }
         launch {
@@ -251,10 +309,51 @@ private fun EpisodePlayerScreen(
                 openSubtitlesList = CrunchyrollStreamEngine.fetchOpenSubtitles(
                     anilistId = media.mediaId,
                     animeTitle = media.title,
-                    episodeNum = episodeNum
+                    episodeNum = episodeNum,
+                    isMovie = media.format == "MOVIE"
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {}
         }
+    }
+
+    fun capturePlaybackState() {
+        if (exoPlayer.currentMediaItem == null) return
+        val position = exoPlayer.currentPosition
+        if (exoPlayer.duration > 0 || position > 0) resumeAfterSwitch = position.coerceAtLeast(0L)
+        playAfterSwitch = exoPlayer.playWhenReady
+    }
+
+    fun stopTorrent() {
+        val requestId = expectedTorrentRequest
+        expectedTorrentRequest = null
+        if (requestId != null) TorrentStreamService.stopStream(requestId)
+    }
+
+    fun resetPlayback(stopPreviousTorrent: Boolean = true) {
+        capturePlaybackState()
+        playbackAttempt++
+        autoPlayCountdown = null
+        activeSkipInterval = null
+        playbackTracks = Tracks.EMPTY
+        isPlayerBuffering = true
+        exoPlayer.stop()
+        exoPlayer.clearMediaItems()
+        if (stopPreviousTorrent) stopTorrent()
+    }
+
+    fun useOpenSubtitle(sub: ExternalSubtitleItem?) {
+        val current = exoPlayer.currentMediaItem?.localConfiguration ?: return
+        selectedOpenSub = sub
+        subtitlesEnabled = true
+        resetPlayback(stopPreviousTorrent = false)
+        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            .setPreferredTextLanguage(sub?.langCode ?: "en")
+            .build()
+        prepareVideo(current.uri, current.mimeType)
     }
 
     fun playStreamAtIndex(index: Int, streams: List<StreamLink>) {
@@ -266,13 +365,13 @@ private fun EpisodePlayerScreen(
         val chosen = streams[index]
         activeQuality = chosen.quality
         resolveError = null
-        isPlayerBuffering = true
-        exoPlayer.stop()
-        exoPlayer.clearMediaItems()
+        resetPlayback(stopPreviousTorrent = !chosen.isTorrent)
+        sourceHeaders = if (chosen.isTorrent) emptyMap() else chosen.headers
+        sourceSubtitles = chosen.subtitles
         exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
             .clearOverrides().setPreferredAudioLanguage(if (activeAudioMode == "DUB") "en" else "ja")
-            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, activeAudioMode == "DUB")
-            .setPreferredTextLanguage("en").build()
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !(subtitlesEnabled ?: (activeAudioMode != "DUB")))
+            .setPreferredTextLanguage(selectedOpenSub?.langCode ?: "en").build()
 
         if (chosen.isTorrent) {
             expectedTorrentRequest = TorrentStreamService.startStream(
@@ -283,12 +382,7 @@ private fun EpisodePlayerScreen(
                 episodeNum = episodeNum
             )
         } else {
-            expectedTorrentRequest = null
-            TorrentStreamService.stopStream(context)
-            val item = buildMediaItemWithSubtitles(Uri.parse(chosen.url), null, openSubtitlesList)
-            exoPlayer.setMediaItem(item)
-            exoPlayer.prepare()
-            exoPlayer.playWhenReady = true
+            prepareVideo(Uri.parse(chosen.url), null)
         }
     }
 
@@ -296,18 +390,38 @@ private fun EpisodePlayerScreen(
     LaunchedEffect(media.mediaId, episodeNum, streamReload) {
       try {
         isResolvingStreams = true
-        isPlayerBuffering = true
         resolveError = null
+        resetPlayback()
+        rankedStreams = emptyList()
+        if (savedPositionMs == null) {
+            savedPositionMs = if (prefs.rememberPosition.first()) {
+                prefs.getPositionFlow(media.mediaId, episodeNum).first().coerceAtLeast(0) * 1000L
+            } else 0L
+        }
 
-        val offlineEntry = TorrentStreamService.getCompletedOfflineEpisode(context, media.mediaId, episodeNum)
+        val offlineEntry = if (skipOffline) null else {
+            TorrentStreamService.getCompletedOfflineEpisode(context, media.mediaId, episodeNum)
+        }
         if (offlineEntry != null) {
             isOfflinePlayback = true
             isResolvingStreams = false
+            activeQuality = offlineEntry.quality
+            sourceHeaders = emptyMap()
+            sourceSubtitles = emptyList()
+            if (offlineEntry.audioType != "DUAL_AUDIO") activeAudioMode = offlineEntry.audioType
+            if (offlineEntry.audioType != "SUB") detectedDualOrDubInStreams = true
+            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                .setPreferredAudioLanguage(if (activeAudioMode == "DUB") "en" else "ja")
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !(subtitlesEnabled ?: (activeAudioMode != "DUB")))
+                .build()
             val file = File(offlineEntry.vaultFilePath)
-            val item = buildMediaItemWithSubtitles(Uri.fromFile(file), MimeTypes.APPLICATION_MATROSKA, openSubtitlesList)
-            exoPlayer.setMediaItem(item)
-            exoPlayer.prepare()
-            exoPlayer.playWhenReady = true
+            // Vault files have a .nanami extension; sniff the actual container instead of forcing MKV.
+            prepareVideo(Uri.fromFile(file), null)
+            return@LaunchedEffect
+        }
+        if (offlineOnly) {
+            isPlayerBuffering = false
+            resolveError = "This episode is unavailable offline. Download it again to play it here."
             return@LaunchedEffect
         }
 
@@ -318,7 +432,8 @@ private fun EpisodePlayerScreen(
             animeTitle = media.title,
             episodeNum = episodeNum,
             preferredAudio = activeAudioMode,
-            preferredQuality = prefQual
+            preferredQuality = prefQual,
+            isMovie = media.format == "MOVIE"
         )
         rankedStreams = streams
         if (streams.any { it.audioType == "DUAL_AUDIO" || it.audioType == "DUB" }) {
@@ -339,25 +454,41 @@ private fun EpisodePlayerScreen(
         } finally { isResolvingStreams = false }
     }
 
-    LaunchedEffect(serviceStatus.isReady, serviceStatus.streamUrl, serviceStatus.error, expectedTorrentRequest) {
+    fun handlePlaybackFailure(message: String) {
+        if (!isOfflinePlayback && currentStreamIndex + 1 < rankedStreams.size) {
+            playStreamAtIndex(currentStreamIndex + 1, rankedStreams)
+        } else {
+            resetPlayback()
+            isPlayerBuffering = false
+            resolveError = message
+        }
+    }
+
+    LaunchedEffect(serviceStatus.requestId, serviceStatus.isReady, serviceStatus.streamUrl, serviceStatus.error, expectedTorrentRequest) {
         if (!isOfflinePlayback && expectedTorrentRequest != null && serviceStatus.requestId == expectedTorrentRequest) {
             val err = serviceStatus.error
             if (err != null) {
-                if (currentStreamIndex + 1 < rankedStreams.size) {
-                    playStreamAtIndex(currentStreamIndex + 1, rankedStreams)
-                } else {
-                    isPlayerBuffering = false
-                    resolveError = err
+                handlePlaybackFailure(err)
+            } else if (serviceStatus.isReady && serviceStatus.streamUrl != null) {
+                val url = serviceStatus.streamUrl ?: return@LaunchedEffect
+                val mime = when {
+                    url.endsWith(".mp4") -> MimeTypes.VIDEO_MP4
+                    url.endsWith(".webm") -> MimeTypes.VIDEO_WEBM
+                    else -> MimeTypes.APPLICATION_MATROSKA
                 }
-            } else if (serviceStatus.isReady && !serviceStatus.streamUrl.isNullOrBlank()) {
-                val url = serviceStatus.streamUrl!!
-                val mime = if (url.endsWith(".mp4")) MimeTypes.VIDEO_MP4 else MimeTypes.APPLICATION_MATROSKA
-                val item = buildMediaItemWithSubtitles(Uri.parse(url), mime, openSubtitlesList)
-                exoPlayer.setMediaItem(item)
-                exoPlayer.prepare()
-                exoPlayer.playWhenReady = true
+                prepareVideo(Uri.parse(url), mime)
             }
         }
+    }
+
+    LaunchedEffect(playbackTracks, isPlayerBuffering, openSubtitlesList) {
+        if (triedAutomaticSubtitle || activeAudioMode != "SUB" || subtitlesEnabled == false ||
+            selectedOpenSub != null || exoPlayer.playbackState != Player.STATE_READY) return@LaunchedEffect
+        if (playbackTracks.groups.any { it.type == C.TRACK_TYPE_TEXT }) return@LaunchedEffect
+        val englishSubtitle = openSubtitlesList.firstOrNull { it.langCode.lowercase() in setOf("en", "eng") }
+            ?: return@LaunchedEffect
+        triedAutomaticSubtitle = true
+        useOpenSubtitle(englishSubtitle)
     }
 
     val latestListener by rememberUpdatedState(object : Player.Listener {
@@ -366,41 +497,57 @@ private fun EpisodePlayerScreen(
             }
 
             override fun onPlaybackStateChanged(state: Int) {
-                isPlayerBuffering = (state == Player.STATE_BUFFERING || state == Player.STATE_IDLE)
+                isPlayerBuffering = state == Player.STATE_BUFFERING || (state == Player.STATE_IDLE && resolveError == null)
                 if (state == Player.STATE_READY) {
                     totalDuration = exoPlayer.duration.coerceAtLeast(0L)
-                    // Check if embedded MKV has > 1 audio tracks (Dual Audio!)
-                    val audioTrackCount = exoPlayer.currentTracks.groups
-                        .filter { it.type == C.TRACK_TYPE_AUDIO }
-                        .sumOf { it.length }
-                    if (audioTrackCount > 1) {
-                        detectedDualOrDubInStreams = true
-                    }
-
-                    if (!hasRestoredPosition && rememberPosition) {
-                        hasRestoredPosition = true
-                        scope.launch {
-                            val savedSec = prefs.getPositionFlow(media.mediaId, episodeNum).first()
-                            if (savedSec in 10..((totalDuration / 1000) - 30).coerceAtLeast(10)) {
-                                exoPlayer.seekTo(savedSec * 1000L)
-                            }
+                    savedPositionMs?.let { position ->
+                        savedPositionMs = 0L
+                        if (totalDuration > 0 && position in 10_000..(totalDuration - 30_000)) {
+                            exoPlayer.seekTo(position)
                         }
                     }
                 } else if (state == Player.STATE_ENDED) {
                     markWatched()
-                    val maxEps = media.latestAiredEpisode ?: episodeNum
-                    if (episodeNum < maxEps) {
+                    val maxEps = media.latestAiredEpisode ?: media.episodes ?: episodeNum
+                    if (!offlineOnly && episodeNum < maxEps) {
                         autoPlayCountdown = 5
                     }
                 }
             }
 
+            override fun onTracksChanged(tracks: Tracks) {
+                playbackTracks = tracks
+                if (findAudioTrack(tracks, "DUB") != null) detectedDualOrDubInStreams = true
+                val sub = selectedOpenSub
+                if (selectExternalTrackOnLoad && sub != null) {
+                    val label = "${sub.langName} (OpenSubtitles)"
+                    for (group in tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }) {
+                        val trackIndex = (0 until group.length).firstOrNull { group.getTrackFormat(it).label == label }
+                        if (trackIndex != null) {
+                            selectExternalTrackOnLoad = false
+                            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                                .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, trackIndex))
+                                .build()
+                            break
+                        }
+                    }
+                }
+            }
+
             override fun onPlayerError(error: PlaybackException) {
-                if (!isOfflinePlayback && currentStreamIndex + 1 < rankedStreams.size) {
-                    playStreamAtIndex(currentStreamIndex + 1, rankedStreams)
-                } else {
-                    isPlayerBuffering = false
-                    resolveError = "Playback error (${error.errorCodeName}). Tap Try Next Server."
+                val failedAttempt = exoPlayer.currentMediaItem?.mediaId ?: return
+                scope.launch {
+                    // The engine and Media3 can both report the same failure.
+                    if (failedAttempt != playbackAttempt.toString()) return@launch
+                    if (selectedOpenSub != null) {
+                        triedAutomaticSubtitle = true
+                        useOpenSubtitle(null)
+                        return@launch
+                    }
+                    val phase = if (expectedTorrentRequest != null && serviceStatus.requestId == expectedTorrentRequest) {
+                        serviceStatus.phase
+                    } else "media_prepare"
+                    handlePlaybackFailure("Playback error [${error.errorCodeName}/$phase].")
                 }
             }
         })
@@ -418,21 +565,24 @@ private fun EpisodePlayerScreen(
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) = latestListener.onIsPlayingChanged(playing)
             override fun onPlaybackStateChanged(state: Int) = latestListener.onPlaybackStateChanged(state)
+            override fun onTracksChanged(tracks: Tracks) = latestListener.onTracksChanged(tracks)
             override fun onPlayerError(error: PlaybackException) = latestListener.onPlayerError(error)
         }
         exoPlayer.addListener(listener)
 
         onDispose {
-            val posSec = (exoPlayer.currentPosition / 1000L).coerceAtLeast(0L)
+            val ended = exoPlayer.playbackState == Player.STATE_ENDED
+            val position = if (exoPlayer.currentMediaItem != null) exoPlayer.currentPosition else resumeAfterSwitch
+            val posSec = (position / 1000L).coerceAtLeast(0L)
             persistenceScope.launch {
-                if (latestRememberPosition && posSec > 5) {
-                    prefs.savePosition(media.mediaId, episodeNum, posSec)
+                if (latestRememberPosition && (ended || posSec > 5)) {
+                    prefs.savePosition(media.mediaId, episodeNum, if (ended) 0L else posSec)
                 }
             }
             exoPlayer.removeListener(listener)
             exoPlayer.release()
             PlayerForegroundService.stop(context)
-            TorrentStreamService.stopStream(context)
+            stopTorrent()
 
             activity?.requestedOrientation = originalOrientation
             if (activity != null) {
@@ -453,7 +603,7 @@ private fun EpisodePlayerScreen(
             val matchedSkip = skipIntervals.firstOrNull { posSec >= it.startTimeSeconds && posSec < it.endTimeSeconds - 1.0 }
             activeSkipInterval = matchedSkip
 
-            if (matchedSkip != null && autoSkipIntro && matchedSkip.skipType.equals("op", ignoreCase = true)) {
+            if (matchedSkip != null && autoSkipIntro && exoPlayer.isPlaying && matchedSkip.skipType.equals("op", ignoreCase = true)) {
                 exoPlayer.seekTo((matchedSkip.endTimeSeconds * 1000).toLong())
             }
 
@@ -464,7 +614,7 @@ private fun EpisodePlayerScreen(
                 }
             }
 
-            if (latestRememberPosition && currentPosition > 5000 &&
+            if (latestRememberPosition && exoPlayer.playbackState == Player.STATE_READY && currentPosition > 5000 &&
                 kotlin.math.abs(currentPosition - lastSavedPosition) >= 10_000) {
                 prefs.savePosition(media.mediaId, episodeNum, currentPosition / 1000)
                 lastSavedPosition = currentPosition
@@ -633,16 +783,22 @@ private fun EpisodePlayerScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Button(
                             onClick = {
-                                if (currentStreamIndex + 1 < rankedStreams.size) {
-                                    playStreamAtIndex(currentStreamIndex + 1, rankedStreams)
+                                if (rankedStreams.isNotEmpty()) {
+                                    playStreamAtIndex((currentStreamIndex + 1) % rankedStreams.size, rankedStreams)
                                 } else {
-                                    playStreamAtIndex(0, rankedStreams)
+                                    skipOffline = isOfflinePlayback && !offlineOnly
+                                    streamReload++
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = CrunchyOrange),
                             shape = RoundedCornerShape(4.dp)
                         ) {
-                            Text("TRY NEXT SERVER", color = Color.Black, fontWeight = FontWeight.ExtraBold)
+                            val retryLabel = when {
+                                isOfflinePlayback && !offlineOnly -> "TRY STREAMING"
+                                rankedStreams.size > 1 -> "TRY NEXT SERVER"
+                                else -> "RETRY"
+                            }
+                            Text(retryLabel, color = Color.Black, fontWeight = FontWeight.ExtraBold)
                         }
                         OutlinedButton(
                             onClick = onBack,
@@ -914,7 +1070,15 @@ private fun EpisodePlayerScreen(
 
                     IconButton(
                         onClick = {
-                            if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                            when {
+                                exoPlayer.playbackState == Player.STATE_ENDED -> {
+                                    autoPlayCountdown = null
+                                    exoPlayer.seekToDefaultPosition()
+                                    exoPlayer.play()
+                                }
+                                exoPlayer.playWhenReady -> exoPlayer.pause()
+                                else -> exoPlayer.play()
+                            }
                         },
                         modifier = Modifier
                             .size(68.dp)
@@ -1133,7 +1297,7 @@ private fun EpisodePlayerScreen(
                     ) {
                         // Audio Tracks Section
                         item(key = "section_audio") {
-                            val audioGroups = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+                            val audioGroups = playbackTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text("AUDIO LANGUAGE", fontSize = 11.5.sp, color = CrunchyOrange, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.sp)
 
@@ -1170,7 +1334,9 @@ private fun EpisodePlayerScreen(
                                         }
                                     }
                                 } else {
-                                    val modes = if (effectiveHasDub) {
+                                    val modes = if (isOfflinePlayback) {
+                                        listOf(activeAudioMode to if (activeAudioMode == "DUB") "Dubbed Audio" else "Original Audio")
+                                    } else if (effectiveHasDub) {
                                         listOf("SUB" to "Japanese (Original Audio)", "DUB" to "Dub / Dual-Audio Stream")
                                     } else {
                                         listOf("SUB" to "Japanese (Original Audio)")
@@ -1180,9 +1346,11 @@ private fun EpisodePlayerScreen(
                                             val selected = activeAudioMode == mode
                                             Surface(
                                                 onClick = {
-                                                    activeAudioMode = mode
-                                                    if (!applyPreferredAudioTrack(exoPlayer, mode)) streamReload++
-                                                    scope.launch { prefs.setPreferredAudio(mode) }
+                                                    if (!selected) {
+                                                        activeAudioMode = mode
+                                                        if (!applyPreferredAudioTrack(exoPlayer, mode)) streamReload++
+                                                        scope.launch { prefs.setPreferredAudio(mode) }
+                                                    }
                                                     showFullSettingsPage = false
                                                 },
                                                 shape = RoundedCornerShape(4.dp),
@@ -1202,12 +1370,14 @@ private fun EpisodePlayerScreen(
 
                         // Subtitles Section (Embedded Positioned ASS/SSA + OpenSubtitles)
                         item(key = "section_subs") {
-                            val subGroups = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+                            val subGroups = playbackTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text("SUBTITLES (EMBEDDED ASS/SSA & OPENSUBTITLES)", fontSize = 11.5.sp, color = CrunchyOrange, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.sp)
 
                                 Surface(
                                     onClick = {
+                                        subtitlesEnabled = false
+                                        selectExternalTrackOnLoad = false
                                         exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
                                             .buildUpon()
                                             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
@@ -1232,6 +1402,9 @@ private fun EpisodePlayerScreen(
 
                                         Surface(
                                             onClick = {
+                                                subtitlesEnabled = true
+                                                selectExternalTrackOnLoad = false
+                                                if (format.label != "${selectedOpenSub?.langName} (OpenSubtitles)") selectedOpenSub = null
                                                 exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
                                                     .buildUpon()
                                                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
@@ -1258,26 +1431,12 @@ private fun EpisodePlayerScreen(
                                     }
                                 }
 
-                                if (openSubtitlesList.isNotEmpty() && subGroups.isEmpty()) {
+                                if (openSubtitlesList.isNotEmpty() && exoPlayer.currentMediaItem != null) {
                                     openSubtitlesList.take(10).forEach { extSub ->
-                                        val isSelected = selectedOpenSub?.url == extSub.url
+                                        val isSelected = selectedOpenSub?.url == extSub.url && subtitlesEnabled != false
                                         Surface(
                                             onClick = {
-                                                selectedOpenSub = extSub
-                                                val currentUri = exoPlayer.currentMediaItem?.localConfiguration?.uri
-                                                val currentMime = exoPlayer.currentMediaItem?.localConfiguration?.mimeType
-                                                if (currentUri != null) {
-                                                    val pos = exoPlayer.currentPosition
-                                                    val newItem = buildMediaItemWithSubtitles(currentUri, currentMime, listOf(extSub))
-                                                    exoPlayer.setMediaItem(newItem, pos)
-                                                    exoPlayer.prepare()
-                                                    exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                                                        .buildUpon()
-                                                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                                                        .setPreferredTextLanguage(extSub.langCode)
-                                                        .build()
-                                                    exoPlayer.playWhenReady = true
-                                                }
+                                                if (!isSelected) useOpenSubtitle(extSub)
                                                 showFullSettingsPage = false
                                             },
                                             shape = RoundedCornerShape(4.dp),
@@ -1311,7 +1470,7 @@ private fun EpisodePlayerScreen(
                                 Surface(
                                     onClick = {
                                         showFullSettingsPage = false
-                                        playStreamAtIndex(idx, rankedStreams)
+                                        if (!isCurrent) playStreamAtIndex(idx, rankedStreams)
                                     },
                                     shape = RoundedCornerShape(4.dp),
                                     color = if (isCurrent) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
@@ -1343,23 +1502,31 @@ private fun EpisodePlayerScreen(
 
 @OptIn(UnstableApi::class)
 private fun applyPreferredAudioTrack(exoPlayer: ExoPlayer, preferredAudioMode: String): Boolean {
-    val targetLangs = if (preferredAudioMode == "DUB") listOf("en", "eng", "english") else listOf("ja", "jpn", "japanese")
-    val audioGroups = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+    val override = findAudioTrack(exoPlayer.currentTracks, preferredAudioMode) ?: return false
+    exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+        .setOverrideForType(override)
+        .build()
+    return true
+}
+
+@OptIn(UnstableApi::class)
+private fun findAudioTrack(tracks: Tracks, preferredAudioMode: String): TrackSelectionOverride? {
+    val isDub = preferredAudioMode == "DUB"
+    val targetLangs = if (isDub) setOf("en", "eng", "english") else setOf("ja", "jpn", "japanese")
+    val targetLabel = if (isDub) "english" else "japanese"
+    val audioGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
     for (group in audioGroups) {
         for (i in 0 until group.length) {
+            if (!group.isTrackSupported(i)) continue
             val fmt = group.getTrackFormat(i)
-            val lang = (fmt.language ?: "").lowercase()
-            val label = (fmt.label ?: "").lowercase()
-            if (targetLangs.any { lang.contains(it) || label.contains(it) }) {
-                exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                    .buildUpon()
-                    .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
-                    .build()
-                return true
+            val lang = fmt.language.orEmpty().lowercase().substringBefore('-').substringBefore('_')
+            val labelWords = fmt.label.orEmpty().lowercase().split(Regex("[^a-z]+"))
+            if (lang in targetLangs || ((lang.isBlank() || lang == "und") && targetLabel in labelWords)) {
+                return TrackSelectionOverride(group.mediaTrackGroup, i)
             }
         }
     }
-    return false
+    return null
 }
 
 private fun formatAudioTrackName(label: String?, lang: String?, index: Int): String {
