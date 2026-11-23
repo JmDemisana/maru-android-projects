@@ -10,7 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.*
-import androidx.compose.animation.core.*
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -63,15 +63,36 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val prefs = remember { MAnimePrefs(applicationContext) }
-            AppNavigation(prefs)
+            MaterialTheme(colorScheme = NanamiColors) {
+                AppNavigation(prefs)
+            }
         }
     }
 }
+
+private val NanamiColors = darkColorScheme(
+    primary = CrunchyOrange,
+    onPrimary = Color.Black,
+    secondary = CrunchyTeal,
+    background = CrunchyBgBlack,
+    surface = CrunchySurface,
+    surfaceVariant = CrunchyCardBg,
+    onSurface = Color.White,
+    onSurfaceVariant = MaruTextMuted,
+    outline = CrunchyBorder
+)
 
 private sealed interface ScreenRoute {
     data class Tab(val screen: NavigationScreen) : ScreenRoute
     data class Anime(val media: AnimeMedia, val id: Int) : ScreenRoute
     data class User(val username: String, val id: Int) : ScreenRoute
+
+    val stateKey: String
+        get() = when (this) {
+            is Tab -> screen.name
+            is Anime -> "anime_$id"
+            is User -> "user_$id"
+        }
 }
 
 private suspend fun <T> loadAniList(request: suspend () -> T): Result<T> {
@@ -101,9 +122,9 @@ fun AppNavigation(prefs: MAnimePrefs) {
 
     var selectedScreen by rememberSaveable { mutableStateOf(NavigationScreen.DASHBOARD) }
     var detailStack by remember { mutableStateOf<List<ScreenRoute>>(emptyList()) }
-    var nextRouteId by remember { mutableIntStateOf(0) }
+    var nextRouteId by rememberSaveable { mutableIntStateOf(0) }
     val currentRoute = detailStack.lastOrNull() ?: ScreenRoute.Tab(selectedScreen)
-    val tabStateHolder = rememberSaveableStateHolder()
+    val screenStateHolder = rememberSaveableStateHolder()
     var showAnilistAuthDialog by remember { mutableStateOf(false) }
     var isOfflinePlaybackVisible by remember { mutableStateOf(false) }
     val showNavigationBars = currentRoute is ScreenRoute.Tab &&
@@ -120,7 +141,10 @@ fun AppNavigation(prefs: MAnimePrefs) {
     }
 
     fun closeRoute(route: ScreenRoute) {
-        if (detailStack.lastOrNull() == route) detailStack = detailStack.dropLast(1)
+        if (detailStack.lastOrNull() == route) {
+            screenStateHolder.removeState(route.stateKey)
+            detailStack = detailStack.dropLast(1)
+        }
     }
 
     fun signOut() {
@@ -141,8 +165,11 @@ fun AppNavigation(prefs: MAnimePrefs) {
     var trendingList by remember { mutableStateOf<List<AnimeMedia>>(emptyList()) }
     var simulcastList by remember { mutableStateOf<List<AnimeMedia>>(emptyList()) }
     var isDashboardLoading by remember { mutableStateOf(true) }
+    var dashboardLoadFailed by remember { mutableStateOf(false) }
     var dashboardRefresh by remember { mutableIntStateOf(0) }
     var activitiesList by remember(anilistToken) { mutableStateOf<List<AniListActivity>>(emptyList()) }
+    var isActivityLoading by remember(anilistToken) { mutableStateOf(anilistToken.isNotBlank()) }
+    var activityLoadFailed by remember(anilistToken) { mutableStateOf(false) }
 
     var selectedRecCategory by rememberSaveable { mutableStateOf("For You") }
     var recommendations by remember(accountKey, selectedRecCategory) { mutableStateOf<List<AnimeMedia>>(emptyList()) }
@@ -174,23 +201,25 @@ fun AppNavigation(prefs: MAnimePrefs) {
 
     LaunchedEffect(dashboardRefresh) {
         isDashboardLoading = true
+        dashboardLoadFailed = false
         val trending = async { loadAniList { AniListClient.getTrending(18) } }
         val simulcasts = async { loadAniList { AniListClient.getSimulcastSchedule(18) } }
         val trendingResult = trending.await().onSuccess { trendingList = it }
         val simulcastResult = simulcasts.await().onSuccess { simulcastList = it }
-        if (trendingResult.isFailure || simulcastResult.isFailure) {
-            Toast.makeText(context, "Couldn't refresh the Home feed. Pull down to try again.", Toast.LENGTH_SHORT).show()
-        }
+        dashboardLoadFailed = trendingResult.isFailure || simulcastResult.isFailure
         isDashboardLoading = false
     }
 
     LaunchedEffect(anilistToken, dashboardRefresh) {
         if (anilistToken.isBlank()) return@LaunchedEffect
-        loadAniList {
+        isActivityLoading = true
+        activityLoadFailed = false
+        val result = loadAniList {
             AniListClient.getActivities(page = 1, perPage = 20, isFollowing = true, token = anilistToken)
-        }.onSuccess { refreshed ->
-            activitiesList = refreshed.distinctBy { it.id }
         }
+        result.onSuccess { activitiesList = it.distinctBy(AniListActivity::id) }
+        activityLoadFailed = result.isFailure
+        isActivityLoading = false
     }
 
     val isBrowsing = selectedScreen == NavigationScreen.RECOMMENDATIONS
@@ -277,12 +306,10 @@ fun AppNavigation(prefs: MAnimePrefs) {
                             }
                         },
                         actions = {
-                            IconButton(
-                                onClick = {
-                                    selectedScreen = NavigationScreen.SEARCH
+                            if (selectedScreen == NavigationScreen.DASHBOARD) {
+                                IconButton(onClick = { selectedScreen = NavigationScreen.SEARCH }) {
+                                    Icon(Icons.Default.Search, contentDescription = "Search", tint = Color.White)
                                 }
-                            ) {
-                                Icon(Icons.Default.Search, contentDescription = "Search", tint = Color.White, modifier = Modifier.size(25.dp))
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(
@@ -311,7 +338,7 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     icon = {
                                         Icon(
                                             imageVector = screen.icon,
-                                            contentDescription = screen.title,
+                                            contentDescription = null,
                                             modifier = Modifier.size(23.dp)
                                         )
                                     },
@@ -325,7 +352,7 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     colors = NavigationBarItemDefaults.colors(
                                         selectedIconColor = CrunchyOrange,
                                         selectedTextColor = CrunchyOrange,
-                                        indicatorColor = Color.Transparent,
+                                        indicatorColor = CrunchyOrange.copy(alpha = 0.14f),
                                         unselectedIconColor = Color(0xFFD5D7DF),
                                         unselectedTextColor = Color(0xFFD5D7DF)
                                     )
@@ -345,38 +372,12 @@ fun AppNavigation(prefs: MAnimePrefs) {
                 AnimatedContent(
                     targetState = currentRoute,
                     transitionSpec = {
-                        val initialDepth = when (val route = initialState) {
-                            is ScreenRoute.Tab -> -1
-                            is ScreenRoute.Anime -> route.id
-                            is ScreenRoute.User -> route.id
-                        }
-                        val targetDepth = when (val route = targetState) {
-                            is ScreenRoute.Tab -> -1
-                            is ScreenRoute.Anime -> route.id
-                            is ScreenRoute.User -> route.id
-                        }
-                        val springSpec = spring<androidx.compose.ui.unit.IntOffset>(
-                            dampingRatio = 0.88f,
-                            stiffness = Spring.StiffnessMediumLow
-                        )
-                        when {
-                            targetDepth > initialDepth -> {
-                                (slideInHorizontally(initialOffsetX = { it / 3 }, animationSpec = springSpec) + fadeIn(tween(180))) togetherWith
-                                        (slideOutHorizontally(targetOffsetX = { -it / 6 }, animationSpec = springSpec) + fadeOut(tween(150)))
-                            }
-                            targetDepth < initialDepth -> {
-                                (slideInHorizontally(initialOffsetX = { -it / 6 }, animationSpec = springSpec) + fadeIn(tween(180))) togetherWith
-                                        (slideOutHorizontally(targetOffsetX = { it / 3 }, animationSpec = springSpec) + fadeOut(tween(150)))
-                            }
-                            else -> {
-                                fadeIn(tween(180)) togetherWith fadeOut(tween(120))
-                            }
-                        }
+                        (fadeIn(tween(140)) togetherWith fadeOut(tween(100))).using(null)
                     },
-                    label = "iOSSpringNavTransition"
+                    label = "Screen transition"
                 ) { route ->
                     when (route) {
-                        is ScreenRoute.Anime -> {
+                        is ScreenRoute.Anime -> screenStateHolder.SaveableStateProvider(route.stateKey) {
                             AnimeDetailScreen(
                                 media = route.media,
                                 anilistToken = anilistToken,
@@ -384,21 +385,21 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                 isActive = route == currentRoute,
                                 onBack = { closeRoute(route) },
                                 onMediaUpdated = { profileRefresh++ },
-                                onAnimeClick = ::openAnime,
-                                onUserClick = ::openUser
+                                onAnimeClick = { if (route == currentRoute) openAnime(it) },
+                                onUserClick = { if (route == currentRoute) openUser(it) }
                             )
                         }
-                        is ScreenRoute.User -> {
+                        is ScreenRoute.User -> screenStateHolder.SaveableStateProvider(route.stateKey) {
                             UserProfileScreen(
                                 username = route.username,
                                 anilistToken = anilistToken,
                                 isActive = route == currentRoute,
                                 onBack = { closeRoute(route) },
-                                onAnimeClick = ::openAnime,
-                                onUserClick = ::openUser
+                                onAnimeClick = { if (route == currentRoute) openAnime(it) },
+                                onUserClick = { if (route == currentRoute) openUser(it) }
                             )
                         }
-                        is ScreenRoute.Tab -> tabStateHolder.SaveableStateProvider(route.screen.name) {
+                        is ScreenRoute.Tab -> screenStateHolder.SaveableStateProvider(route.stateKey) {
                             when (route.screen) {
                                 NavigationScreen.DASHBOARD -> DashboardScreen(
                                     user = effectiveUser,
@@ -408,6 +409,10 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     simulcastList = simulcastList,
                                     activitiesList = activitiesList,
                                     isLoading = isDashboardLoading,
+                                    loadFailed = dashboardLoadFailed,
+                                    isActivityLoading = isActivityLoading,
+                                    activityLoadFailed = activityLoadFailed,
+                                    onLoginClick = { showAnilistAuthDialog = true },
                                     onRefresh = {
                                         dashboardRefresh++
                                         profileRefresh++

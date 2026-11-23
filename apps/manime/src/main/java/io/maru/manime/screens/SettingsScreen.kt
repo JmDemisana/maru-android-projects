@@ -1,8 +1,9 @@
-﻿package io.maru.manime.screens
+package io.maru.manime.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -10,12 +11,17 @@ import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -39,9 +45,17 @@ fun SettingsScreen(
     onLoginClick: () -> Unit,
     onLogoutClick: () -> Unit
 ) {
+    val context = LocalContext.current
+    val versionName = remember(context) {
+        @Suppress("DEPRECATION")
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
+            .wrapContentWidth(Alignment.CenterHorizontally)
+            .widthIn(max = 720.dp)
             .padding(horizontal = 16.dp),
         contentPadding = PaddingValues(vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -54,7 +68,7 @@ fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     GlassSectionHeader(
-                        title = "ANILIST ACCOUNT & SYNC",
+                        title = "AniList account",
                         icon = Icons.Default.AccountCircle,
                         color = CrunchyOrange
                     )
@@ -90,7 +104,7 @@ fun SettingsScreen(
                                 color = MaruTextStrong
                             )
                             Text(
-                                text = if (isLoggedIn) "Watchlist & Episode Progress Synced" else "Sign in to sync your watchlist & episodes",
+                                text = if (isLoggedIn) "Connected to AniList" else "Connect to sync your watchlist and episode progress.",
                                 fontSize = 12.sp,
                                 color = if (isLoggedIn) CrunchyTeal else MaruTextMuted
                             )
@@ -112,7 +126,7 @@ fun SettingsScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = MaruDanger, modifier = Modifier.size(18.dp))
-                                Text("LOG OUT OF ANILIST", color = MaruDanger, fontWeight = FontWeight.ExtraBold, fontSize = 12.5.sp)
+                                Text("Log out of AniList", color = MaruDanger, fontWeight = FontWeight.ExtraBold, fontSize = 12.5.sp)
                             }
                         }
                     } else {
@@ -122,7 +136,7 @@ fun SettingsScreen(
                             colors = ButtonDefaults.buttonColors(containerColor = CrunchyOrange),
                             shape = RoundedCornerShape(4.dp)
                         ) {
-                            Text("CONNECT ANILIST ACCOUNT", color = Color.Black, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                            Text("Connect AniList", color = Color.Black, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
                         }
                     }
                 }
@@ -137,61 +151,34 @@ fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     GlassSectionHeader(
-                        title = "STREAMING & AUDIO PREFERENCES",
+                        title = "Streaming preferences",
                         icon = Icons.Default.Tune,
                         color = CrunchyOrange
                     )
 
-                    Text("Default Audio Language", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = MaruTextStrong)
+                    Text("Default audio language", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = MaruTextStrong)
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().selectableGroup(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        listOf("SUB" to "Japanese (Subtitled)", "DUB" to "English Dub").forEach { (key, label) ->
-                            val selected = preferredAudio == key
-                            Surface(
-                                onClick = { onSelectPreferredAudio(key) },
-                                shape = RoundedCornerShape(4.dp),
-                                color = if (selected) CrunchyOrange else CrunchySurface,
-                                border = BorderStroke(1.dp, if (selected) CrunchyOrange else CrunchyBorder),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Box(modifier = Modifier.padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
-                                    Text(
-                                        text = label,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = if (selected) Color.Black else MaruTextStrong
-                                    )
-                                }
-                            }
+                        SettingChoice("Japanese with subtitles", preferredAudio == "SUB", Modifier.weight(1f)) {
+                            onSelectPreferredAudio("SUB")
+                        }
+                        SettingChoice("English dub", preferredAudio == "DUB", Modifier.weight(1f)) {
+                            onSelectPreferredAudio("DUB")
                         }
                     }
 
                     HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
 
-                    Text("Preferred Video Quality", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = MaruTextStrong)
+                    Text("Preferred video quality", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = MaruTextStrong)
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().selectableGroup(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        listOf("1080p", "720p", "4K").forEach { q ->
-                            val selected = preferredQuality == q
-                            Surface(
-                                onClick = { onSelectPreferredQuality(q) },
-                                shape = RoundedCornerShape(4.dp),
-                                color = if (selected) CrunchyOrange else CrunchySurface,
-                                border = BorderStroke(1.dp, if (selected) CrunchyOrange else CrunchyBorder),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Box(modifier = Modifier.padding(vertical = 9.dp), contentAlignment = Alignment.Center) {
-                                    Text(
-                                        text = q,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = if (selected) Color.Black else MaruTextStrong
-                                    )
-                                }
+                        listOf("720p", "1080p", "4K").forEach { quality ->
+                            SettingChoice(quality, preferredQuality == quality, Modifier.weight(1f)) {
+                                onSelectPreferredQuality(quality)
                             }
                         }
                     }
@@ -207,13 +194,13 @@ fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     GlassSectionHeader(
-                        title = "PLAYBACK & AUTOMATION",
+                        title = "Playback",
                         icon = Icons.Default.PlayCircleOutline,
                         color = CrunchyOrange
                     )
 
                     GlassFeatureRow(
-                        label = "Auto-Sync Watched Episodes to AniList",
+                        label = "Sync watched episodes to AniList",
                         checked = reportProgress,
                         onCheckedChange = onToggleReportProgress
                     )
@@ -221,7 +208,7 @@ fun SettingsScreen(
                     HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
 
                     GlassFeatureRow(
-                        label = "Remember Episode Timestamp",
+                        label = "Remember where I stopped",
                         checked = rememberPosition,
                         onCheckedChange = onToggleRememberPosition
                     )
@@ -229,7 +216,7 @@ fun SettingsScreen(
                     HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
 
                     GlassFeatureRow(
-                        label = "Automatically Skip Anime Intros (AniSkip)",
+                        label = "Skip intros automatically",
                         checked = autoSkipIntro,
                         onCheckedChange = onToggleAutoSkipIntro
                     )
@@ -245,14 +232,38 @@ fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     GlassSectionHeader(
-                        title = "ABOUT NANAMI ANIME",
+                        title = "About",
                         icon = Icons.Default.Info,
                         color = CrunchyTeal
                     )
-                    Text("Nanami Anime v2.0.0", fontSize = 13.sp, color = MaruTextStrong, fontWeight = FontWeight.Bold)
-                    Text("Stream simulcasts, switch Sub & Dub audio, sync your AniList watchlist, and save episodes in app internal storage. Offline files are not encrypted.", fontSize = 12.sp, color = MaruTextMuted, lineHeight = 17.sp)
+                    Text("Nanami Anime $versionName".trimEnd(), fontSize = 13.sp, color = MaruTextStrong, fontWeight = FontWeight.Bold)
+                    Text("Downloaded episodes are stored inside the app.", fontSize = 12.sp, color = MaruTextMuted, lineHeight = 17.sp)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SettingChoice(label: String, isSelected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = MaruPillShape,
+        color = if (isSelected) CrunchyOrange else CrunchySurface,
+        border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else CrunchyBorder),
+        modifier = modifier.semantics { selected = isSelected }
+    ) {
+        Box(
+            modifier = Modifier.heightIn(min = 48.dp).padding(horizontal = 6.dp, vertical = 8.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = label,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (isSelected) Color.Black else MaruTextStrong,
+                textAlign = TextAlign.Center
+            )
         }
     }
 }

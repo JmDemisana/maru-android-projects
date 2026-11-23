@@ -1,16 +1,12 @@
 package io.maru.manime.screens
 
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -18,9 +14,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.maru.manime.*
+import kotlinx.coroutines.delay
+
+private val browseCategories = listOf(
+    "For You", "Simulcast Calendar", "Trending Now", "Romance & CGDCT", "Music & Idols",
+    "Slice of Life", "Action & Shounen", "Sci-Fi & Cyberpunk", "Fantasy", "Comedy"
+)
 
 @Composable
 fun RecommendationsScreen(
@@ -36,225 +40,148 @@ fun RecommendationsScreen(
     onAnimeClick: (AnimeMedia) -> Unit
 ) {
     var dubbedOnlyFilter by rememberSaveable { mutableStateOf(false) }
-
-    val categories = listOf(
-        "For You",
-        "Simulcast Calendar",
-        "Trending Now",
-        "Romance & CGDCT",
-        "Music & Idols",
-        "Slice of Life",
-        "Action & Shounen",
-        "Sci-Fi & Cyberpunk",
-        "Fantasy",
-        "Comedy"
-    )
-
     val displayedRecs = remember(recommendations, dubbedOnlyFilter) {
-        if (!dubbedOnlyFilter) recommendations
-        else recommendations.filter { it.hasEnglishDub }
+        if (dubbedOnlyFilter) recommendations.filter { it.hasEnglishDub } else recommendations
+    }
+    val isSimulcast = selectedCategory == "Simulcast Calendar"
+    val nowSec by produceState(System.currentTimeMillis() / 1000L, isSimulcast) {
+        if (!isSimulcast) return@produceState
+        while (true) {
+            value = System.currentTimeMillis() / 1000L
+            delay(60_000)
+        }
     }
 
     LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 14.dp),
-        contentPadding = PaddingValues(top = 8.dp, bottom = 36.dp),
+        columns = GridCells.Adaptive(128.dp),
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 14.dp, top = 8.dp, end = 14.dp, bottom = 24.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // Not Logged In Banner
-        if (!isLoggedIn) {
-            item(span = { GridItemSpan(2) }, key = "login_banner") {
-                GlassCard(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "GET PERSONALIZED SUGGESTIONS",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 10.5.sp,
-                                    letterSpacing = 0.6.sp
-                                ),
-                                color = MaruAccentPink
-                            )
-                            Text(
-                                text = "Log in with AniList to get anime suggestions tailored to your watching history.",
-                                color = MaruTextMuted,
-                                fontSize = 11.5.sp
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        Surface(
-                            onClick = onLoginClick,
-                            shape = MaruPillShape,
-                            color = MaruAccentPink
-                        ) {
-                            Text(
-                                text = "LOGIN",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 10.sp
-                                ),
-                                color = Color.White,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                            )
-                        }
-                    }
+        item(span = { GridItemSpan(maxLineSpan) }, key = "categories_bar") {
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(browseCategories, key = { it }) { category ->
+                    FilterChip(
+                        selected = category == selectedCategory,
+                        onClick = { if (category != selectedCategory) onSelectCategory(category) },
+                        label = { Text(category) }
+                    )
                 }
             }
         }
 
-        // Section Header & Dub Filter
-        item(span = { GridItemSpan(2) }, key = "header_row") {
+        item(span = { GridItemSpan(maxLineSpan) }, key = "header_row") {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                GlassSectionHeader(
-                    title = if (isLoggedIn && selectedCategory == "For You") "TASTE PROFILE ($username)" else "TASTE & GENRE ENGINE",
-                    icon = Icons.Default.AutoAwesome,
-                    color = MaruAccentBlue
+                Text(
+                    text = if (isLoggedIn && selectedCategory == "For You") "For you, $username" else selectedCategory,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
-
-                Surface(
+                FilterChip(
+                    selected = dubbedOnlyFilter,
                     onClick = { dubbedOnlyFilter = !dubbedOnlyFilter },
-                    shape = MaruPillShape,
-                    color = if (dubbedOnlyFilter) Color(0x334ADE80) else MaruGlassSubtleBg,
-                    border = BorderStroke(1.dp, if (dubbedOnlyFilter) MaruAccentGreen else MaruGlassBorderSoft)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.PlayCircle,
-                            contentDescription = null,
-                            tint = if (dubbedOnlyFilter) MaruAccentGreen else MaruTextMuted,
-                            modifier = Modifier.size(13.dp)
-                        )
-                        Text(
-                            text = if (dubbedOnlyFilter) "DUBBED ONLY" else "IS THIS DUBBED?",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 9.5.sp
-                            ),
-                            color = if (dubbedOnlyFilter) MaruAccentGreen else MaruTextMuted
-                        )
-                    }
-                }
+                    label = { Text("Dubbed only") }
+                )
             }
         }
 
-        // Category Filter Pills Bar
-        item(span = { GridItemSpan(2) }, key = "categories_bar") {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                categories.forEach { cat ->
-                    val isSelected = cat == selectedCategory
-                    Surface(
-                        onClick = { onSelectCategory(cat) },
-                        shape = MaruPillShape,
-                        color = if (isSelected) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
-                        border = BorderStroke(1.dp, if (isSelected) MaruAccentPink else MaruGlassBorderSoft)
+        if (!isLoggedIn && selectedCategory == "For You") {
+            item(span = { GridItemSpan(maxLineSpan) }, key = "login_banner") {
+                GlassCard(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = cat.uppercase(),
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (isSelected) MaruAccentPink else MaruTextMuted,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                            text = "Connect AniList for suggestions based on your watchlist.",
+                            color = MaruTextMuted,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
                         )
+                        TextButton(onClick = onLoginClick) { Text("Connect") }
                     }
                 }
             }
         }
 
         if (isLoading) {
-            item(span = { GridItemSpan(2) }, key = "loading") {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 64.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator(color = MaruAccentPink)
+            item(span = { GridItemSpan(maxLineSpan) }, key = "loading") {
+                if (displayedRecs.isNotEmpty()) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = CrunchyOrange)
+                } else {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(color = CrunchyOrange)
+                    }
                 }
             }
         } else if (loadFailed) {
-            item(span = { GridItemSpan(2) }, key = "error") {
-                Column(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text("Couldn't load this category.", color = MaruTextMuted)
-                    TextButton(onClick = onRetry) { Text("Try again") }
-                }
+            item(span = { GridItemSpan(maxLineSpan) }, key = "error") {
+                BrowseMessage("Couldn't load this category.", "Try again", onRetry)
             }
         } else if (displayedRecs.isEmpty()) {
-            item(span = { GridItemSpan(2) }, key = "empty") {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 64.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = if (dubbedOnlyFilter) "No dubbed anime found in this category." else "No recommendations found.",
-                        color = MaruTextMuted,
-                        fontSize = 13.sp
-                    )
+            item(span = { GridItemSpan(maxLineSpan) }, key = "empty") {
+                if (dubbedOnlyFilter && recommendations.isNotEmpty()) {
+                    BrowseMessage("None of these titles are marked as dubbed.", "Show all titles") { dubbedOnlyFilter = false }
+                } else {
+                    BrowseMessage("No titles found in this category.")
                 }
             }
-        } else {
-            items(displayedRecs, key = { "rec_${it.mediaId}" }) { media ->
-                val isSimulcastTab = selectedCategory == "Simulcast Calendar"
-                val nowSec = System.currentTimeMillis() / 1000L
-                val countdownBadge = if (isSimulcastTab && media.nextEpisode != null && media.nextEpisodeAt != null) {
-                    val diffHours = ((media.nextEpisodeAt - nowSec) / 3600L).coerceAtLeast(0L)
-                    val days = diffHours / 24L
-                    val hrs = diffHours % 24L
-                    if (days > 0) "EP ${media.nextEpisode} IN ${days}D ${hrs}H" else "EP ${media.nextEpisode} IN ${hrs}H"
-                } else null
+        }
 
-                Box {
-                    PosterCard(
-                        media = media,
-                        onClick = { onAnimeClick(media) }
-                    )
-                    if (countdownBadge != null) {
-                        Surface(
-                            color = CrunchyTeal,
-                            shape = androidx.compose.foundation.shape.RoundedCornerShape(3.dp),
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(6.dp)
-                        ) {
-                            Text(
-                                text = countdownBadge,
-                                fontSize = 8.5.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = Color.Black,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                            )
-                        }
+        items(displayedRecs, key = { it.mediaId }) { media ->
+            val episodeAt = media.nextEpisodeAt
+            val episode = media.nextEpisode
+            val countdown = if (isSimulcast && episodeAt != null && episode != null && episodeAt > nowSec) {
+                val minutes = (episodeAt - nowSec + 59) / 60
+                val hours = minutes / 60
+                val relativeTime = when {
+                    hours >= 24 -> "${hours / 24}d ${hours % 24}h"
+                    hours >= 1 -> "${hours}h"
+                    else -> "${minutes}m"
+                }
+                "Ep $episode in $relativeTime"
+            } else null
+            Box {
+                PosterCard(media = media, onClick = { onAnimeClick(media) })
+                if (countdown != null) {
+                    Surface(
+                        color = CrunchyTeal,
+                        shape = MaruPillShape,
+                        modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
+                    ) {
+                        Text(
+                            text = countdown,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.Black,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                        )
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun BrowseMessage(message: String, action: String? = null, onAction: () -> Unit = {}) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(message, color = MaruTextMuted, textAlign = TextAlign.Center)
+        if (action != null) TextButton(onClick = onAction) { Text(action) }
     }
 }

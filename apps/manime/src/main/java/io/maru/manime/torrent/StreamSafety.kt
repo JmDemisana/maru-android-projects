@@ -7,6 +7,7 @@ import java.io.RandomAccessFile
 
 internal const val VERIFIED_RANGE_TIMEOUT_MS = 45_000L
 internal const val STREAM_READ_TIMEOUT_MS = 60_000
+private const val COPY_BUFFER_BYTES = 64 * 1024
 
 private val markedEpisode = Regex("(?i)(?<![a-z0-9])(?:s\\d{1,3}[ ._-]*)?e(?:p(?:isode)?)?[ ._-]*(\\d{1,4})(?:v\\d+)?(?=[^a-z0-9]|$)")
 private val releaseEpisode = Regex("(?i)(?:\\s-\\s*|_)(\\d{1,4})(?:v\\d+)?(?=[\\s._\\[()\\]-]|$)")
@@ -19,36 +20,50 @@ internal fun torrentEpisodeNumber(fileName: String): Int? {
 }
 
 /** Deadlines are relative to now. Polling must never postpone an outstanding request. */
-internal class PieceDemand {
-    private val requested = HashSet<Int>()
-    @Synchronized fun request(piece: Int, schedule: () -> Unit) {
-        if (piece !in requested) {
+internal class PieceDemand(private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L }) {
+    private val deadlines = HashMap<Int, Long>()
+    @Synchronized fun request(piece: Int, delayMillis: Int, schedule: () -> Unit) {
+        val deadline = nowMillis() + delayMillis
+        val previous = deadlines[piece]
+        if (previous == null || deadline < previous) {
             schedule()
-            requested.add(piece)
+            deadlines[piece] = deadline
         }
     }
 }
+
+/** The contiguous bytes that belong to the same torrent piece as the requested offset. */
+internal fun bytesInCurrentPiece(offset: Long, remaining: Long, fileOffset: Long, pieceLength: Int): Long =
+    minOf(remaining, pieceLength - (fileOffset + offset) % pieceLength)
 
 /** Production read path, also exercised with genuinely incomplete files in JVM tests. */
 internal suspend fun copyVerifiedRange(
     file: RandomAccessFile, output: OutputStream, range: ByteRange,
     isCurrent: () -> Boolean, isVerified: (Long, Long) -> Boolean,
-    timeoutMillis: Long = VERIFIED_RANGE_TIMEOUT_MS, pollMillis: Long = 150
+    timeoutMillis: Long = VERIFIED_RANGE_TIMEOUT_MS, pollMillis: Long = 60,
+    verificationLength: (Long, Long) -> Long = { _, left -> minOf(COPY_BUFFER_BYTES.toLong(), left) },
+    requestPieces: (Long) -> Unit = {}
 ) {
-    val buffer = ByteArray(64 * 1024)
+    val buffer = ByteArray(COPY_BUFFER_BYTES)
     var offset = range.start
-    var remaining = range.length
-    while (remaining > 0) {
-        val count = minOf(buffer.size.toLong(), remaining).toInt()
-        awaitVerifiedRange(timeoutMillis, pollMillis, isCurrent) { isVerified(offset, count.toLong()) }
+    var verifiedThrough = offset
+    file.seek(range.start)
+    while (offset <= range.end) {
         check(isCurrent()) { "Stream replaced" }
-        check(file.length() >= offset + count) { "Verified bytes not available on disk" }
-        file.seek(offset)
+        if (offset == verifiedThrough) {
+            val remaining = range.end - offset + 1
+            val length = verificationLength(offset, remaining)
+            check(length in 1..remaining) { "Invalid verification length" }
+            requestPieces(offset)
+            awaitVerifiedRange(timeoutMillis, pollMillis, isCurrent) { isVerified(offset, length) }
+            verifiedThrough = offset + length
+            check(file.length() >= verifiedThrough) { "Verified bytes not available on disk" }
+        }
+        val count = minOf(buffer.size.toLong(), verifiedThrough - offset).toInt()
         file.readFully(buffer, 0, count)
         check(isCurrent()) { "Stream replaced" }
         output.write(buffer, 0, count)
         offset += count
-        remaining -= count
     }
 }
 

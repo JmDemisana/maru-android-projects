@@ -5,6 +5,9 @@ import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -13,7 +16,10 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -28,6 +34,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.semantics.Role
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -43,6 +52,7 @@ import io.maru.manime.torrent.OfflineEpisodeEntry
 import io.maru.manime.torrent.TorrentStreamService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -84,7 +94,7 @@ fun AnimeDetailScreen(
         }
         isEntryLoading = false
     }
-    var isSynopsisExpanded by remember { mutableStateOf(false) }
+    var isSynopsisExpanded by rememberSaveable { mutableStateOf(false) }
     var isUpdatingList by remember { mutableStateOf(false) }
     var showEditPage by remember { mutableStateOf(false) }
 
@@ -165,6 +175,7 @@ fun AnimeDetailScreen(
     var isSimilarLoading by remember { mutableStateOf(true) }
     var friendsStatus by remember { mutableStateOf<List<FriendAnimeStatus>>(emptyList()) }
     var isFriendsLoading by remember { mutableStateOf(true) }
+    var isEpisodeInfoLoading by remember { mutableStateOf(true) }
 
     var activeVoiceActor by remember { mutableStateOf<VoiceActor?>(null) }
     var activeStaffWorks by remember { mutableStateOf<StaffWorks?>(null) }
@@ -173,37 +184,34 @@ fun AnimeDetailScreen(
     LaunchedEffect(currentMedia.mediaId) {
         isCastLoading = true
         isSimilarLoading = true
-        streamDubStatus = StreamDubStatus()
-        TorrentStreamService.loadOfflineVault(context)
+        isEpisodeInfoLoading = true
+        launch { TorrentStreamService.loadOfflineVault(context) }
 
-        launch {
+        val mappingsJob = launch {
             try {
                 animeMappings = withContext(Dispatchers.IO) {
                     CrunchyrollStreamEngine.getAnimeMappings(currentMedia.mediaId, currentMedia.title)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {}
         }
 
-        // Probe live streams for Dual-Audio / Dub availability even when AniList lacks dub metadata!
-        launch {
-            try {
-                streamDubStatus = CrunchyrollStreamEngine.checkStreamDubAvailability(
-                    anilistId = currentMedia.mediaId,
-                    animeTitle = currentMedia.title,
-                    episodeNum = 1,
-                    isMovie = currentMedia.format == "MOVIE"
-                )
-            } catch (_: Exception) {}
-        }
-
-        launch {
+        val airingJob = launch {
             try {
                 streamingEpisodes = withContext(Dispatchers.IO) {
                     AniListClient.getStreamingEpisodes(currentMedia.mediaId)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
                 streamingEpisodes = emptyList()
             }
+        }
+        launch {
+            mappingsJob.join()
+            airingJob.join()
+            isEpisodeInfoLoading = false
         }
         launch {
             try {
@@ -227,6 +235,23 @@ fun AnimeDetailScreen(
                 isSimilarLoading = false
             }
         }
+    }
+
+    val isPlaybackOpen = activePlayingEp != null
+    val hasListedDub = currentMedia.hasEnglishDub || castList.any { it.englishVa != null }
+    LaunchedEffect(media.mediaId, isActive, isPlaybackOpen, hasListedDub) {
+        if (!isActive || isPlaybackOpen || hasListedDub || streamDubStatus.hasStreamDubOrDual) return@LaunchedEffect
+        delay(1200)
+        try {
+            streamDubStatus = CrunchyrollStreamEngine.checkStreamDubAvailability(
+                anilistId = media.mediaId,
+                animeTitle = media.title,
+                episodeNum = 1,
+                isMovie = media.format == "MOVIE"
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {}
     }
 
     LaunchedEffect(media.mediaId, anilistToken) {
@@ -262,20 +287,20 @@ fun AnimeDetailScreen(
     }
 
     val availableTabs = listOf("Episodes", "Overview", "Cast")
-    var selectedTabIndex by remember { mutableIntStateOf(0) }
+    var selectedTabIndex by rememberSaveable { mutableIntStateOf(0) }
+    val detailScroll = rememberLazyListState()
 
-    var selectedEpRangeIndex by remember(completeEpisodes.size) { mutableIntStateOf(0) }
+    var selectedEpRangeIndex by rememberSaveable { mutableIntStateOf(0) }
     val episodeChunkSize = 50
     val episodeChunks = remember(completeEpisodes) {
         if (completeEpisodes.isEmpty()) listOf(emptyList())
         else completeEpisodes.chunked(episodeChunkSize)
     }
-    val visibleEpisodes = episodeChunks.getOrElse(selectedEpRangeIndex.coerceIn(0, (episodeChunks.size - 1).coerceAtLeast(0))) { completeEpisodes }
+    val selectedRange = selectedEpRangeIndex.coerceIn(episodeChunks.indices)
+    val visibleEpisodes = episodeChunks[selectedRange]
 
     // True Dub / Dual-Audio availability: AniList English Cast OR Stream Dual-Audio / Dub!
-    val hasAnyDub = remember(castList, currentMedia, streamDubStatus) {
-        currentMedia.hasEnglishDub || castList.any { it.englishVa != null } || streamDubStatus.hasStreamDubOrDual
-    }
+    val hasAnyDub = hasListedDub || streamDubStatus.hasStreamDubOrDual
 
     LaunchedEffect(activeVoiceActor?.id) {
         val actor = activeVoiceActor ?: return@LaunchedEffect
@@ -367,6 +392,7 @@ fun AnimeDetailScreen(
             onSwitchEpisode = { targetNum ->
                 completeEpisodes.firstOrNull { it.episodeNumber == targetNum }?.let { activePlayingEp = it }
             },
+            lastPlayableEpisode = completeEpisodes.lastOrNull()?.episodeNumber ?: latestAiredEp,
             onBack = { activePlayingEp = null }
         )
         return
@@ -380,13 +406,15 @@ fun AnimeDetailScreen(
         }
     }
 
+    val compact = LocalConfiguration.current.screenHeightDp < 430
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(CrunchyBgBlack)
-            .navigationBarsPadding()
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
     ) {
-        LazyColumn(
+        if (!showEditPage && activeVoiceActor == null) LazyColumn(
+            state = detailScroll,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 40.dp)
         ) {
@@ -395,7 +423,7 @@ fun AnimeDetailScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(276.dp)
+                        .height(if (compact) 222.dp else 264.dp)
                 ) {
                     AsyncImage(
                         model = currentMedia.bannerUrl ?: currentMedia.coverUrl,
@@ -432,10 +460,10 @@ fun AnimeDetailScreen(
                     ) {
                         AsyncImage(
                             model = currentMedia.coverUrl,
-                            contentDescription = currentMedia.title,
+                            contentDescription = null,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
-                                .width(100.dp)
+                                .width(if (compact) 88.dp else 100.dp)
                                 .aspectRatio(2f / 3f)
                                 .clip(RoundedCornerShape(4.dp))
                         )
@@ -510,29 +538,28 @@ fun AnimeDetailScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Button(
-                            onClick = {
-                                if (targetEpMeta != null) activePlayingEp = targetEpMeta
-                                else Toast.makeText(context, "No released episodes available yet.", Toast.LENGTH_SHORT).show()
-                            },
+                            onClick = { activePlayingEp = targetEpMeta },
+                            enabled = targetEpMeta != null,
                             modifier = Modifier
                                 .weight(1f)
                                 .height(48.dp),
                             shape = RoundedCornerShape(4.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = CrunchyOrange)
                         ) {
-                            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.Black, modifier = Modifier.size(22.dp))
+                            Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(22.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             val btnText = when {
-                                targetEpMeta == null -> "COMING SOON"
-                                currentMedia.progress > 0 -> "CONTINUE S${targetEpMeta.seasonNumber} E${targetEpMeta.episodeNumber}"
-                                else -> "START WATCHING S${targetEpMeta.seasonNumber} E1"
+                                targetEpMeta == null && isEpisodeInfoLoading -> "Loading episodes…"
+                                targetEpMeta == null -> "No episodes available"
+                                currentMedia.progress > 0 -> "Continue · E${targetEpMeta.episodeNumber}"
+                                else -> "Play episode ${targetEpMeta.episodeNumber}"
                             }
                             Text(
                                 text = btnText,
                                 fontSize = 13.5.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = Color.Black,
-                                letterSpacing = 0.5.sp
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
 
@@ -567,7 +594,7 @@ fun AnimeDetailScreen(
                                     modifier = Modifier.size(20.dp)
                                 )
                                 Text(
-                                    text = currentMedia.listStatus?.take(4) ?: "LIST",
+                                    text = "AniList",
                                     fontSize = 11.5.sp,
                                     fontWeight = FontWeight.ExtraBold,
                                     color = Color.White
@@ -623,10 +650,7 @@ fun AnimeDetailScreen(
                                     else -> "OVA"
                                 }
                                 Surface(
-                                    onClick = {
-                                        onAnimeClick(rel)
-                                        onMediaUpdated(rel)
-                                    },
+                                    onClick = { onAnimeClick(rel) },
                                     shape = RoundedCornerShape(4.dp),
                                     color = CrunchyCardBg,
                                     border = BorderStroke(1.dp, CrunchyBorder)
@@ -653,15 +677,18 @@ fun AnimeDetailScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp)
+                            .selectableGroup()
                     ) {
                         availableTabs.forEachIndexed { idx, title ->
                             val isSelected = selectedTabIndex == idx
                             val label = if (idx == 0) "$title (${completeEpisodes.size})" else title
                             Column(
                                 horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Bottom,
                                 modifier = Modifier
                                     .weight(1f)
-                                    .clickable { selectedTabIndex = idx }
+                                    .heightIn(min = 48.dp)
+                                    .selectable(selected = isSelected, role = Role.Tab, onClick = { selectedTabIndex = idx })
                                     .padding(top = 8.dp)
                             ) {
                                 Text(
@@ -698,7 +725,7 @@ fun AnimeDetailScreen(
                             episodeChunks.forEachIndexed { idx, chunk ->
                                 val firstEp = chunk.firstOrNull()?.episodeNumber ?: 1
                                 val lastEp = chunk.lastOrNull()?.episodeNumber ?: firstEp
-                                val isRangeSelected = selectedEpRangeIndex == idx
+                                val isRangeSelected = selectedRange == idx
                                 Surface(
                                     onClick = { selectedEpRangeIndex = idx },
                                     shape = RoundedCornerShape(4.dp),
@@ -725,11 +752,11 @@ fun AnimeDetailScreen(
                                 .padding(vertical = 48.dp, horizontal = 24.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = "No released episodes yet. Check back once Episode 1 airs!",
-                                color = MaruTextMuted,
-                                fontSize = 13.5.sp
-                            )
+                            if (isEpisodeInfoLoading) {
+                                CircularProgressIndicator(color = CrunchyOrange, modifier = Modifier.size(28.dp), strokeWidth = 2.dp)
+                            } else {
+                                Text("No released episodes available.", color = MaruTextMuted, fontSize = 13.5.sp)
+                            }
                         }
                     }
                 } else {
@@ -992,10 +1019,7 @@ fun AnimeDetailScreen(
                                     similarAnime.forEach { sim ->
                                         PosterCard(
                                             media = sim,
-                                            onClick = {
-                                                onAnimeClick(sim)
-                                                onMediaUpdated(sim)
-                                            },
+                                            onClick = { onAnimeClick(sim) },
                                             modifier = Modifier.width(136.dp)
                                         )
                                     }
@@ -1094,7 +1118,7 @@ fun AnimeDetailScreen(
         }
 
         // Full-Page AniList Status & Native Scoring Editor (NO awkward bottom sheet drag!)
-        AnimatedVisibility(visible = showEditPage) {
+        AnimatedVisibility(visible = showEditPage, enter = fadeIn(tween(120)), exit = ExitTransition.None) {
             var selectedStatus by remember(currentMedia) { mutableStateOf(currentMedia.listStatus ?: "CURRENT") }
             var selectedProgress by remember(currentMedia) { mutableIntStateOf(currentMedia.progress) }
             var selectedScore by remember(currentMedia) { mutableStateOf(currentMedia.score ?: 0.0) }
@@ -1374,7 +1398,7 @@ fun AnimeDetailScreen(
                     } else {
                         val works = activeStaffWorks?.works ?: emptyList()
                         androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
-                            columns = androidx.compose.foundation.lazy.grid.GridCells.Fixed(2),
+                            columns = androidx.compose.foundation.lazy.grid.GridCells.Adaptive(140.dp),
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(horizontal = 16.dp),
@@ -1389,7 +1413,6 @@ fun AnimeDetailScreen(
                                     onClick = {
                                         activeVoiceActor = null
                                         onAnimeClick(w)
-                                        onMediaUpdated(w)
                                     }
                                 )
                             }

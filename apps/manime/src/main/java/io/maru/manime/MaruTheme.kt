@@ -1,32 +1,25 @@
-﻿package io.maru.manime
+package io.maru.manime
 
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -112,19 +105,22 @@ fun GlassFeatureRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
             .padding(vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = label,
             fontSize = 14.sp,
             fontWeight = FontWeight.Medium,
-            color = MaruTextStrong
+            color = MaruTextStrong,
+            modifier = Modifier.weight(1f)
         )
         Switch(
             checked = checked,
-            onCheckedChange = onCheckedChange,
+            onCheckedChange = null,
             colors = SwitchDefaults.colors(
                 checkedThumbColor = Color.Black,
                 checkedTrackColor = CrunchyOrange,
@@ -137,7 +133,7 @@ fun GlassFeatureRow(
 }
 
 /**
- * Authentic Crunchyroll Continue Watching Card with iOS Spring Press Physics
+ * Continue watching card
  */
 @Composable
 fun WatchingCard(
@@ -145,30 +141,14 @@ fun WatchingCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isPressed by interactionSource.collectIsPressedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.96f else 1f,
-        animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow),
-        label = "WatchingCardSpring"
-    )
-
     val subOrDubLabel = if (media.hasEnglishDub) "Dub | Sub" else "Subtitled"
     val totalEps = media.latestAiredEpisode ?: 0
-    val progressFrac = if (totalEps > 0) (media.progress.toFloat() / totalEps.toFloat()).coerceIn(0.06f, 1f) else 0.1f
+    val progressFrac = if (totalEps > 0) (media.progress.toFloat() / totalEps).coerceIn(0f, 1f) else 0f
 
     Column(
         modifier = modifier
             .width(152.dp)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .clickable(
-                interactionSource = interactionSource,
-                indication = null,
-                onClick = onClick
-            )
+            .clickable(role = Role.Button, onClick = onClick)
     ) {
         Box(
             modifier = Modifier
@@ -178,7 +158,7 @@ fun WatchingCard(
         ) {
             AsyncImage(
                 model = media.coverUrl,
-                contentDescription = media.title,
+                contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
@@ -219,7 +199,7 @@ fun WatchingCard(
                     .align(Alignment.BottomStart)
                     .padding(8.dp)
             ) {
-                val nextEp = (media.progress + 1).coerceAtMost(totalEps.coerceAtLeast(1))
+                val nextEp = (media.progress + 1).coerceAtMost(if (totalEps > 0) totalEps else Int.MAX_VALUE)
                 Text(
                     text = if (media.progress > 0) "E$nextEp" else "E1",
                     fontSize = 10.sp,
@@ -258,30 +238,19 @@ fun WatchingCard(
 
         Spacer(modifier = Modifier.height(2.dp))
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "$subOrDubLabel • Ep ${media.progress}/${totalEps}",
-                fontSize = 11.5.sp,
-                color = MaruTextMuted,
-                fontWeight = FontWeight.Normal
-            )
-            Icon(
-                Icons.Default.MoreVert,
-                contentDescription = null,
-                tint = MaruTextMuted,
-                modifier = Modifier.size(16.dp)
-            )
-        }
+        Text(
+            text = if (totalEps > 0) "$subOrDubLabel • Ep ${media.progress}/$totalEps" else subOrDubLabel,
+            fontSize = 11.5.sp,
+            color = MaruTextMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
 /**
  * Authentic Crunchyroll 2:3 Poster Card matching the user's Crunchyroll reference screenshots:
- * Borderless 2:3 key art image on top, clean Title + "Dub | Sub" (or custom subtitle like "4 Episodes") + 3-dot icon below on pure black background.
+ * Borderless 2:3 key art image on top, clean Title + "Dub | Sub" (or custom subtitle like "4 Episodes").
  */
 @Composable
 fun PosterCard(
@@ -290,28 +259,12 @@ fun PosterCard(
     modifier: Modifier = Modifier,
     subtitleOverride: String? = null
 ) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isPressed by interactionSource.collectIsPressedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.96f else 1f,
-        animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow),
-        label = "PosterCardSpring"
-    )
-
     val subOrDubLabel = subtitleOverride ?: if (media.hasEnglishDub) "Dub | Sub" else "Subtitled"
 
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .clickable(
-                interactionSource = interactionSource,
-                indication = null,
-                onClick = onClick
-            )
+            .clickable(role = Role.Button, onClick = onClick)
     ) {
         Box(
             modifier = Modifier
@@ -321,7 +274,7 @@ fun PosterCard(
         ) {
             AsyncImage(
                 model = media.coverUrl,
-                contentDescription = media.title,
+                contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
@@ -340,25 +293,12 @@ fun PosterCard(
 
         Spacer(modifier = Modifier.height(3.dp))
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = subOrDubLabel,
-                fontSize = 12.sp,
-                color = MaruTextMuted,
-                fontWeight = FontWeight.Normal,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Icon(
-                Icons.Default.MoreVert,
-                contentDescription = null,
-                tint = MaruTextMuted,
-                modifier = Modifier.size(16.dp)
-            )
-        }
+        Text(
+            text = subOrDubLabel,
+            fontSize = 12.sp,
+            color = MaruTextMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }

@@ -13,6 +13,8 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -27,6 +29,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -87,11 +90,13 @@ fun ProfileScreen(
     var activeOfflinePlaying by remember { mutableStateOf<OfflineEpisodeEntry?>(null) }
     var selectedOfflineSeriesId by rememberSaveable { mutableStateOf<Int?>(null) }
     var selectedCategory by rememberSaveable { mutableStateOf("Watchlist") }
+    var isVaultLoading by remember { mutableStateOf(true) }
     val notifyPlaybackVisibility by rememberUpdatedState(onPlaybackVisibilityChange)
     val isOfflinePlayerVisible = activeOfflinePlaying != null && prefs != null
 
     LaunchedEffect(Unit) {
         TorrentStreamService.loadOfflineVault(context)
+        isVaultLoading = false
     }
 
     DisposableEffect(isOfflinePlayerVisible) {
@@ -144,21 +149,24 @@ fun ProfileScreen(
             .fillMaxSize()
             .background(CrunchyBgBlack)
     ) {
-        // Authentic Crunchyroll Top Underline Tab Bar (Watchlist | History | Completed | Downloads)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(CrunchyBgBlack)
-                .padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp)
+                .selectableGroup(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             availableCategories.forEach { category ->
                 val isSelected = selectedCategory == category
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Bottom,
                     modifier = Modifier
-                        .weight(1f)
-                        .clickable {
+                        .heightIn(min = 48.dp)
+                        .width(IntrinsicSize.Min)
+                        .selectable(selected = isSelected, role = Role.Tab) {
                             selectedCategory = category
                             selectedOfflineSeriesId = null
                         }
@@ -166,10 +174,10 @@ fun ProfileScreen(
                 ) {
                     Text(
                         text = category,
-                        fontSize = 14.sp,
+                        fontSize = 13.sp,
                         fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.SemiBold,
                         color = if (isSelected) Color.White else MaruTextMuted,
-                        modifier = Modifier.padding(bottom = 10.dp)
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 10.dp)
                     )
                     Box(
                         modifier = Modifier
@@ -184,7 +192,11 @@ fun ProfileScreen(
         HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
 
         if (selectedCategory == "Downloads") {
-            if (offlineEpisodes.isEmpty()) {
+            if (isVaultLoading && offlineEpisodes.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = CrunchyOrange)
+                }
+            } else if (offlineEpisodes.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -314,7 +326,7 @@ fun ProfileScreen(
 
                 Column(modifier = Modifier.fillMaxSize().padding(top = 12.dp)) {
                     LazyVerticalGrid(
-                        columns = GridCells.Fixed(2),
+                        columns = GridCells.Adaptive(140.dp),
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(horizontal = 16.dp),
@@ -361,7 +373,7 @@ fun ProfileScreen(
             }
         } else {
             LazyVerticalGrid(
-                columns = GridCells.Fixed(2),
+                columns = GridCells.Adaptive(140.dp),
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(horizontal = 16.dp),

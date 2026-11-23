@@ -3,6 +3,9 @@ package io.maru.manime.extensions
 import io.maru.manime.StreamingEpisode
 import io.maru.manime.readResponse
 import kotlinx.coroutines.*
+import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -60,6 +63,9 @@ object CrunchyrollStreamEngine {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
         .build()
+    private val streamHttpClient = httpClient.newBuilder()
+        .callTimeout(8, TimeUnit.SECONDS)
+        .build()
 
     // High-availability anime & global trackers for fast peer discovery
     private val FAST_TRACKERS = listOf(
@@ -86,9 +92,12 @@ object CrunchyrollStreamEngine {
     )
 
     private val mappingCache = ConcurrentHashMap<Int, Pair<Long, AnimeIdMappings>>()
+    private val mappingLocks = Array(64) { Mutex() }
     private val dubStatusCache = ConcurrentHashMap<Pair<Int, Int>, Pair<Long, StreamDubStatus>>()
     private val mappingCacheNanos = TimeUnit.MINUTES.toNanos(30)
+    private val missingMappingCacheNanos = TimeUnit.SECONDS.toNanos(3)
     private val dubCacheNanos = TimeUnit.MINUTES.toNanos(10)
+    private val seedersPattern = Pattern.compile("(?:👤|seeders|seeds|peers)\\s*:?\\s*(\\d+)|(\\d+)\\s*(?:seed|👤|peers)")
 
     /**
      * Checks live Torrentio/Kitsu streams for Episode 1 to detect if Dual-Audio / Multi-Audio / Dubbed
@@ -139,11 +148,48 @@ object CrunchyrollStreamEngine {
      * Resolves AniList ID -> Kitsu ID, MAL ID, IMDb ID, and rich Crunchyroll-style Episode metadata
      * via api.ani.zip, with Kitsu API fallback so episode titles/thumbnails/overviews are always populated.
      */
-    suspend fun getAnimeMappings(anilistId: Int, fallbackTitle: String = ""): AnimeIdMappings = withContext(Dispatchers.IO) {
-        mappingCache[anilistId]?.let { (cachedAt, mappings) ->
-            if (System.nanoTime() - cachedAt < mappingCacheNanos) return@withContext mappings
+    suspend fun getAnimeMappings(
+        anilistId: Int,
+        fallbackTitle: String = "",
+        includeEpisodeMetadata: Boolean = true
+    ): AnimeIdMappings = withContext(Dispatchers.IO) {
+        val lock = mappingLocks[anilistId and (mappingLocks.size - 1)]
+        val mappings = cachedMappings(anilistId, fallbackTitle) ?: lock.withLock {
+            cachedMappings(anilistId, fallbackTitle) ?: fetchAnimeMappings(anilistId, fallbackTitle).also {
+                if (it.hasSourceIds() || fallbackTitle.isNotBlank()) {
+                    mappingCache[anilistId] = System.nanoTime() to it
+                }
+            }
+        }
+        val kitsuId = mappings.kitsuId
+        if (!includeEpisodeMetadata || mappings.episodes.isNotEmpty() || kitsuId == null) {
+            return@withContext mappings
         }
 
+        val episodes = fetchKitsuEpisodes(kitsuId)
+        if (episodes.isEmpty()) return@withContext mappings
+        val enriched = mappings.copy(episodes = episodes.sortedBy { it.episodeNumber })
+        mappingCache.computeIfPresent(anilistId) { _, cached ->
+            if (cached.second === mappings) cached.first to enriched else cached
+        }
+        enriched
+    }
+
+    private fun AnimeIdMappings.hasSourceIds(): Boolean = kitsuId != null || imdbId != null
+
+    private fun cachedMappings(anilistId: Int, fallbackTitle: String): AnimeIdMappings? {
+        mappingCache[anilistId]?.let { (cachedAt, mappings) ->
+            val maxAge = if (mappings.hasSourceIds() || mappings.episodes.isNotEmpty()) {
+                mappingCacheNanos
+            } else if (fallbackTitle.isNotBlank()) {
+                missingMappingCacheNanos
+            } else 0L
+            if (System.nanoTime() - cachedAt < maxAge) return mappings
+        }
+        return null
+    }
+
+    private suspend fun fetchAnimeMappings(anilistId: Int, fallbackTitle: String): AnimeIdMappings {
         var kitsuId: String? = null
         var malId: Int? = null
         var imdbId: String? = null
@@ -226,25 +272,15 @@ object CrunchyrollStreamEngine {
             kitsuId = resolveKitsuIdByTitle(fallbackTitle)
         }
 
-        // If AniZip didn't return rich episode metadata, fetch episode titles/thumbnails/synopses from Kitsu API
-        if (episodesList.isEmpty() && !kitsuId.isNullOrBlank()) {
-            episodesList.addAll(fetchKitsuEpisodes(kitsuId))
-        }
-
-        val sortedEps = episodesList.sortedBy { it.episodeNumber }
-        val result = AnimeIdMappings(
+        return AnimeIdMappings(
             anilistId = anilistId,
             malId = malId,
             kitsuId = kitsuId,
             imdbId = imdbId,
             tvdbId = tvdbId,
             episodeCount = epCount,
-            episodes = sortedEps
+            episodes = episodesList.sortedBy { it.episodeNumber }
         )
-        if (kitsuId != null || imdbId != null || sortedEps.isNotEmpty()) {
-            mappingCache[anilistId] = System.nanoTime() to result
-        }
-        result
     }
 
     private suspend fun resolveKitsuIdByTitle(title: String): String? {
@@ -397,7 +433,7 @@ object CrunchyrollStreamEngine {
         episodeNum: Int,
         isMovie: Boolean = false
     ): List<ExternalSubtitleItem> = withContext(Dispatchers.IO) {
-        val mappings = getAnimeMappings(anilistId, animeTitle)
+        val mappings = getAnimeMappings(anilistId, animeTitle, includeEpisodeMetadata = false)
         val lookups = streamLookups(mappings, episodeNum, isMovie).sortedBy { it.id.startsWith("kitsu:") }
         if (lookups.isEmpty()) return@withContext emptyList()
 
@@ -508,7 +544,7 @@ object CrunchyrollStreamEngine {
 
     /**
      * Fetches and scores all available streams from built-in Torrentio/Kitsu providers,
-     * returning them ranked from best to fallback for the user's preferred audio (SUB or DUB) and quality.
+     * reporting ranked snapshots on the caller's coroutine and returning all routes' results.
      */
     suspend fun resolveRankedStreams(
         anilistId: Int,
@@ -516,18 +552,20 @@ object CrunchyrollStreamEngine {
         episodeNum: Int,
         preferredAudio: String = "SUB", // "SUB" | "DUB"
         preferredQuality: String = "1080p", // "1080p" | "720p" | "4K"
-        isMovie: Boolean = false
+        isMovie: Boolean = false,
+        onStreamsUpdated: (List<StreamLink>) -> Unit = {}
     ): List<StreamLink> = coroutineScope {
-        val mappings = getAnimeMappings(anilistId, animeTitle)
+        val mappings = getAnimeMappings(anilistId, animeTitle, includeEpisodeMetadata = false)
         val lookups = streamLookups(mappings, episodeNum, isMovie)
         if (lookups.isEmpty()) return@coroutineScope emptyList()
+        val displayName = URLEncoder.encode("$animeTitle - Episode $episodeNum", "UTF-8")
 
         val jobs = BUILTIN_PROVIDERS.flatMap { providerUrl ->
+            val client = StremioAddonClient(providerUrl, streamHttpClient)
             lookups.map { (type, id, priority) ->
                 async(Dispatchers.IO) {
                     val found = mutableListOf<StreamLink>()
                     try {
-                        val client = StremioAddonClient(providerUrl, httpClient)
                         val rawStreams = client.getStreams(type, id)
                         for (s in rawStreams) {
                             val combinedText = listOfNotNull(s.name, s.title, s.filename).joinToString(" ")
@@ -564,10 +602,9 @@ object CrunchyrollStreamEngine {
                                 )
                             } else if (!s.infoHash.isNullOrBlank()) {
                                 val hash = s.infoHash.lowercase().trim()
-                                val dn = URLEncoder.encode("$animeTitle - Episode $episodeNum", "UTF-8")
                                 val allTrackers = (s.sources + FAST_TRACKERS).distinct()
                                 val trackerParams = allTrackers.joinToString("") { "&tr=${URLEncoder.encode(it, "UTF-8")}" }
-                                val magnet = "magnet:?xt=urn:btih:$hash&dn=$dn$trackerParams"
+                                val magnet = "magnet:?xt=urn:btih:$hash&dn=$displayName$trackerParams"
                                 found.add(
                                     StreamLink(
                                         url = magnet,
@@ -596,10 +633,7 @@ object CrunchyrollStreamEngine {
             }
         }
 
-        val allStreams = jobs.awaitAll().flatten()
-        allStreams
-            .sortedByDescending { it.score }
-            .distinctBy { (it.infoHash ?: it.url) to it.fileIdx }
+        collectRankedStreams(jobs, onStreamsUpdated)
     }
 
     private data class StreamLookup(val type: String, val id: String, val priority: Int = 0)
@@ -732,10 +766,36 @@ object CrunchyrollStreamEngine {
     }
 
     private fun detectSeeders(raw: String): Int? {
-        val matcher = Pattern.compile("(?:👤|seeders|seeds|peers)\\s*:?\\s*(\\d+)|(\\d+)\\s*(?:seed|👤|peers)").matcher(raw.lowercase())
+        val matcher = seedersPattern.matcher(raw.lowercase())
         if (matcher.find()) {
             return matcher.group(1)?.toIntOrNull() ?: matcher.group(2)?.toIntOrNull()
         }
         return null
     }
+}
+
+internal suspend fun collectRankedStreams(
+    routes: List<Deferred<List<StreamLink>>>,
+    onStreamsUpdated: (List<StreamLink>) -> Unit
+): List<StreamLink> {
+    val pendingRoutes = routes.toMutableList()
+    val bestBySource = linkedMapOf<Pair<String, Int?>, StreamLink>()
+    var ranked = emptyList<StreamLink>()
+    while (pendingRoutes.isNotEmpty()) {
+        val (finished, streams) = select<Pair<Deferred<List<StreamLink>>, List<StreamLink>>> {
+            pendingRoutes.forEach { route -> route.onAwait { route to it } }
+        }
+        pendingRoutes.remove(finished)
+        for (stream in streams) {
+            val key = stream.playbackIdentity
+            val existing = bestBySource[key]
+            if (existing == null || stream.score > existing.score) bestBySource[key] = stream
+        }
+        val updated = bestBySource.values.sortedByDescending { it.score }
+        if (updated != ranked) {
+            ranked = updated
+            onStreamsUpdated(ranked)
+        }
+    }
+    return ranked
 }

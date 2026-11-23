@@ -12,6 +12,8 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -19,12 +21,15 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -48,7 +53,7 @@ fun UserProfileScreen(
     var profileLoadFailed by remember(username, anilistToken) { mutableStateOf(false) }
     var retryProfile by remember { mutableIntStateOf(0) }
 
-    var selectedTab by remember(username) { mutableIntStateOf(0) }
+    var selectedTab by rememberSaveable(username) { mutableIntStateOf(0) }
     var following by remember(username, anilistToken) { mutableStateOf<List<AniListProfile>?>(null) }
     var followers by remember(username, anilistToken) { mutableStateOf<List<AniListProfile>?>(null) }
     var peopleLoadFailed by remember(selectedTab, username, anilistToken) { mutableStateOf(false) }
@@ -95,7 +100,10 @@ fun UserProfileScreen(
     }
 
     if (isLoading) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing), contentAlignment = Alignment.Center) {
+            IconButton(onClick = onBack, modifier = Modifier.align(Alignment.TopStart).padding(8.dp)) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+            }
             CircularProgressIndicator(color = MaruAccentPink)
         }
     } else if (profile == null) {
@@ -117,17 +125,19 @@ fun UserProfileScreen(
             if (u.userLists.isEmpty()) listOf("Watching", "Completed", "Planning")
             else u.userLists.keys.toList()
         }
-        var selectedCategory by remember(availableCategories) { mutableStateOf(availableCategories.firstOrNull() ?: "Watching") }
+        var selectedCategory by rememberSaveable(availableCategories) { mutableStateOf(availableCategories.firstOrNull() ?: "Watching") }
         val currentCategoryList = remember(u.userLists, selectedCategory) {
             u.userLists[selectedCategory].orEmpty().distinctBy { it.mediaId }
         }
 
-        Column(modifier = Modifier.fillMaxSize().navigationBarsPadding()) {
+        val compact = LocalConfiguration.current.screenHeightDp < 430
+        Column(modifier = Modifier.fillMaxSize()
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))) {
             // Header with banner & avatar
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(210.dp)
+                    .height(if (compact) 154.dp else 200.dp)
             ) {
                 if (u.banner != null) {
                     AsyncImage(
@@ -210,17 +220,18 @@ fun UserProfileScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .selectableGroup(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                listOf("WATCHLIST", "FOLLOWING", "FOLLOWERS").forEachIndexed { idx, title ->
+                listOf("Watchlist", "Following", "Followers").forEachIndexed { idx, title ->
                     val isSelected = selectedTab == idx
                     Surface(
-                        onClick = { selectedTab = idx },
                         shape = MaruPillShape,
                         color = if (isSelected) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
                         border = BorderStroke(1.dp, if (isSelected) MaruAccentPink else MaruGlassBorderSoft),
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                            .selectable(selected = isSelected, role = Role.Tab) { selectedTab = idx }
                     ) {
                         Box(modifier = Modifier.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
                             Text(
@@ -280,7 +291,7 @@ fun UserProfileScreen(
                         }
                     } else {
                         LazyVerticalGrid(
-                            columns = GridCells.Fixed(2),
+                            columns = GridCells.Adaptive(140.dp),
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(horizontal = 14.dp),

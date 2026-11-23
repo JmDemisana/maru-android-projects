@@ -39,6 +39,9 @@ data class StreamLink(
     val score: Int = 0
 )
 
+internal val StreamLink.playbackIdentity: Pair<String, Int?>
+    get() = (infoHash ?: url) to fileIdx
+
 sealed interface ExtensionSource {
     val name: String
     val id: String

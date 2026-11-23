@@ -38,6 +38,44 @@ class StreamSafetyTest {
         }
     }
 
+    @Test fun seekingPromotesReadAheadWithoutPostponingExistingDeadlines() {
+        var clock = 0L
+        val demand = PieceDemand { clock }
+        val requests = mutableListOf<Int>()
+        demand.request(8, 800) { requests += 800 }
+        clock = 100
+        demand.request(8, 800) { requests += 800 }
+        demand.request(8, 0) { requests += 0 }
+        clock = 101
+        demand.request(8, 0) { requests += 0 }
+        assertEquals(listOf(800, 0), requests)
+    }
+
+    @Test fun unalignedRangeVerifiesEachPieceOnceAcrossLargerSpans() = runBlocking {
+        val file = File.createTempFile("nanami-piece-span", ".mkv")
+        try {
+            val data = ByteArray(300 * 1024) { (it % 251).toByte() }
+            val start = 64L * 1024
+            val last = 295L * 1024
+            val fileOffset = 32L * 1024
+            val pieceLength = 256 * 1024
+            val verified = mutableListOf<Pair<Long, Long>>()
+            val output = ByteArrayOutputStream()
+            RandomAccessFile(file, "rw").use { input ->
+                input.write(data)
+                copyVerifiedRange(input, output, ByteRange(start, last),
+                    isCurrent = { true },
+                    isVerified = { offset, length -> verified += offset to length; true },
+                    verificationLength = { offset, remaining -> bytesInCurrentPiece(offset, remaining, fileOffset, pieceLength) })
+            }
+            val boundary = pieceLength - fileOffset
+            assertEquals(listOf(start to (boundary - start), boundary to (last - boundary + 1)), verified)
+            assertArrayEquals(data.copyOfRange(start.toInt(), last.toInt() + 1), output.toByteArray())
+        } finally {
+            file.delete()
+        }
+    }
+
     @Test fun rangesSupportSuffixOpenAndClampedEnds() {
         assertEquals(ByteRange(0, 99), parseByteRange(null, 100))
         assertEquals(ByteRange(80, 99), parseByteRange("bytes=-20", 100))

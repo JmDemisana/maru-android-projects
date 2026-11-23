@@ -2,17 +2,17 @@ package io.maru.manime.screens
 
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -26,6 +26,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -34,9 +35,11 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import io.maru.manime.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(
     user: AniListUser?,
@@ -48,10 +51,15 @@ fun DashboardScreen(
     isLoading: Boolean,
     onRefresh: () -> Unit,
     onAnimeClick: (AnimeMedia) -> Unit,
-    onUserClick: (String) -> Unit = {}
+    onUserClick: (String) -> Unit = {},
+    loadFailed: Boolean = false,
+    isActivityLoading: Boolean = false,
+    activityLoadFailed: Boolean = false,
+    onLoginClick: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val posterWidth = if (LocalConfiguration.current.screenWidthDp < 360) 128.dp else 152.dp
 
     // Social likes & replies local state map
     val likedStateMap = remember(anilistToken) { mutableStateMapOf<Int, Pair<Boolean, Int>>() }
@@ -60,13 +68,18 @@ fun DashboardScreen(
     val repliesByActivity = remember(anilistToken) { mutableStateMapOf<Int, List<ActivityReply>>() }
     var isLoadingReplies by remember(expandedReplyActivityId) { mutableStateOf(expandedReplyActivityId != null) }
     var repliesLoadFailed by remember(expandedReplyActivityId) { mutableStateOf(false) }
-    var replyDraftText by remember(anilistToken, expandedReplyActivityId) { mutableStateOf("") }
-    var isSendingReply by remember(anilistToken, expandedReplyActivityId) { mutableStateOf(false) }
+    var replyReload by remember { mutableIntStateOf(0) }
+    val draftsByActivity = remember(anilistToken) { mutableStateMapOf<Int, String>() }
+    val pendingReplies = remember(anilistToken) { mutableStateMapOf<Int, Boolean>() }
 
-    LaunchedEffect(expandedReplyActivityId, anilistToken) {
+    LaunchedEffect(expandedReplyActivityId, anilistToken, replyReload) {
         val id = expandedReplyActivityId ?: return@LaunchedEffect
+        isLoadingReplies = true
+        repliesLoadFailed = false
         try {
-            val replies = AniListClient.getActivityReplies(id, anilistToken.ifBlank { null })
+            val replies = withContext(Dispatchers.IO) {
+                AniListClient.getActivityReplies(id, anilistToken.ifBlank { null })
+            }
             repliesByActivity[id] = (replies + repliesByActivity[id].orEmpty()).distinctBy { it.id }
         } catch (e: CancellationException) {
             throw e
@@ -74,11 +87,6 @@ fun DashboardScreen(
             repliesLoadFailed = true
         }
         isLoadingReplies = false
-    }
-
-    val effectiveSimulcasts = remember(simulcastList, trendingList) {
-        if (simulcastList.isNotEmpty()) simulcastList
-        else trendingList.filter { it.isReleasing }.distinctBy { it.mediaId }
     }
 
     val dubbedFavorites = remember(trendingList, simulcastList) {
@@ -108,17 +116,15 @@ fun DashboardScreen(
                             color = Color.White,
                             modifier = Modifier.padding(horizontal = 16.dp)
                         )
-                        val rowState = rememberLazyListState()
                         LazyRow(
-                            state = rowState,
-                            flingBehavior = rememberSnapFlingBehavior(lazyListState = rowState),
                             contentPadding = PaddingValues(horizontal = 16.dp),
                             horizontalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
                             items(watchingList, key = { "watch_${it.mediaId}" }) { anime ->
                                 WatchingCard(
                                     media = anime,
-                                    onClick = { onAnimeClick(anime) }
+                                    onClick = { onAnimeClick(anime) },
+                                    modifier = Modifier.width(posterWidth)
                                 )
                             }
                         }
@@ -126,57 +132,65 @@ fun DashboardScreen(
                 }
             }
 
-            // 2. Trending Anime Lane (Matches Reference Screenshot 1: "Trending in the United States")
-            item(key = "lane_trending") {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(
-                        text = "Trending Now",
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color.White,
-                        modifier = Modifier.padding(horizontal = 16.dp)
-                    )
-                    val rowState = rememberLazyListState()
-                    LazyRow(
-                        state = rowState,
-                        flingBehavior = rememberSnapFlingBehavior(lazyListState = rowState),
-                        contentPadding = PaddingValues(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp)
-                    ) {
-                        items(trendingList, key = { "trend_${it.mediaId}" }) { anime ->
-                            PosterCard(
-                                media = anime,
-                                onClick = { onAnimeClick(anime) },
-                                modifier = Modifier.width(152.dp)
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 3. Seasonal Simulcasts Lane (Matches Reference Screenshot 1: "October 2026 Simulcasts")
-            if (effectiveSimulcasts.isNotEmpty()) {
-                item(key = "lane_simulcasts") {
+            if (trendingList.isNotEmpty()) {
+                item(key = "lane_trending") {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(
-                            text = "2026 Simulcasts",
+                            text = "Trending Now",
                             fontSize = 20.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = Color.White,
                             modifier = Modifier.padding(horizontal = 16.dp)
                         )
-                        val rowState = rememberLazyListState()
                         LazyRow(
-                            state = rowState,
-                            flingBehavior = rememberSnapFlingBehavior(lazyListState = rowState),
                             contentPadding = PaddingValues(horizontal = 16.dp),
                             horizontalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
-                            items(effectiveSimulcasts, key = { "sim_${it.mediaId}" }) { anime ->
+                            items(trendingList, key = { "trend_${it.mediaId}" }) { anime ->
                                 PosterCard(
                                     media = anime,
                                     onClick = { onAnimeClick(anime) },
-                                    modifier = Modifier.width(152.dp)
+                                    modifier = Modifier.width(posterWidth)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (loadFailed || (!isLoading && trendingList.isEmpty() && simulcastList.isEmpty())) {
+                item(key = "home_status") {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        val message = if (loadFailed) "Couldn't load all anime on Home." else "No anime to show yet."
+                        Text(message, color = MaruTextMuted)
+                        TextButton(onClick = onRefresh, enabled = !isLoading) { Text("Try again") }
+                    }
+                }
+            }
+
+            // 3. Seasonal Simulcasts Lane (Matches Reference Screenshot 1: "October 2026 Simulcasts")
+            if (simulcastList.isNotEmpty()) {
+                item(key = "lane_simulcasts") {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            text = "Upcoming Simulcasts",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            items(simulcastList, key = { "sim_${it.mediaId}" }) { anime ->
+                                PosterCard(
+                                    media = anime,
+                                    onClick = { onAnimeClick(anime) },
+                                    modifier = Modifier.width(posterWidth)
                                 )
                             }
                         }
@@ -195,10 +209,7 @@ fun DashboardScreen(
                             color = Color.White,
                             modifier = Modifier.padding(horizontal = 16.dp)
                         )
-                        val rowState = rememberLazyListState()
                         LazyRow(
-                            state = rowState,
-                            flingBehavior = rememberSnapFlingBehavior(lazyListState = rowState),
                             contentPadding = PaddingValues(horizontal = 16.dp),
                             horizontalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
@@ -206,7 +217,7 @@ fun DashboardScreen(
                                 PosterCard(
                                     media = anime,
                                     onClick = { onAnimeClick(anime) },
-                                    modifier = Modifier.width(152.dp)
+                                    modifier = Modifier.width(posterWidth)
                                 )
                             }
                         }
@@ -227,7 +238,8 @@ fun DashboardScreen(
                         text = "Friends & Watch Activity",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.ExtraBold,
-                        color = Color.White
+                        color = Color.White,
+                        modifier = Modifier.weight(1f).padding(end = 8.dp)
                     )
                     if (user != null) {
                         Surface(
@@ -254,13 +266,33 @@ fun DashboardScreen(
                 }
             }
 
-            // 6. Interactive Social Activity Feed Items (Likes, Replies, Friend Profiles, Watch Status)
+            if (activitiesList.isEmpty() || activityLoadFailed) {
+                item(key = "activity_status") {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                        val message = when {
+                            anilistToken.isBlank() -> "Connect AniList to see activity from people you follow."
+                            isActivityLoading -> "Loading activity…"
+                            activityLoadFailed -> "Couldn't load AniList activity."
+                            else -> "No recent activity from people you follow."
+                        }
+                        Text(message, color = MaruTextMuted, style = MaterialTheme.typography.bodyMedium)
+                        if (anilistToken.isBlank() && onLoginClick != null) {
+                            TextButton(onClick = onLoginClick) { Text("Connect AniList") }
+                        } else if (activityLoadFailed) {
+                            TextButton(onClick = onRefresh, enabled = !isActivityLoading) { Text("Try again") }
+                        }
+                    }
+                }
+            }
+
             items(activitiesList, key = { "act_${it.id}" }) { act ->
                 val likeInfo = likedStateMap[act.id] ?: Pair(act.isLiked, act.likeCount)
                 val isLiked = likeInfo.first
                 val currentLikes = likeInfo.second
                 val isRepliesOpen = expandedReplyActivityId == act.id
-                val loadedReplies = repliesByActivity[act.id] ?: emptyList()
+                val loadedReplies = repliesByActivity[act.id].orEmpty()
+                val replyDraftText = draftsByActivity[act.id].orEmpty()
+                val isSendingReply = pendingReplies[act.id] == true
 
                 GlassCard(
                     modifier = Modifier
@@ -332,11 +364,8 @@ fun DashboardScreen(
 
                         if (act.mediaTitle != null) {
                             Surface(
-                                onClick = {
-                                    if (act.rawMedia != null) {
-                                        onAnimeClick(act.rawMedia)
-                                    }
-                                },
+                                onClick = { act.rawMedia?.let(onAnimeClick) },
+                                enabled = act.rawMedia != null,
                                 shape = RoundedCornerShape(4.dp),
                                 color = CrunchySurface,
                                 border = BorderStroke(1.dp, CrunchyBorder),
@@ -375,7 +404,9 @@ fun DashboardScreen(
                                             )
                                         }
                                     }
-                                    Icon(Icons.Default.PlayCircleOutline, contentDescription = "Watch", tint = CrunchyOrange, modifier = Modifier.size(22.dp))
+                                    if (act.rawMedia != null) {
+                                        Icon(Icons.Default.PlayCircleOutline, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(22.dp))
+                                    }
                                 }
                             }
                         }
@@ -413,13 +444,14 @@ fun DashboardScreen(
                                             }
                                         }
                                     }
-                                    .padding(vertical = 4.dp, horizontal = 6.dp),
+                                    .heightIn(min = 48.dp)
+                                    .padding(horizontal = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
                                 Icon(
                                     imageVector = if (isLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                                    contentDescription = "Like",
+                                    contentDescription = if (isLiked) "Remove like" else "Like",
                                     tint = if (isLiked) CrunchyOrange else MaruTextMuted,
                                     modifier = Modifier.size(16.dp)
                                 )
@@ -437,13 +469,14 @@ fun DashboardScreen(
                                     .clickable {
                                         expandedReplyActivityId = if (isRepliesOpen) null else act.id
                                     }
-                                    .padding(vertical = 4.dp, horizontal = 6.dp),
+                                    .heightIn(min = 48.dp)
+                                    .padding(horizontal = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.ChatBubbleOutline,
-                                    contentDescription = "Replies",
+                                    contentDescription = if (isRepliesOpen) "Hide replies" else "Show replies",
                                     tint = if (isRepliesOpen) CrunchyTeal else MaruTextMuted,
                                     modifier = Modifier.size(16.dp)
                                 )
@@ -458,7 +491,11 @@ fun DashboardScreen(
                         }
 
                         // Expandable Replies Drawer
-                        AnimatedVisibility(visible = isRepliesOpen) {
+                        AnimatedVisibility(
+                            visible = isRepliesOpen,
+                            enter = fadeIn(tween(120)),
+                            exit = ExitTransition.None
+                        ) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -467,9 +504,9 @@ fun DashboardScreen(
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 if (isLoadingReplies && loadedReplies.isEmpty()) {
-                                    Text("Loading replies...", fontSize = 11.5.sp, color = MaruTextMuted)
-                                } else if (loadedReplies.isEmpty()) {
-                                    Text("No replies yet. Be the first to reply!", fontSize = 11.5.sp, color = MaruTextMuted)
+                                    Text("Loading replies…", fontSize = 11.5.sp, color = MaruTextMuted)
+                                } else if (loadedReplies.isEmpty() && !repliesLoadFailed) {
+                                    Text("No replies yet.", fontSize = 11.5.sp, color = MaruTextMuted)
                                 } else {
                                     loadedReplies.forEach { rep ->
                                         Row(
@@ -506,7 +543,8 @@ fun DashboardScreen(
                                     }
                                 }
                                 if (repliesLoadFailed) {
-                                    Text("Couldn't load replies. Reopen to try again.", color = MaruTextMuted, fontSize = 12.sp)
+                                    Text("Couldn't load replies.", color = MaruTextMuted, fontSize = 12.sp)
+                                    TextButton(onClick = { replyReload++ }) { Text("Try again") }
                                 }
 
                                 // Reply Input
@@ -517,7 +555,7 @@ fun DashboardScreen(
                                 ) {
                                     OutlinedTextField(
                                         value = replyDraftText,
-                                        onValueChange = { replyDraftText = it },
+                                        onValueChange = { draftsByActivity[act.id] = it },
                                         placeholder = { Text("Write a reply...", fontSize = 11.5.sp, color = MaruTextMuted) },
                                         singleLine = true,
                                         modifier = Modifier.weight(1f),
@@ -534,21 +572,23 @@ fun DashboardScreen(
                                                 Toast.makeText(context, "Sign in with AniList to reply!", Toast.LENGTH_SHORT).show()
                                                 return@Button
                                             }
-                                            val txt = replyDraftText.trim()
-                                            if (txt.isEmpty()) return@Button
-                                            isSendingReply = true
+                                            val draft = draftsByActivity[act.id].orEmpty()
+                                            if (draft.isBlank() || pendingReplies[act.id] == true) return@Button
+                                            pendingReplies[act.id] = true
                                             scope.launch {
                                                 try {
-                                                    val created = AniListClient.postActivityReply(act.id, txt, anilistToken)
-                                                    val existing = repliesByActivity[act.id] ?: emptyList()
+                                                    val created = withContext(Dispatchers.IO) {
+                                                        AniListClient.postActivityReply(act.id, draft.trim(), anilistToken)
+                                                    }
+                                                    val existing = repliesByActivity[act.id].orEmpty()
                                                     repliesByActivity[act.id] = (existing + created).distinctBy { it.id }
-                                                    replyDraftText = ""
+                                                    if (draftsByActivity[act.id] == draft) draftsByActivity.remove(act.id)
                                                 } catch (e: CancellationException) {
                                                     throw e
                                                 } catch (e: Exception) {
-                                                    Toast.makeText(context, "Reply error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                                    Toast.makeText(context, "Couldn't send the reply.", Toast.LENGTH_SHORT).show()
                                                 } finally {
-                                                    isSendingReply = false
+                                                    pendingReplies.remove(act.id)
                                                 }
                                             }
                                         },

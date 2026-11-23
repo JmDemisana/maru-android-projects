@@ -182,9 +182,11 @@ class TorrentStreamService : Service() {
     private var streamJob: Job? = null
     private var streamRequestId: String? = null
     private var latestStartId = 0
-    private data class StreamSession(val id: String, val file: File, val size: Long,
-        val handle: TorrentHandle, val info: TorrentInfo, val fileIndex: Int,
-        val demand: PieceDemand = PieceDemand())
+    private data class StreamSession(
+        val id: String, val file: File, val size: Long, val handle: TorrentHandle,
+        val fileOffset: Long, val pieceLength: Int, val pieceCount: Int,
+        val demand: PieceDemand = PieceDemand()
+    )
     private val activeSession = AtomicReference<StreamSession?>()
 
     override fun onCreate() {
@@ -294,7 +296,6 @@ class TorrentStreamService : Service() {
 
     private fun addVideoDownload(session: SessionManager, tInfo: TorrentInfo, saveDir: File,
         magnetUri: String, targetIdx: Int): TorrentHandle {
-        check(session.isRunning) { "Session not running" }
         // download() queues async_add_torrent. Use the synchronous API on Dispatchers.IO,
         // with initial priorities so no asynchronous file-priority change can reset deadlines.
         val params = AddTorrentParams.parseMagnetUri(magnetUri).apply {
@@ -305,60 +306,69 @@ class TorrentStreamService : Service() {
                 .and_(TorrentFlags.UPLOAD_MODE.inv()).and_(TorrentFlags.STOP_WHEN_READY.inv())
                 .or_(TorrentFlags.SEQUENTIAL_DOWNLOAD))
         }
-        val error = ErrorCode(error_code())
-        val handle = SessionHandle(session.swig()).addTorrent(params, error)
-        check(!error.isError && handle.isValid) { "Native torrent add failed" }
+        val handle = addTorrent(session, params)
         handle.unsetFlags(TorrentFlags.AUTO_MANAGED.or_(TorrentFlags.UPLOAD_MODE).or_(TorrentFlags.STOP_WHEN_READY))
         handle.resume()
         return handle
     }
 
-    private fun configureSequentialVideoDownload(tInfo: TorrentInfo, handle: TorrentHandle, targetIdx: Int,
-        demand: PieceDemand = PieceDemand()) {
-            handle.setFlags(TorrentFlags.SEQUENTIAL_DOWNLOAD)
-            val files = tInfo.files()
-
-            // Prioritize first 4 pieces (MKV header + tracks) and last 2 pieces (MKV Cues index) immediately
-            val pieceLen = tInfo.pieceLength()
-            val fileOffset = files.fileOffset(targetIdx)
-            val fileSize = files.fileSize(targetIdx)
-            val firstPiece = (fileOffset / pieceLen).toInt()
-            val lastPiece = ((fileOffset + fileSize - 1).coerceAtLeast(fileOffset) / pieceLen).toInt()
-            val totalPieces = tInfo.numPieces()
-
-            for (p in firstPiece..(firstPiece + 4).coerceAtMost(lastPiece)) {
-                if (p in 0 until totalPieces) {
-                    demand.request(p) {
-                        handle.piecePriority(p, Priority.TOP_PRIORITY)
-                        handle.setPieceDeadline(p, 1000)
-                    }
-                }
-            }
-            for (p in (lastPiece - 1).coerceAtLeast(firstPiece)..lastPiece) {
-                if (p in 0 until totalPieces) {
-                    demand.request(p) {
-                        handle.piecePriority(p, Priority.TOP_PRIORITY)
-                        handle.setPieceDeadline(p, 2500)
-                    }
-                }
-            }
+    private fun addTorrent(session: SessionManager, params: AddTorrentParams): TorrentHandle {
+        check(session.isRunning) { "Session not running" }
+        val error = ErrorCode(error_code())
+        val handle = SessionHandle(session.swig()).addTorrent(params, error)
+        check(!error.isError && handle.isValid) { "Native torrent add failed" }
+        return handle
     }
 
-    private fun hasFileRangeDownloaded(byteOffsetInFile: Long, byteLength: Long, snapshot: StreamSession): Boolean {
-        val handle = snapshot.handle
-        val tInfo = snapshot.info
-        return verifiedFileRange(byteOffsetInFile, byteLength, snapshot.size,
-                tInfo.files().fileOffset(snapshot.fileIndex), tInfo.pieceLength(), tInfo.numPieces()) { p ->
-                val verified = handle.havePiece(p)
-                if (!verified) {
-                    snapshot.demand.request(p) {
-                        handle.piecePriority(p, Priority.TOP_PRIORITY)
-                        handle.setPieceDeadline(p, 600)
-                    }
-                }
-                verified
+    private fun addLiveTorrent(session: SessionManager, magnetUri: String, saveDir: File): TorrentHandle {
+        val params = AddTorrentParams.parseMagnetUri(magnetUri).apply {
+            setSavePath(saveDir.absolutePath)
+            // Fetch metadata on this handle, and keep its peers when video download starts.
+            setFlags(getFlags().and_(TorrentFlags.PAUSED.inv()).and_(TorrentFlags.AUTO_MANAGED.inv())
+                .and_(TorrentFlags.STOP_WHEN_READY.inv())
+                .or_(TorrentFlags.UPLOAD_MODE).or_(TorrentFlags.SEQUENTIAL_DOWNLOAD))
+        }
+        return addTorrent(session, params).also { it.resume() }
+    }
+
+    private suspend fun awaitMetadata(handle: TorrentHandle): TorrentInfo = withTimeout(25_000L) {
+        var info: TorrentInfo? = null
+        while (info == null) {
+            check(!handle.status().errorCode().isError) { "Could not fetch torrent metadata" }
+            info = handle.torrentFile()?.takeIf { it.isValid && it.numFiles() > 0 }
+            if (info == null) delay(100)
+        }
+        info
+    }
+
+    private suspend fun selectLiveFile(handle: TorrentHandle, fileCount: Int, targetIdx: Int) {
+        if (fileCount == 1) return
+        val priorities = Array(fileCount) { if (it == targetIdx) Priority.DEFAULT else Priority.IGNORE }
+        handle.prioritizeFiles(priorities)
+        // File updates can reset piece priorities after returning. Wait before assigning deadlines.
+        withTimeout(5_000L) {
+            while (!handle.filePriorities().contentEquals(priorities)) {
+                check(!handle.status().errorCode().isError) { "Could not set torrent file priorities" }
+                delay(50)
+            }
         }
     }
+
+    private fun requestPieces(stream: StreamSession, offset: Long, lookAhead: Int) {
+        val firstPiece = ((stream.fileOffset + offset) / stream.pieceLength).toInt()
+        val lastPiece = ((stream.fileOffset + stream.size - 1) / stream.pieceLength).toInt()
+        for (piece in firstPiece..minOf(lastPiece, firstPiece + lookAhead)) {
+            if (stream.handle.havePiece(piece)) continue
+            val delayMs = (piece - firstPiece) * 400
+            stream.demand.request(piece, delayMs) {
+                stream.handle.setPieceDeadline(piece, delayMs)
+            }
+        }
+    }
+
+    private fun hasFileRangeDownloaded(offset: Long, length: Long, stream: StreamSession): Boolean =
+        verifiedFileRange(offset, length, stream.size, stream.fileOffset, stream.pieceLength, stream.pieceCount,
+            stream.handle::havePiece)
 
     private fun updateStreamStatus(requestId: String, transform: (ActiveStreamStatus) -> ActiveStreamStatus) {
         _streamStatus.update { current ->
@@ -373,8 +383,8 @@ class TorrentStreamService : Service() {
         episodeNum: Int,
         requestId: String
     ) {
-        val previous = streamJob
-        previous?.cancel()
+        // Each request owns its own native session and cache. Teardown of the old session can finish in parallel.
+        streamJob?.cancel()
         activeSession.set(null)
         closeClientSockets()
         streamJob = serviceScope.launch {
@@ -382,52 +392,49 @@ class TorrentStreamService : Service() {
             var stream: StreamSession? = null
             var phase = "session_start"
             val saveDir = File(cacheDir, "live_stream_cache/$requestId")
+            val startedAt = SystemClock.elapsedRealtime()
             try {
-                previous?.join()
                 ensureActive()
                 val session = SessionManager().also { nativeSession = it; it.start() }
                 val prefs = MAnimePrefs(applicationContext)
-                applyDownloadLimit(session, prefs.torrentMaxSpeed.first())
                 check(saveDir.mkdirs() || saveDir.isDirectory) { "Could not create streaming cache" }
 
-                phase = "http_start"
-                val port = localHttpServerPort()
                 phase = "metadata"
                 updateStreamStatus(requestId) { status ->
                     status.copy(phase = phase, statusMessage = "Loading Episode $episodeNum stream...", progressPercent = 5)
                 }
                 updateNotification("Playing $animeTitle • Ep $episodeNum")
-                val rawMeta = runInterruptible { session.fetchMagnet(magnetUri, 25, saveDir) }
+                val handle = addLiveTorrent(session, magnetUri, saveDir)
+                val tInfo = awaitMetadata(handle)
+                val metadataAt = SystemClock.elapsedRealtime()
                 ensureActive()
-                if (rawMeta == null) {
-                    updateStreamStatus(requestId) { status ->
-                        status.copy(isReady = false, isBuffering = false, statusMessage = "Stream timed out",
-                            error = "Metadata timed out [metadata]. Try another source.")
-                    }
-                    return@launch
-                }
 
                 phase = "episode_file"
-                val tInfo = TorrentInfo.bdecode(rawMeta)
                 val targetIdx = pickVideoFileIndex(tInfo, preferredFileIdx, episodeNum)
-                val targetRelPath = tInfo.files().filePath(targetIdx)
-                val expectedBytes = tInfo.files().fileSize(targetIdx)
+                val files = tInfo.files()
+                val targetRelPath = files.filePath(targetIdx)
+                val expectedBytes = files.fileSize(targetIdx)
                 val videoFile = File(saveDir, targetRelPath)
                 require(videoFile.canonicalPath.startsWith(saveDir.canonicalPath + File.separator))
+                require(tInfo.pieceLength() > 0 && tInfo.numPieces() > 0) { "Torrent has no valid pieces" }
 
-                phase = "torrent_add"
-                val handle = addVideoDownload(session, tInfo, saveDir, magnetUri, targetIdx)
-                val serving = StreamSession(requestId, videoFile, expectedBytes, handle, tInfo, targetIdx)
+                phase = "file_priorities"
+                selectLiveFile(handle, tInfo.numFiles(), targetIdx)
+                val serving = StreamSession(requestId, videoFile, expectedBytes, handle,
+                    files.fileOffset(targetIdx), tInfo.pieceLength(), tInfo.numPieces())
                 stream = serving
-                phase = "piece_priorities"
-                configureSequentialVideoDownload(tInfo, handle, targetIdx, serving.demand)
+                requestPieces(serving, offset = 0, lookAhead = 0)
+                applyDownloadLimit(session, prefs.torrentMaxSpeed.first())
+                handle.unsetFlags(TorrentFlags.UPLOAD_MODE)
+
                 phase = "prebuffer"
-                val minPrebufferBytes = minOf(expectedBytes, 512 * 1024L)
+                val minPrebufferBytes = bytesInCurrentPiece(0, expectedBytes, serving.fileOffset, serving.pieceLength)
                 withTimeout(35_000L) {
                     while (true) {
                         val status = handle.status()
                         check(!status.errorCode().isError) { "Native download error" }
-                        if (videoFile.isFile && hasFileRangeDownloaded(0L, minPrebufferBytes, serving)) break
+                        if (hasFileRangeDownloaded(0L, minPrebufferBytes, serving) && videoFile.isFile &&
+                            videoFile.length() >= minPrebufferBytes) break
                         val speedKbps = (status.downloadPayloadRate() / 1024).coerceAtLeast(0)
                         val peers = status.numPeers()
                         val pct = ((status.totalWantedDone().toDouble() / minPrebufferBytes) * 100).toInt().coerceIn(5, 99)
@@ -437,11 +444,13 @@ class TorrentStreamService : Service() {
                                 statusMessage = if (peers > 0) "Buffering Episode $episodeNum ($pct% • $speedLabel)"
                                     else "Connecting to Episode $episodeNum stream...")
                         }
-                        delay(350)
+                        delay(75)
                     }
                 }
 
                 ensureActive()
+                phase = "http_start"
+                val port = localHttpServerPort()
                 phase = "serving"
                 val ext = videoExtension(targetRelPath)
                 val url = "http://127.0.0.1:$port/$requestId/stream.$ext"
@@ -452,6 +461,7 @@ class TorrentStreamService : Service() {
                     it.copy(phase = phase, isReady = true, isBuffering = false,
                         statusMessage = "Ready", progressPercent = 100, streamUrl = url)
                 }
+                Log.d("TorrentStreamService", "Startup: metadata ${metadataAt - startedAt} ms, verified stream ${SystemClock.elapsedRealtime() - startedAt} ms")
 
                 val rateJob = launch {
                     prefs.torrentMaxSpeed.collect { applyDownloadLimit(session, it) }
@@ -473,8 +483,13 @@ class TorrentStreamService : Service() {
             } catch (e: TimeoutCancellationException) {
                 ensureActive()
                 updateStreamStatus(requestId) {
+                    val reason = when (phase) {
+                        "metadata" -> "Metadata timed out"
+                        "file_priorities" -> "Episode selection timed out"
+                        else -> "Verified media bytes timed out"
+                    }
                     it.copy(isReady = false, isBuffering = false, phase = phase, statusMessage = "Stream timed out",
-                        error = "Verified media bytes timed out [$phase]. Try another source.")
+                        error = "$reason [$phase]. Try another source.")
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -489,6 +504,7 @@ class TorrentStreamService : Service() {
                 }
             } finally {
                 stream?.let { activeSession.compareAndSet(it, null) }
+                runCatching { nativeSession?.pause() }
                 runCatching { nativeSession?.stop() }
                 saveDir.deleteRecursively()
                 serviceScope.launch(Dispatchers.Main.immediate) { stopIfIdle() }
@@ -583,7 +599,6 @@ class TorrentStreamService : Service() {
                     }
 
                     val handle = addVideoDownload(torrentSession, info, tempDir, magnetUri, targetIdx)
-                    configureSequentialVideoDownload(info, handle, targetIdx)
 
                     val fileOffset = files.fileOffset(targetIdx)
                     val pieceLength = info.pieceLength()
@@ -691,6 +706,7 @@ class TorrentStreamService : Service() {
         serviceScope.launch {
             try {
                 socket.soTimeout = 15_000
+                socket.tcpNoDelay = true
                 val input = socket.getInputStream()
                 val output = socket.getOutputStream()
                 val reader = input.bufferedReader()
@@ -760,7 +776,11 @@ class TorrentStreamService : Service() {
                     try {
                         copyVerifiedRange(raf, output, range,
                             isCurrent = { activeSession.get() === stream && _streamStatus.value.requestId == stream.id },
-                            isVerified = { offset, count -> hasFileRangeDownloaded(offset, count, stream) })
+                            isVerified = { offset, count -> hasFileRangeDownloaded(offset, count, stream) },
+                            verificationLength = { offset, remaining ->
+                                bytesInCurrentPiece(offset, remaining, stream.fileOffset, stream.pieceLength)
+                            },
+                            requestPieces = { offset -> requestPieces(stream, offset, lookAhead = 2) })
                     } catch (e: TimeoutCancellationException) {
                         // A seek may have already abandoned this connection. Let Media3 retry the range.
                         updateStreamStatus(stream.id) { it.copy(phase = "range_wait") }
