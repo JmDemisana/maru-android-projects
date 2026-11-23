@@ -60,7 +60,14 @@ class MAnimePrefs(private val context: Context) {
     val autoSkipIntro: Flow<Boolean> = context.dataStore.data.map { it[KEY_AUTO_SKIP_INTRO] ?: false }
 
     // --- Suspend setters ---
-    suspend fun setAnilistToken(value: String) = context.dataStore.edit { it[KEY_ANILIST_TOKEN] = value }
+    suspend fun setAnilistToken(value: String) = context.dataStore.edit {
+        if (it[KEY_ANILIST_TOKEN] != value) {
+            it.remove(KEY_ANILIST_USERNAME)
+            it.remove(KEY_ANILIST_AVATAR)
+            it.remove(KEY_ANILIST_SCORE_FMT)
+        }
+        it[KEY_ANILIST_TOKEN] = value
+    }
     suspend fun setAnilistUsername(value: String) = context.dataStore.edit { it[KEY_ANILIST_USERNAME] = value }
     suspend fun setAnilistAvatar(value: String) = context.dataStore.edit { it[KEY_ANILIST_AVATAR] = value }
     suspend fun setAnilistScoreFormat(value: String) = context.dataStore.edit { it[KEY_ANILIST_SCORE_FMT] = value }

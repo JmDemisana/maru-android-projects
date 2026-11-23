@@ -127,9 +127,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    val anilistTokenFlow = prefs.anilistToken.collectAsStateWithLifecycle(initialValue = "")
-    var anilistToken by remember { mutableStateOf("") }
-    LaunchedEffect(anilistTokenFlow.value) { anilistToken = anilistTokenFlow.value }
+    val anilistToken by prefs.anilistToken.collectAsStateWithLifecycle(initialValue = "")
 
     val anilistUsername by prefs.anilistUsername.collectAsStateWithLifecycle(initialValue = "")
     val anilistAvatar by prefs.anilistAvatar.collectAsStateWithLifecycle(initialValue = "")
@@ -145,23 +143,18 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
     var selectedUserProfile by remember { mutableStateOf<String?>(null) }
     var showAnilistAuthDialog by remember { mutableStateOf(false) }
 
-    // User library list disk cache for 0ms instant startup
+    // The old unowned disk cache could expose another account's private lists.
     val cacheFile = remember { File(context.filesDir, "cached_user_lists.json") }
-    val initialCachedLists = remember {
-        if (cacheFile.exists()) {
-            try {
-                AniListClient.parseUserListJsonString(cacheFile.readText())
-            } catch (_: Exception) {
-                emptyMap()
-            }
-        } else emptyMap()
-    }
+    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { cacheFile.delete() } }
+    val accountKey = anilistToken to anilistUsername
+    val latestAccountKey by rememberUpdatedState(accountKey)
+    val initialCachedLists = remember(accountKey) { emptyMap<String, List<AnimeMedia>>() }
 
-    var userAnimeLists by remember(initialCachedLists) {
+    var userAnimeLists by remember(accountKey) {
         mutableStateOf<Map<String, List<AnimeMedia>>>(initialCachedLists)
     }
 
-    var watchingList by remember(initialCachedLists) {
+    var watchingList by remember(accountKey) {
         val totalWatching = mutableListOf<AnimeMedia>()
         for ((k, items) in initialCachedLists) {
             val lower = k.lowercase()
@@ -170,7 +163,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
         mutableStateOf(totalWatching.distinctBy { it.mediaId })
     }
 
-    var completedCount by remember(initialCachedLists) {
+    var completedCount by remember(accountKey) {
         val total = mutableListOf<AnimeMedia>()
         for ((k, items) in initialCachedLists) {
             val lower = k.lowercase()
@@ -179,7 +172,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
         mutableIntStateOf(total.distinctBy { it.mediaId }.size)
     }
 
-    var planningCount by remember(initialCachedLists) {
+    var planningCount by remember(accountKey) {
         val total = mutableListOf<AnimeMedia>()
         for ((k, items) in initialCachedLists) {
             val lower = k.lowercase()
@@ -225,19 +218,16 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
     }
 
     val refreshProfile: () -> Unit = {
-        val usernameToFetch = anilistUsername.ifEmpty { "PpolHi" }
+        val usernameToFetch = anilistUsername
+        val requestedAccount = accountKey
+        if (anilistToken.isNotBlank() && usernameToFetch.isNotBlank()) {
         scope.launch {
             try {
-                val (rawJson, lists) = withContext(Dispatchers.IO) {
+                val (_, lists) = withContext(Dispatchers.IO) {
                     AniListClient.getUserListRawJson(usernameToFetch, anilistToken.ifEmpty { null })
                 }
+                if (latestAccountKey != requestedAccount) return@launch
                 userAnimeLists = lists
-
-                withContext(Dispatchers.IO) {
-                    try {
-                        cacheFile.writeText(rawJson)
-                    } catch (_: Exception) {}
-                }
 
                 val totalWatching = mutableListOf<AnimeMedia>()
                 var totalCompleted = 0
@@ -259,6 +249,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                 completedCount = totalCompleted
                 planningCount = totalPlanning
             } catch (_: Exception) {}
+        }
         }
     }
 
@@ -337,18 +328,18 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
     }
 
     var effectiveUser by remember { mutableStateOf<AniListUser?>(null) }
-    LaunchedEffect(anilistUsername, anilistAvatar) {
-        if (anilistUsername.isNotBlank()) {
+    LaunchedEffect(anilistToken, anilistUsername, anilistAvatar) {
+        if (anilistToken.isNotBlank() && anilistUsername.isNotBlank()) {
             effectiveUser = AniListUser(id = 0, name = anilistUsername, avatarUrl = anilistAvatar.ifEmpty { null })
         } else {
-            effectiveUser = AniListUser(id = 0, name = "PpolHi", avatarUrl = "https://s4.anilist.co/file/anilistcdn/user/avatar/medium/b6197170-zN9M2ZgZg9Yh.png")
+            effectiveUser = null
         }
     }
 
     androidx.activity.compose.BackHandler(enabled = selectedAnimeDetail != null || selectedUserProfile != null || selectedScreen != NavigationScreen.DASHBOARD) {
         when {
-            selectedUserProfile != null -> selectedUserProfile = null
-            selectedAnimeDetail != null -> selectedAnimeDetail = null
+                    selectedAnimeDetail != null -> selectedAnimeDetail = null
+                    selectedUserProfile != null -> selectedUserProfile = null
             selectedScreen != NavigationScreen.DASHBOARD -> selectedScreen = NavigationScreen.DASHBOARD
         }
     }
@@ -509,6 +500,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                                     refreshProfile()
                                 },
                                 onUserClick = { userClicked ->
+                                    selectedAnimeDetail = null
                                     selectedUserProfile = userClicked
                                 }
                             )
@@ -562,7 +554,7 @@ fun AppNavigation(prefs: MAnimePrefs, initialAuthCode: String? = null) {
                                     recommendations = recommendations,
                                     isLoading = isRecLoading,
                                     isLoggedIn = anilistToken.isNotBlank(),
-                                    username = effectiveUser?.name ?: "PpolHi",
+                                    username = effectiveUser?.name ?: "Guest",
                                     selectedCategory = selectedRecCategory,
                                     onSelectCategory = fetchRecommendations,
                                     onLoginClick = { showAnilistAuthDialog = true },

@@ -296,20 +296,20 @@ object CrunchyrollStreamEngine {
         val defaultSeasonNum = mappings?.episodes?.firstOrNull()?.seasonNumber ?: 1
 
         // Today in YYYY-MM-DD (UTC+8) to filter out future scheduled episodes when latestAired is unknown
-        val todayIso = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+        val todayIso = io.maru.manime.singaporeDate()
         val highestAiredFromDates = mappings?.episodes
             ?.filter { !it.airDate.isNullOrBlank() && it.airDate <= todayIso }
             ?.maxOfOrNull { it.episodeNumber }
 
         val targetCount = when {
             isReleasing && latestAired != null -> latestAired.coerceAtLeast(0)
-            isReleasing && highestAiredFromDates != null -> highestAiredFromDates.coerceAtLeast(0)
+            isReleasing -> maxOf(highestAiredFromDates ?: 0, anilistMap.keys.maxOrNull() ?: 0)
             latestAired != null -> latestAired
             totalEpisodes != null && totalEpisodes > 0 -> totalEpisodes
             mappings?.episodeCount != null && mappings.episodeCount > 0 -> mappings.episodeCount
-            aniZipMap.isNotEmpty() -> aniZipMap.keys.maxOrNull() ?: 12
-            anilistMap.isNotEmpty() -> anilistMap.keys.maxOrNull() ?: 12
-            else -> 12
+            aniZipMap.isNotEmpty() -> aniZipMap.keys.maxOrNull() ?: 0
+            anilistMap.isNotEmpty() -> anilistMap.keys.maxOrNull() ?: 0
+            else -> 0
         }.coerceIn(0, 1500)
 
         if (targetCount <= 0) return emptyList()

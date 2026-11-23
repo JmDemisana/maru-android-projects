@@ -154,7 +154,7 @@ fun WatchingCard(
     )
 
     val subOrDubLabel = if (media.hasEnglishDub) "Dub | Sub" else "Subtitled"
-    val totalEps = media.latestAiredEpisode ?: media.episodes ?: 12
+    val totalEps = media.latestAiredEpisode ?: 0
     val progressFrac = if (totalEps > 0) (media.progress.toFloat() / totalEps.toFloat()).coerceIn(0.06f, 1f) else 0.1f
 
     Column(

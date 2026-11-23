@@ -214,6 +214,7 @@ fun AnimeDetailScreen(
     }
 
     fun saveAniListEntry(newStatus: String?, newProgress: Int?, newScore: Double?) {
+        if (isUpdatingList) return
         if (anilistToken.isBlank()) {
             Toast.makeText(context, "Connect your AniList account in Account tab first!", Toast.LENGTH_SHORT).show()
             return
@@ -221,7 +222,9 @@ fun AnimeDetailScreen(
         val safeProgress = (newProgress ?: currentMedia.progress).coerceIn(0, currentMedia.episodes ?: 9999)
         val resolvedStatus = newStatus ?: currentMedia.listStatus ?: "CURRENT"
 
-        val optimistic = currentMedia.copy(
+        val previous = currentMedia
+        isUpdatingList = true
+        val optimistic = previous.copy(
             progress = safeProgress,
             listStatus = resolvedStatus,
             score = newScore ?: currentMedia.score
@@ -240,13 +243,16 @@ fun AnimeDetailScreen(
                         score = newScore,
                         notes = currentMedia.notes,
                         isPrivate = currentMedia.isPrivate,
-                        token = anilistToken
+                        token = anilistToken,
+                        scoreFormat = userScoreFormat
                     )
                 }
                 currentMedia = updated.copy(hasEnglishDubCast = currentMedia.hasEnglishDubCast)
                 onMediaUpdated(currentMedia)
                 Toast.makeText(context, "Updated AniList: ${resolvedStatus.lowercase().replaceFirstChar { it.uppercase() }} (Ep $safeProgress)", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
+                currentMedia = previous
+                onMediaUpdated(previous)
                 Toast.makeText(context, "AniList update failed: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
             } finally {
                 isUpdatingList = false
@@ -265,14 +271,11 @@ fun AnimeDetailScreen(
             prefs = prefs,
             onEpisodeWatched = { watchedNum ->
                 if (watchedNum > currentMedia.progress) {
-                    val autoStatus = if (currentMedia.episodes != null && watchedNum >= currentMedia.episodes!!) "COMPLETED" else "CURRENT"
-                    saveAniListEntry(autoStatus, watchedNum, null)
+                    currentMedia = currentMedia.copy(progress = watchedNum)
                 }
             },
             onSwitchEpisode = { targetNum ->
-                val nextMeta = completeEpisodes.firstOrNull { it.episodeNumber == targetNum }
-                    ?: CrunchyEpisodeMeta(episodeNumber = targetNum, title = "Episode $targetNum")
-                activePlayingEp = nextMeta
+                completeEpisodes.firstOrNull { it.episodeNumber == targetNum }?.let { activePlayingEp = it }
             },
             onBack = { activePlayingEp = null }
         )

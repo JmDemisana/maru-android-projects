@@ -64,6 +64,11 @@ import io.maru.manime.torrent.TorrentStreamService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
+import androidx.lifecycle.lifecycleScope
 import java.io.File
 
 @OptIn(UnstableApi::class)
@@ -78,6 +83,23 @@ fun PlayerScreen(
     onEpisodeWatched: (Int) -> Unit = {},
     onSwitchEpisode: (Int) -> Unit = {},
     onBack: () -> Unit
+) = key(media.mediaId, episodeNum) {
+    EpisodePlayerScreen(media, episodeNum, episodeTitle, initialAudioMode, hasEnglishDub,
+        prefs, onEpisodeWatched, onSwitchEpisode, onBack)
+}
+
+@OptIn(UnstableApi::class)
+@Composable
+private fun EpisodePlayerScreen(
+    media: AnimeMedia,
+    episodeNum: Int,
+    episodeTitle: String,
+    initialAudioMode: String,
+    hasEnglishDub: Boolean,
+    prefs: MAnimePrefs,
+    onEpisodeWatched: (Int) -> Unit,
+    onSwitchEpisode: (Int) -> Unit,
+    onBack: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -85,7 +107,7 @@ fun PlayerScreen(
     var detectedDualOrDubInStreams by remember { mutableStateOf(hasEnglishDub) }
     val effectiveHasDub = hasEnglishDub || detectedDualOrDubInStreams
 
-    var activeAudioMode by remember(initialAudioMode, effectiveHasDub) {
+    var activeAudioMode by remember(initialAudioMode) {
         mutableStateOf(if (!effectiveHasDub) "SUB" else initialAudioMode)
     }
     var activeQuality by remember { mutableStateOf("1080p") }
@@ -97,6 +119,7 @@ fun PlayerScreen(
 
     var openSubtitlesList by remember { mutableStateOf<List<ExternalSubtitleItem>>(emptyList()) }
     var selectedOpenSub by remember { mutableStateOf<ExternalSubtitleItem?>(null) }
+    var expectedTorrentRequest by remember { mutableStateOf<String?>(null) }
 
     val serviceStatus by TorrentStreamService.streamStatus.collectAsState()
 
@@ -124,6 +147,35 @@ fun PlayerScreen(
     val reportProgress by prefs.reportProgress.collectAsState(initial = true)
     val rememberPosition by prefs.rememberPosition.collectAsState(initial = true)
     val autoSkipIntro by prefs.autoSkipIntro.collectAsState(initial = false)
+    val latestRememberPosition by rememberUpdatedState(rememberPosition)
+    val latestWatchedCallback by rememberUpdatedState(onEpisodeWatched)
+    val latestReportProgress by rememberUpdatedState(reportProgress)
+    val latestToken by rememberUpdatedState(token)
+    val latestMedia by rememberUpdatedState(media)
+    val persistenceScope = remember(context) { (context as? ComponentActivity)?.lifecycleScope
+        ?: CoroutineScope(SupervisorJob() + Dispatchers.IO) }
+    var isAttached by remember { mutableStateOf(true) }
+
+    fun markWatched() {
+        if (hasScrobbled85Percent) return
+        hasScrobbled85Percent = true
+        if (latestReportProgress && latestToken.isNotBlank() && episodeNum > latestMedia.progress) {
+            val auth = latestToken
+            val snapshot = latestMedia
+            persistenceScope.launch {
+                try {
+                    if (!prefs.reportProgress.first() || prefs.anilistToken.first() != auth) return@launch
+                    AniListClient.saveEntry(snapshot.mediaId,
+                        if (snapshot.episodes != null && episodeNum >= snapshot.episodes) "COMPLETED" else "CURRENT",
+                        episodeNum, null, null, null, auth)
+                    if (isAttached) latestWatchedCallback(episodeNum)
+                } catch (_: Exception) {
+                    android.widget.Toast.makeText(context, "AniList progress sync failed. Your list was not updated.",
+                        android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
+        } else latestWatchedCallback(episodeNum)
+    }
 
     val exoPlayer = remember {
         val renderersFactory = DefaultRenderersFactory(context)
@@ -131,6 +183,11 @@ fun PlayerScreen(
             .setEnableDecoderFallback(true)
         ExoPlayer.Builder(context, renderersFactory).build().apply {
             playWhenReady = true
+            trackSelectionParameters = trackSelectionParameters.buildUpon()
+                .setPreferredAudioLanguage(if (activeAudioMode == "DUB") "en" else "ja")
+                .setPreferredTextLanguage("en")
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, activeAudioMode == "DUB")
+                .build()
         }
     }
 
@@ -177,6 +234,7 @@ fun PlayerScreen(
         }
         compActivity?.addOnPictureInPictureModeChangedListener(pipConsumer)
         onDispose {
+            isAttached = false
             compActivity?.removeOnPictureInPictureModeChangedListener(pipConsumer)
         }
     }
@@ -209,9 +267,15 @@ fun PlayerScreen(
         activeQuality = chosen.quality
         resolveError = null
         isPlayerBuffering = true
+        exoPlayer.stop()
+        exoPlayer.clearMediaItems()
+        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+            .clearOverrides().setPreferredAudioLanguage(if (activeAudioMode == "DUB") "en" else "ja")
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, activeAudioMode == "DUB")
+            .setPreferredTextLanguage("en").build()
 
         if (chosen.isTorrent) {
-            TorrentStreamService.startStream(
+            expectedTorrentRequest = TorrentStreamService.startStream(
                 context = context,
                 magnetUri = chosen.url,
                 fileIdx = chosen.fileIdx,
@@ -219,6 +283,8 @@ fun PlayerScreen(
                 episodeNum = episodeNum
             )
         } else {
+            expectedTorrentRequest = null
+            TorrentStreamService.stopStream(context)
             val item = buildMediaItemWithSubtitles(Uri.parse(chosen.url), null, openSubtitlesList)
             exoPlayer.setMediaItem(item)
             exoPlayer.prepare()
@@ -226,7 +292,9 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(media.mediaId, episodeNum, activeAudioMode) {
+    var streamReload by remember { mutableIntStateOf(0) }
+    LaunchedEffect(media.mediaId, episodeNum, streamReload) {
+      try {
         isResolvingStreams = true
         isPlayerBuffering = true
         resolveError = null
@@ -264,10 +332,15 @@ fun PlayerScreen(
         } else {
             playStreamAtIndex(0, streams)
         }
+      } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            isPlayerBuffering = false
+            resolveError = e.localizedMessage ?: "Could not resolve episode streams."
+        } finally { isResolvingStreams = false }
     }
 
-    LaunchedEffect(serviceStatus.isReady, serviceStatus.streamUrl, serviceStatus.error) {
-        if (!isOfflinePlayback) {
+    LaunchedEffect(serviceStatus.isReady, serviceStatus.streamUrl, serviceStatus.error, expectedTorrentRequest) {
+        if (!isOfflinePlayback && expectedTorrentRequest != null && serviceStatus.requestId == expectedTorrentRequest) {
             val err = serviceStatus.error
             if (err != null) {
                 if (currentStreamIndex + 1 < rankedStreams.size) {
@@ -287,20 +360,7 @@ fun PlayerScreen(
         }
     }
 
-    DisposableEffect(Unit) {
-        val activity = context as? Activity
-        val originalOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-
-        if (activity != null) {
-            val insetsController = WindowCompat.getInsetsController(activity.window, activity.window.decorView)
-            insetsController.hide(WindowInsetsCompat.Type.systemBars())
-            insetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
-
-        PlayerForegroundService.start(context, media.title, episodeNum)
-
-        val listener = object : Player.Listener {
+    val latestListener by rememberUpdatedState(object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
             }
@@ -317,16 +377,6 @@ fun PlayerScreen(
                         detectedDualOrDubInStreams = true
                     }
 
-                    applyPreferredAudioTrack(exoPlayer, activeAudioMode)
-
-                    if (activeAudioMode == "SUB") {
-                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                            .buildUpon()
-                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                            .setPreferredTextLanguage("en")
-                            .build()
-                    }
-
                     if (!hasRestoredPosition && rememberPosition) {
                         hasRestoredPosition = true
                         scope.launch {
@@ -337,8 +387,8 @@ fun PlayerScreen(
                         }
                     }
                 } else if (state == Player.STATE_ENDED) {
-                    onEpisodeWatched(episodeNum)
-                    val maxEps = media.latestAiredEpisode ?: media.episodes ?: 9999
+                    markWatched()
+                    val maxEps = media.latestAiredEpisode ?: episodeNum
                     if (episodeNum < maxEps) {
                         autoPlayCountdown = 5
                     }
@@ -353,13 +403,29 @@ fun PlayerScreen(
                     resolveError = "Playback error (${error.errorCodeName}). Tap Try Next Server."
                 }
             }
+        })
+    DisposableEffect(exoPlayer) {
+        val activity = context as? Activity
+        val originalOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        if (activity != null) {
+            WindowCompat.getInsetsController(activity.window, activity.window.decorView).apply {
+                hide(WindowInsetsCompat.Type.systemBars())
+                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        }
+        PlayerForegroundService.start(context, media.title, episodeNum)
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(playing: Boolean) = latestListener.onIsPlayingChanged(playing)
+            override fun onPlaybackStateChanged(state: Int) = latestListener.onPlaybackStateChanged(state)
+            override fun onPlayerError(error: PlaybackException) = latestListener.onPlayerError(error)
         }
         exoPlayer.addListener(listener)
 
         onDispose {
             val posSec = (exoPlayer.currentPosition / 1000L).coerceAtLeast(0L)
-            scope.launch {
-                if (rememberPosition && posSec > 5) {
+            persistenceScope.launch {
+                if (latestRememberPosition && posSec > 5) {
                     prefs.savePosition(media.mediaId, episodeNum, posSec)
                 }
             }
@@ -377,6 +443,7 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(exoPlayer, skipIntervals, autoSkipIntro) {
+        var lastSavedPosition = 0L
         while (true) {
             currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
             bufferedPosition = exoPlayer.bufferedPosition.coerceAtLeast(0L)
@@ -393,24 +460,14 @@ fun PlayerScreen(
             if (totalDuration > 60_000L && !hasScrobbled85Percent) {
                 val ratio = currentPosition.toDouble() / totalDuration.toDouble()
                 if (ratio >= 0.85) {
-                    hasScrobbled85Percent = true
-                    onEpisodeWatched(episodeNum)
-                    if (reportProgress && token.isNotEmpty() && episodeNum > media.progress) {
-                        scope.launch {
-                            try {
-                                AniListClient.saveEntry(
-                                    mediaId = media.mediaId,
-                                    status = "CURRENT",
-                                    progress = episodeNum,
-                                    score = null,
-                                    notes = null,
-                                    isPrivate = false,
-                                    token = token
-                                )
-                            } catch (_: Exception) {}
-                        }
-                    }
+                    markWatched()
                 }
+            }
+
+            if (latestRememberPosition && currentPosition > 5000 &&
+                kotlin.math.abs(currentPosition - lastSavedPosition) >= 10_000) {
+                prefs.savePosition(media.mediaId, episodeNum, currentPosition / 1000)
+                lastSavedPosition = currentPosition
             }
 
             delay(750)
@@ -445,11 +502,12 @@ fun PlayerScreen(
         }
     }
 
-    val isInitialPrebuffering = isResolvingStreams || (!isOfflinePlayback && !serviceStatus.isReady && resolveError == null)
+    val isInitialPrebuffering = isResolvingStreams || (expectedTorrentRequest != null &&
+        (serviceStatus.requestId != expectedTorrentRequest || !serviceStatus.isReady) && resolveError == null)
     val showVisibleBuffering = (isInitialPrebuffering || isPlayerBuffering) && resolveError == null && !isInPipMode && !showFullSettingsPage
 
     // Strict rule: When media controls are visible, hide floating UI behind them so nothing overlaps!
-    val controlsShowing = showControls && !isInPipMode && !isScreenLocked && !showFullSettingsPage && !isInitialPrebuffering
+    val controlsShowing = showControls && resolveError == null && !isInPipMode && !isScreenLocked && !showFullSettingsPage
 
     Box(
         modifier = Modifier
@@ -881,7 +939,7 @@ fun PlayerScreen(
                         Icon(Icons.Default.Forward10, contentDescription = "Forward 10s", tint = Color.White, modifier = Modifier.size(26.dp))
                     }
 
-                    val maxEps = media.latestAiredEpisode ?: media.episodes ?: 9999
+                    val maxEps = media.latestAiredEpisode ?: episodeNum
                     if (episodeNum < maxEps) {
                         IconButton(
                             onClick = { onSwitchEpisode(episodeNum + 1) },
@@ -1123,6 +1181,7 @@ fun PlayerScreen(
                                             Surface(
                                                 onClick = {
                                                     activeAudioMode = mode
+                                                    if (!applyPreferredAudioTrack(exoPlayer, mode)) streamReload++
                                                     scope.launch { prefs.setPreferredAudio(mode) }
                                                     showFullSettingsPage = false
                                                 },

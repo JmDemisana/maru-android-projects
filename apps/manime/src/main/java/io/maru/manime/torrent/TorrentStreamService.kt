@@ -24,6 +24,9 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.InetAddress
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 data class OfflineEpisodeEntry(
     val mediaId: Int,
@@ -43,6 +46,7 @@ data class OfflineEpisodeEntry(
 )
 
 data class ActiveStreamStatus(
+    val requestId: String? = null,
     val isReady: Boolean = false,
     val isBuffering: Boolean = false,
     val statusMessage: String = "Preparing episode...",
@@ -61,6 +65,7 @@ class TorrentStreamService : Service() {
         const val ACTION_STOP_STREAM = "io.maru.manime.action.STOP_STREAM"
 
         const val EXTRA_MAGNET = "extra_magnet"
+        private const val EXTRA_REQUEST_ID = "extra_request_id"
         const val EXTRA_FILE_IDX = "extra_file_idx"
         const val EXTRA_MEDIA_ID = "extra_media_id"
         const val EXTRA_ANIME_TITLE = "extra_anime_title"
@@ -80,6 +85,8 @@ class TorrentStreamService : Service() {
 
         private val _offlineEpisodes = MutableStateFlow<List<OfflineEpisodeEntry>>(emptyList())
         val offlineEpisodes: StateFlow<List<OfflineEpisodeEntry>> = _offlineEpisodes.asStateFlow()
+        private val offlineJobs = ConcurrentHashMap<Pair<Int, Int>, Job>()
+        private val vaultLock = Any()
 
         private fun getVaultDir(context: Context): File {
             // Private internal app directory (never scanned by MediaStore or visible to external video players)
@@ -172,6 +179,8 @@ class TorrentStreamService : Service() {
         }
 
         fun deleteOfflineEpisode(context: Context, mediaId: Int, episodeNum: Int) {
+          synchronized(vaultLock) {
+            offlineJobs[mediaId to episodeNum]?.cancel()
             val current = _offlineEpisodes.value.ifEmpty { loadOfflineVault(context) }.toMutableList()
             val target = current.firstOrNull { it.mediaId == mediaId && it.episodeNumber == episodeNum }
             if (target != null) {
@@ -179,6 +188,7 @@ class TorrentStreamService : Service() {
                 current.removeAll { it.mediaId == mediaId && it.episodeNumber == episodeNum }
                 saveOfflineVault(context, current)
             }
+          }
         }
 
         fun startStream(
@@ -187,8 +197,10 @@ class TorrentStreamService : Service() {
             fileIdx: Int? = null,
             animeTitle: String = "Anime",
             episodeNum: Int = 1
-        ) {
+        ): String {
+            val requestId = UUID.randomUUID().toString()
             _streamStatus.value = ActiveStreamStatus(
+                requestId = requestId,
                 isReady = false,
                 isBuffering = true,
                 statusMessage = "Connecting to Episode $episodeNum...",
@@ -196,6 +208,7 @@ class TorrentStreamService : Service() {
             )
             val intent = Intent(context, TorrentStreamService::class.java).apply {
                 action = ACTION_START_STREAM
+                putExtra(EXTRA_REQUEST_ID, requestId)
                 putExtra(EXTRA_MAGNET, magnetUri)
                 putExtra(EXTRA_FILE_IDX, fileIdx ?: -1)
                 putExtra(EXTRA_ANIME_TITLE, animeTitle)
@@ -206,6 +219,7 @@ class TorrentStreamService : Service() {
             } else {
                 context.startService(intent)
             }
+            return requestId
         }
 
         fun startOfflineDownload(
@@ -253,12 +267,10 @@ class TorrentStreamService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var sessionManager: SessionManager? = null
     private var serverSocket: ServerSocket? = null
-    @Volatile private var activeStreamFile: File? = null
-    @Volatile private var activeExpectedSize: Long = 0L
-    @Volatile private var activeHandle: TorrentHandle? = null
-    @Volatile private var activeTorrentInfo: TorrentInfo? = null
-    @Volatile private var activeFileIndex: Int = 0
     private var streamJob: Job? = null
+    private data class StreamSession(val id: String, val file: File, val size: Long,
+        val handle: TorrentHandle, val info: TorrentInfo, val fileIndex: Int)
+    @Volatile private var activeSession: StreamSession? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -285,7 +297,8 @@ class TorrentStreamService : Service() {
                 val epNum = intent.getIntExtra(EXTRA_EPISODE_NUM, 1)
                 val title = intent.getStringExtra(EXTRA_ANIME_TITLE) ?: "Anime"
                 if (!magnet.isNullOrEmpty()) {
-                    launchLiveStream(magnet, fileIdx, title, epNum)
+                    launchLiveStream(magnet, fileIdx, title, epNum,
+                        intent.getStringExtra(EXTRA_REQUEST_ID) ?: UUID.randomUUID().toString())
                 }
             }
             ACTION_DOWNLOAD_OFFLINE -> {
@@ -315,8 +328,9 @@ class TorrentStreamService : Service() {
             }
             ACTION_STOP_STREAM -> {
                 streamJob?.cancel()
+                activeSession = null
                 _streamStatus.value = ActiveStreamStatus()
-                if (_offlineEpisodes.value.none { !it.isCompleted }) {
+                if (offlineJobs.values.none { it.isActive }) {
                     stopSelf()
                 }
             }
@@ -398,35 +412,23 @@ class TorrentStreamService : Service() {
         } catch (_: Exception) {}
     }
 
-    private fun hasFileRangeDownloaded(byteOffsetInFile: Long, byteLength: Long): Boolean {
-        val handle = activeHandle ?: return true
-        val tInfo = activeTorrentInfo ?: return true
+    private fun hasFileRangeDownloaded(byteOffsetInFile: Long, byteLength: Long,
+        stream: StreamSession? = activeSession): Boolean {
+        val snapshot = stream ?: return false
+        val handle = snapshot.handle
+        val tInfo = snapshot.info
         return try {
-            val files = tInfo.files()
-            val fileOffset = files.fileOffset(activeFileIndex)
-            val pieceLen = tInfo.pieceLength().coerceAtLeast(16384).toLong()
-            val totalPieces = tInfo.numPieces()
-
-            val absStart = fileOffset + byteOffsetInFile
-            val absEnd = (absStart + byteLength.coerceAtLeast(1L) - 1L).coerceAtLeast(absStart)
-            val startPiece = (absStart / pieceLen).toInt().coerceIn(0, totalPieces - 1)
-            val endPiece = (absEnd / pieceLen).toInt().coerceIn(0, totalPieces - 1)
-
-            for (p in startPiece..endPiece) {
-                if (!handle.havePiece(p)) {
-                    // Boost missing piece deadline so libtorrent fetches what ExoPlayer is waiting for right now!
+            verifiedFileRange(byteOffsetInFile, byteLength, snapshot.size,
+                tInfo.files().fileOffset(snapshot.fileIndex), tInfo.pieceLength(), tInfo.numPieces()) { p ->
+                val verified = handle.havePiece(p)
+                if (!verified) {
                     handle.piecePriority(p, Priority.TOP_PRIORITY)
                     handle.setPieceDeadline(p, 600)
-                    if (p + 1 < totalPieces && !handle.havePiece(p + 1)) {
-                        handle.piecePriority(p + 1, Priority.TOP_PRIORITY)
-                        handle.setPieceDeadline(p + 1, 1200)
-                    }
-                    return false
                 }
+                verified
             }
-            true
         } catch (_: Exception) {
-            true
+            false
         }
     }
 
@@ -434,11 +436,17 @@ class TorrentStreamService : Service() {
         magnetUri: String,
         preferredFileIdx: Int?,
         animeTitle: String,
-        episodeNum: Int
+        episodeNum: Int,
+        requestId: String
     ) {
-        streamJob?.cancel()
+        val previous = streamJob
+        previous?.cancel()
+        activeSession = null
         streamJob = serviceScope.launch {
+            var liveHandle: TorrentHandle? = null
             try {
+                previous?.join()
+                ensureActive()
                 ensureSessionStarted()
                 val session = sessionManager ?: return@launch
                 val saveDir = File(cacheDir, "live_stream_cache").apply {
@@ -446,6 +454,7 @@ class TorrentStreamService : Service() {
                 }
 
                 _streamStatus.value = ActiveStreamStatus(
+                    requestId = requestId,
                     isReady = false,
                     isBuffering = true,
                     statusMessage = "Loading Episode $episodeNum stream...",
@@ -454,8 +463,10 @@ class TorrentStreamService : Service() {
                 updateNotification("Playing $animeTitle • Ep $episodeNum")
 
                 val rawMeta = session.fetchMagnet(magnetUri, 25, saveDir)
+                ensureActive()
                 if (rawMeta == null) {
                     _streamStatus.value = ActiveStreamStatus(
+                        requestId = requestId,
                         isReady = false,
                         isBuffering = false,
                         statusMessage = "Stream timed out",
@@ -470,28 +481,26 @@ class TorrentStreamService : Service() {
                 val expectedBytes = tInfo.files().fileSize(targetIdx)
 
                 session.download(tInfo, saveDir)
-                val handle = session.find(tInfo.infoHash())
-                activeTorrentInfo = tInfo
-                activeHandle = handle
-                activeFileIndex = targetIdx
-
+                val handle = requireNotNull(session.find(tInfo.infoHash())) { "Torrent handle unavailable" }
+                liveHandle = handle
                 if (handle != null) {
                     configureSequentialVideoDownload(tInfo, handle, targetIdx)
                 }
 
                 val videoFile = File(saveDir, targetRelPath)
-                activeStreamFile = videoFile
-                activeExpectedSize = expectedBytes
+                require(videoFile.canonicalPath.startsWith(saveDir.canonicalPath + File.separator))
+                require(expectedBytes > 0) { "Empty torrent file" }
+                activeSession = StreamSession(requestId, videoFile, expectedBytes, handle, tInfo, targetIdx)
 
                 // Wait until the first 2 pieces (MKV header + first cluster) and at least ~2 MB are downloaded
-                val minPrebufferBytes = minOf(2_500_000L, (expectedBytes / 50).coerceAtLeast(1_200_000L))
+                val minPrebufferBytes = minOf(expectedBytes, 2_500_000L, (expectedBytes / 50).coerceAtLeast(1_200_000L))
                 var waitedMs = 0
                 while (isActive && waitedMs < 35_000) {
                     val status = handle?.status()
                     val downloaded = status?.totalDone() ?: 0L
                     val speedKbps = ((status?.downloadPayloadRate() ?: 0) / 1024).coerceAtLeast(0)
                     val peers = status?.numPeers() ?: 0
-                    val hasFirstChunk = hasFileRangeDownloaded(0L, 512 * 1024L)
+                    val hasFirstChunk = hasFileRangeDownloaded(0L, minOf(expectedBytes, 512 * 1024L))
                     val pct = if (minPrebufferBytes > 0) {
                         ((downloaded.toDouble() / minPrebufferBytes.toDouble()) * 100.0).toInt().coerceIn(5, 99)
                     } else 50
@@ -502,6 +511,7 @@ class TorrentStreamService : Service() {
 
                     val speedLabel = if (speedKbps >= 1024) String.format("%.1f MB/s", speedKbps / 1024.0) else "$speedKbps KB/s"
                     _streamStatus.value = ActiveStreamStatus(
+                        requestId = requestId,
                         isReady = false,
                         isBuffering = true,
                         statusMessage = if (peers > 0) "Buffering Episode $episodeNum ($pct% • $speedLabel)" else "Connecting to Episode $episodeNum stream...",
@@ -513,9 +523,14 @@ class TorrentStreamService : Service() {
                     waitedMs += 350
                 }
 
+                ensureActive()
+                check(videoFile.exists() && hasFileRangeDownloaded(0L, minOf(expectedBytes, 512 * 1024L))) {
+                    "Timed out waiting for verified torrent pieces"
+                }
                 val ext = if (targetRelPath.lowercase().endsWith(".mp4")) "mp4" else "mkv"
-                val url = "http://127.0.0.1:$STREAM_PORT/stream.$ext"
+                val url = "http://127.0.0.1:$STREAM_PORT/$requestId/stream.$ext"
                 _streamStatus.value = ActiveStreamStatus(
+                    requestId = requestId,
                     isReady = true,
                     isBuffering = false,
                     statusMessage = "Ready",
@@ -535,18 +550,23 @@ class TorrentStreamService : Service() {
                         downloadSpeedKbps = spd,
                         connectedPeers = prs
                     )
-                    if (st.isFinished || st.isSeeding) break
                     delay(1200)
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                ensureActive()
+                activeSession = null
                 _streamStatus.value = ActiveStreamStatus(
+                    requestId = requestId,
                     isReady = false,
                     isBuffering = false,
                     statusMessage = "Playback failed",
                     error = e.localizedMessage ?: "Failed to load episode"
                 )
+            } finally {
+                if (activeSession?.id == requestId) activeSession = null
+                try { liveHandle?.let { sessionManager?.remove(it) } } catch (_: Exception) {}
             }
         }
     }
@@ -563,14 +583,19 @@ class TorrentStreamService : Service() {
         audioType: String,
         quality: String
     ) {
-        serviceScope.launch {
+        val key = mediaId to episodeNum
+        synchronized(vaultLock) {
+        if (offlineJobs[key]?.isActive == true) return
+        val previous = offlineJobs[key]
+        val job = serviceScope.launch(start = CoroutineStart.LAZY) {
+            var offlineSession: SessionManager? = null
+            val tempDir = File(cacheDir, "offline_staging_${mediaId}_$episodeNum")
             try {
-                ensureSessionStarted()
-                val session = sessionManager ?: return@launch
+                previous?.join()
+                ensureActive()
+                val session = SessionManager().also { offlineSession = it; it.start() }
                 val vaultDir = getVaultDir(applicationContext)
-                val tempDir = File(cacheDir, "offline_staging_${mediaId}_$episodeNum").apply {
-                    if (!exists()) mkdirs()
-                }
+                if (!tempDir.exists()) tempDir.mkdirs()
                 val finalVaultFile = File(vaultDir, "ep_${mediaId}_${episodeNum}.nanami")
 
                 fun upsertEntry(
@@ -579,6 +604,8 @@ class TorrentStreamService : Service() {
                     progress: Int,
                     completed: Boolean
                 ) {
+                  synchronized(vaultLock) {
+                    ensureActive()
                     val current = _offlineEpisodes.value.toMutableList()
                     val idx = current.indexOfFirst { it.mediaId == mediaId && it.episodeNumber == episodeNum }
                     val entry = OfflineEpisodeEntry(
@@ -599,12 +626,14 @@ class TorrentStreamService : Service() {
                     )
                     if (idx >= 0) current[idx] = entry else current.add(0, entry)
                     saveOfflineVault(applicationContext, current)
+                  }
                 }
 
                 upsertEntry(0L, 0L, 1, false)
                 updateNotification("Saving Offline: $animeTitle • Ep $episodeNum")
 
                 val rawMeta = session.fetchMagnet(magnetUri, 30, tempDir)
+                ensureActive()
                 if (rawMeta == null) {
                     deleteOfflineEpisode(applicationContext, mediaId, episodeNum)
                     return@launch
@@ -614,9 +643,10 @@ class TorrentStreamService : Service() {
                 val targetIdx = pickVideoFileIndex(tInfo, preferredFileIdx, episodeNum)
                 val targetRelPath = tInfo.files().filePath(targetIdx)
                 val totalBytes = tInfo.files().fileSize(targetIdx)
-
+                require(totalBytes > 0)
+                require(File(tempDir, targetRelPath).canonicalPath.startsWith(tempDir.canonicalPath + File.separator))
                 session.download(tInfo, tempDir)
-                val handle = session.find(tInfo.infoHash())
+                val handle = requireNotNull(session.find(tInfo.infoHash())) { "Torrent handle unavailable" }
                 if (handle != null) {
                     configureSequentialVideoDownload(tInfo, handle, targetIdx)
                 }
@@ -625,11 +655,15 @@ class TorrentStreamService : Service() {
 
                 while (isActive) {
                     val status = handle?.status()
-                    val done = status?.totalDone() ?: stagingFile.length()
+                    val done = status?.totalDone() ?: 0L
                     val pct = if (totalBytes > 0) ((done * 100L) / totalBytes).toInt().coerceIn(1, 99) else 10
-                    val isFinished = status?.isFinished == true || status?.isSeeding == true || (totalBytes > 0 && done >= totalBytes)
+                    val isFinished = verifiedFileRange(0, totalBytes, totalBytes,
+                        tInfo.files().fileOffset(targetIdx), tInfo.pieceLength(), tInfo.numPieces(), handle::havePiece)
 
                     if (isFinished && stagingFile.exists()) {
+                      synchronized(vaultLock) {
+                        ensureActive()
+                        check(stagingFile.length() == totalBytes) { "Incomplete offline file" }
                         // Move into private internal vault with .nanami extension so external video players never see it
                         if (finalVaultFile.exists()) finalVaultFile.delete()
                         val moved = stagingFile.renameTo(finalVaultFile)
@@ -648,6 +682,7 @@ class TorrentStreamService : Service() {
                             completed = true
                         )
                         updateNotification("Offline Ready: $animeTitle • Ep $episodeNum")
+                      }
                         break
                     } else {
                         upsertEntry(totalBytes, done, pct, false)
@@ -655,7 +690,20 @@ class TorrentStreamService : Service() {
                     }
                     delay(1500)
                 }
-            } catch (_: Exception) {}
+            } catch (e: CancellationException) { throw e }
+              catch (_: Exception) {
+                synchronized(vaultLock) {
+                    if (isActive) deleteOfflineEpisode(applicationContext, mediaId, episodeNum)
+                }
+              } finally {
+                try {
+                    offlineSession?.stop()
+                    tempDir.deleteRecursively()
+                } catch (_: Exception) {}
+              }
+        }
+        offlineJobs[key] = job
+        job.start()
         }
     }
 
@@ -666,7 +714,7 @@ class TorrentStreamService : Service() {
     private fun startLocalHttpServer() {
         try {
             serverSocket?.close()
-            serverSocket = ServerSocket(STREAM_PORT)
+            serverSocket = ServerSocket(STREAM_PORT, 8, InetAddress.getByName("127.0.0.1"))
             serviceScope.launch {
                 while (isActive && serverSocket?.isClosed == false) {
                     try {
@@ -689,50 +737,46 @@ class TorrentStreamService : Service() {
                 val reader = input.bufferedReader()
 
                 val requestLine = reader.readLine() ?: return@launch
+                val request = requestLine.split(' ')
+                if (request.size != 3 || request[0] !in listOf("GET", "HEAD")) {
+                    output.write("HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
+                    return@launch
+                }
                 var rangeHeader: String? = null
+                var headerBytes = 0
                 while (true) {
                     val line = reader.readLine()
                     if (line.isNullOrEmpty()) break
+                    headerBytes += line.length
+                    check(headerBytes <= 16384) { "Request headers too large" }
                     if (line.startsWith("Range:", ignoreCase = true)) {
                         rangeHeader = line.substringAfter(":").trim()
                     }
                 }
 
-                // Wait briefly if the file is still being created on disk
-                var file = activeStreamFile
-                var retries = 0
-                while ((file == null || !file.exists()) && retries < 20) {
-                    delay(250)
-                    file = activeStreamFile
-                    retries++
-                }
-
-                if (file == null || !file.exists()) {
+                val stream = activeSession
+                val file = stream?.file
+                if (stream == null || file == null || !file.exists() ||
+                    !request[1].startsWith("/${stream.id}/stream.")) {
                     output.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".toByteArray())
                     output.flush()
                     socket.close()
                     return@launch
                 }
 
-                val totalLen = activeExpectedSize.takeIf { it > 0 } ?: file.length()
+                val totalLen = stream.size
                 val mimeType = if (requestLine.contains(".mp4", ignoreCase = true)) "video/mp4" else "video/x-matroska"
 
-                var startByte = 0L
-                var endByte = (totalLen - 1).coerceAtLeast(0L)
-                var isPartial = false
-
-                if (!rangeHeader.isNullOrBlank() && rangeHeader.startsWith("bytes=")) {
-                    isPartial = true
-                    val spec = rangeHeader.removePrefix("bytes=").trim()
-                    val parts = spec.split("-")
-                    startByte = parts.getOrNull(0)?.toLongOrNull() ?: 0L
-                    val reqEnd = parts.getOrNull(1)?.takeIf { it.isNotBlank() }?.toLongOrNull()
-                    if (reqEnd != null && reqEnd < totalLen) {
-                        endByte = reqEnd
-                    }
+                val range = parseByteRange(rangeHeader, totalLen)
+                if (range == null) {
+                    output.write(("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */$totalLen\r\n" +
+                        "Content-Length: 0\r\nConnection: close\r\n\r\n").toByteArray())
+                    return@launch
                 }
-
-                val contentLength = (endByte - startByte + 1).coerceAtLeast(0L)
+                val startByte = range.start
+                val endByte = range.end
+                val isPartial = rangeHeader != null
+                val contentLength = range.length
                 val headers = if (isPartial) {
                     "HTTP/1.1 206 Partial Content\r\n" +
                             "Content-Type: $mimeType\r\n" +
@@ -749,6 +793,7 @@ class TorrentStreamService : Service() {
                 }
 
                 output.write(headers.toByteArray())
+                if (request[0] == "HEAD") return@launch
 
                 val raf = RandomAccessFile(file, "r")
                 try {
@@ -760,18 +805,14 @@ class TorrentStreamService : Service() {
 
                         // CRITICAL: Do NOT read un-downloaded sparse zeroes from RandomAccessFile!
                         // Wait until libtorrent has actually verified the piece covering [currentOffset, currentOffset + toRead)
-                        var waitTicks = 0
-                        while (isActive && !hasFileRangeDownloaded(currentOffset, toRead.toLong()) && waitTicks < 120) {
-                            delay(150)
-                            waitTicks++
-                        }
-
+                        awaitVerifiedRange(isCurrent = { activeSession === stream },
+                            isVerified = { hasFileRangeDownloaded(currentOffset, toRead.toLong(), stream) })
+                        ensureActive()
+                        check(activeSession === stream) { "Stream replaced" }
+                        check(raf.length() >= currentOffset + toRead) { "Verified bytes not available on disk" }
                         raf.seek(currentOffset)
                         val read = raf.read(buffer, 0, toRead)
-                        if (read <= 0) {
-                            delay(150)
-                            continue
-                        }
+                        check(read > 0) { "Unexpected end of torrent file" }
                         output.write(buffer, 0, read)
                         currentOffset += read
                         remaining -= read
@@ -783,6 +824,8 @@ class TorrentStreamService : Service() {
                 output.flush()
                 socket.close()
             } catch (_: Exception) {
+                // Closing a truncated response makes the player retry. Never send unverified bytes.
+            } finally {
                 try { socket.close() } catch (_: Exception) {}
             }
         }
@@ -791,6 +834,7 @@ class TorrentStreamService : Service() {
     override fun onDestroy() {
         try {
             streamJob?.cancel()
+            activeSession = null
             serverSocket?.close()
             sessionManager?.stop()
         } catch (_: Exception) {}

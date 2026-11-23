@@ -9,6 +9,10 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
+internal fun aniListVariables(variables: Map<String, Any?>): JSONObject = JSONObject().apply {
+    for ((key, value) in variables) if (value != null) put(key, JSONObject.wrap(value))
+}
+
 data class AniListUser(
     val id: Int,
     val name: String,
@@ -65,8 +69,7 @@ data class AnimeMedia(
     val hasEnglishDub: Boolean get() = hasEnglishDubCast || externalLinks.any { it.isEnglishDub }
 
     val latestAiredEpisode: Int? get() {
-        if (!isReleasing) return episodes
-        return if (nextEpisode != null && nextEpisode > 1) nextEpisode - 1 else null
+        return latestReleasedEpisode(status, episodes, nextEpisode)
     }
 }
 
@@ -217,12 +220,7 @@ object AniListClient {
         variables: Map<String, Any?> = emptyMap(),
         token: String? = null
     ): JSONObject = withContext(Dispatchers.IO) {
-        val varsJson = JSONObject()
-        for ((k, v) in variables) {
-            if (v != null) {
-                varsJson.put(k, v)
-            }
-        }
+        val varsJson = aniListVariables(variables)
         val body = JSONObject().apply {
             put("query", gql)
             put("variables", varsJson)
@@ -792,19 +790,23 @@ object AniListClient {
     suspend fun saveEntry(
         mediaId: Int, status: String?, progress: Int?,
         score: Double?, notes: String?, isPrivate: Boolean?,
-        token: String
+        token: String,
+        scoreFormat: String? = null
     ): AnimeMedia {
         val vars = mutableMapOf<String, Any?>("mediaId" to mediaId)
         if (!status.isNullOrBlank()) vars["status"] = status.uppercase()
         if (progress != null) vars["progress"] = progress
-        if (score != null) vars["score"] = score
+        if (score != null) {
+            if (scoreFormat == null) vars["score"] = score
+            else vars["scoreRaw"] = nativeScoreToRaw(score, scoreFormat)
+        }
         if (notes != null) vars["notes"] = notes
         if (isPrivate != null) vars["private"] = isPrivate
 
         val data = query("""
-            mutation (${'$'}mediaId: Int!, ${'$'}status: MediaListStatus, ${'$'}score: Float,
+            mutation (${'$'}mediaId: Int!, ${'$'}status: MediaListStatus, ${'$'}score: Float, ${'$'}scoreRaw: Int,
                       ${'$'}progress: Int, ${'$'}private: Boolean, ${'$'}notes: String) {
-              SaveMediaListEntry(mediaId: ${'$'}mediaId, status: ${'$'}status, score: ${'$'}score,
+              SaveMediaListEntry(mediaId: ${'$'}mediaId, status: ${'$'}status, score: ${'$'}score, scoreRaw: ${'$'}scoreRaw,
                                  progress: ${'$'}progress, private: ${'$'}private, notes: ${'$'}notes) {
                 id status score progress private notes updatedAt
                 media { ${mediaFields(includeDubCast = false)} }

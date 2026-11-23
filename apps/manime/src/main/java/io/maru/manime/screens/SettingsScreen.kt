@@ -250,7 +250,7 @@ fun SettingsScreen(
                         color = CrunchyTeal
                     )
                     Text("Nanami Anime v2.0.0", fontSize = 13.sp, color = MaruTextStrong, fontWeight = FontWeight.Bold)
-                    Text("Stream simulcasts, switch Sub & Dub audio on the fly, sync your AniList watchlist, and save episodes to your private app-only Offline Vault.", fontSize = 12.sp, color = MaruTextMuted, lineHeight = 17.sp)
+                    Text("Stream simulcasts, switch Sub & Dub audio, sync your AniList watchlist, and save episodes in app internal storage. Offline files are not encrypted.", fontSize = 12.sp, color = MaruTextMuted, lineHeight = 17.sp)
                 }
             }
         }
