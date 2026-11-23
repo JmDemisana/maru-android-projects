@@ -26,6 +26,7 @@ import org.libtorrent4j.SessionManager
 import org.libtorrent4j.TorrentFlags
 import org.libtorrent4j.TorrentHandle
 import org.libtorrent4j.TorrentInfo
+import org.libtorrent4j.swig.error_code
 import java.io.File
 import java.io.RandomAccessFile
 import java.net.ServerSocket
@@ -48,6 +49,8 @@ data class ActiveStreamStatus(
     val error: String? = null,
     val phase: String = "starting"
 )
+
+private class OfflineDownloadException(message: String) : Exception(message)
 
 class TorrentStreamService : Service() {
 
@@ -302,9 +305,9 @@ class TorrentStreamService : Service() {
                 .and_(TorrentFlags.UPLOAD_MODE.inv()).and_(TorrentFlags.STOP_WHEN_READY.inv())
                 .or_(TorrentFlags.SEQUENTIAL_DOWNLOAD))
         }
-        val error = ErrorCode()
+        val error = ErrorCode(error_code())
         val handle = SessionHandle(session.swig()).addTorrent(params, error)
-        check(error.value() == 0 && handle.isValid) { "Native torrent add failed" }
+        check(!error.isError && handle.isValid) { "Native torrent add failed" }
         handle.unsetFlags(TorrentFlags.AUTO_MANAGED.or_(TorrentFlags.UPLOAD_MODE).or_(TorrentFlags.STOP_WHEN_READY))
         handle.resume()
         return handle
@@ -423,7 +426,7 @@ class TorrentStreamService : Service() {
                 withTimeout(35_000L) {
                     while (true) {
                         val status = handle.status()
-                        check(status.errorCode().value() == 0) { "Native download error" }
+                        check(!status.errorCode().isError) { "Native download error" }
                         if (videoFile.isFile && hasFileRangeDownloaded(0L, minPrebufferBytes, serving)) break
                         val speedKbps = (status.downloadPayloadRate() / 1024).coerceAtLeast(0)
                         val peers = status.numPeers()
@@ -456,7 +459,7 @@ class TorrentStreamService : Service() {
                 try {
                     while (isActive) {
                         val status = handle.status()
-                        check(status.errorCode().value() == 0) { "Native download error" }
+                        check(!status.errorCode().isError) { "Native download error" }
                         updateStreamStatus(requestId) {
                             it.copy(progressPercent = (status.progress() * 100).toInt().coerceIn(0, 100),
                                 downloadSpeedKbps = (status.downloadPayloadRate() / 1024).coerceAtLeast(0),
@@ -590,7 +593,7 @@ class TorrentStreamService : Service() {
                     while (isActive) {
                         check(handle.isValid) { "Download handle expired" }
                         val status = handle.status()
-                        check(status.errorCode().value() == 0) { "Torrent download failed" }
+                        check(!status.errorCode().isError) { "Torrent download failed" }
                         val done = status.totalWantedDone().coerceIn(0L, totalBytes)
 
                         if (done >= totalBytes &&
