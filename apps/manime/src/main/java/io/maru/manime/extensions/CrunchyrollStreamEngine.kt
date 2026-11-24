@@ -1,7 +1,10 @@
 package io.maru.manime.extensions
 
+import io.maru.manime.AniListClient
+import io.maru.manime.AniListSeasonContext
 import io.maru.manime.StreamingEpisode
 import io.maru.manime.cleanAnimeTitle
+import io.maru.manime.extractExplicitSeasonFromTitle
 import io.maru.manime.isExplicitAdultAnime
 import io.maru.manime.readResponse
 import kotlinx.coroutines.*
@@ -18,6 +21,12 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 
+data class KitsuEpisodeSegment(
+    val kitsuId: String,
+    val startEpisode: Int,
+    val endEpisode: Int
+)
+
 data class AnimeIdMappings(
     val anilistId: Int,
     val malId: Int? = null,
@@ -25,7 +34,13 @@ data class AnimeIdMappings(
     val imdbId: String? = null,
     val tvdbId: Int? = null,
     val episodeCount: Int? = null,
-    val episodes: List<CrunchyEpisodeMeta> = emptyList()
+    val episodes: List<CrunchyEpisodeMeta> = emptyList(),
+    val inferredSeasonNumber: Int = 1,
+    val prequelEpisodeOffset: Int = 0,
+    val kitsuEpisodeCount: Int? = null,
+    val kitsuUsesPrequelOffset: Boolean = false,
+    val combinedRootKitsuId: String? = null,
+    val kitsuSegments: List<KitsuEpisodeSegment> = emptyList()
 )
 
 data class CrunchyEpisodeMeta(
@@ -37,7 +52,8 @@ data class CrunchyEpisodeMeta(
     val overview: String? = null,
     val thumbnail: String? = null,
     val airDate: String? = null,
-    val durationMinutes: Int? = null
+    val durationMinutes: Int? = null,
+    val hasExplicitSeason: Boolean = true
 )
 
 data class AniSkipInterval(
@@ -110,7 +126,8 @@ object CrunchyrollStreamEngine {
         anilistId: Int,
         animeTitle: String,
         episodeNum: Int = 1,
-        isMovie: Boolean = false
+        isMovie: Boolean = false,
+        altTitles: List<String> = emptyList()
     ): StreamDubStatus = withContext(Dispatchers.IO) {
         val cacheKey = anilistId to episodeNum
         dubStatusCache[cacheKey]?.let { (cachedAt, status) ->
@@ -122,7 +139,8 @@ object CrunchyrollStreamEngine {
                 animeTitle = animeTitle,
                 episodeNum = episodeNum,
                 preferredAudio = "DUB",
-                isMovie = isMovie
+                isMovie = isMovie,
+                altTitles = altTitles
             )
             val dubStreams = streams.filter {
                 (it.audioType == "DUAL_AUDIO" || it.audioType == "DUB") &&
@@ -156,22 +174,30 @@ object CrunchyrollStreamEngine {
     suspend fun getAnimeMappings(
         anilistId: Int,
         fallbackTitle: String = "",
-        includeEpisodeMetadata: Boolean = true
+        includeEpisodeMetadata: Boolean = true,
+        candidateTitles: List<String> = emptyList(),
+        isAdult: Boolean = false
     ): AnimeIdMappings = withContext(Dispatchers.IO) {
+        val prioritizedTitles = (candidateTitles + listOf(fallbackTitle))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        val primaryFallback = prioritizedTitles.firstOrNull().orEmpty()
         val lock = mappingLocks[anilistId and (mappingLocks.size - 1)]
-        val mappings = cachedMappings(anilistId, fallbackTitle) ?: lock.withLock {
-            cachedMappings(anilistId, fallbackTitle) ?: fetchAnimeMappings(anilistId, fallbackTitle).also {
-                if (it.hasSourceIds() || fallbackTitle.isNotBlank()) {
-                    mappingCache[anilistId] = System.nanoTime() to it
+        val mappings = cachedMappings(anilistId, primaryFallback) ?: lock.withLock {
+            cachedMappings(anilistId, primaryFallback)
+                ?: fetchAnimeMappings(anilistId, prioritizedTitles, isAdult).also {
+                    if (it.hasSourceIds() || primaryFallback.isNotBlank()) {
+                        mappingCache[anilistId] = System.nanoTime() to it
+                    }
                 }
-            }
         }
         val kitsuId = mappings.kitsuId
         if (!includeEpisodeMetadata || mappings.episodes.isNotEmpty() || kitsuId == null) {
             return@withContext mappings
         }
 
-        val episodes = fetchKitsuEpisodes(kitsuId)
+        val episodes = fetchKitsuEpisodes(kitsuId, mappings.inferredSeasonNumber, mappings.prequelEpisodeOffset)
         if (episodes.isEmpty()) return@withContext mappings
         val enriched = mappings.copy(episodes = episodes.sortedBy { it.episodeNumber })
         mappingCache.computeIfPresent(anilistId) { _, cached ->
@@ -180,7 +206,7 @@ object CrunchyrollStreamEngine {
         enriched
     }
 
-    private fun AnimeIdMappings.hasSourceIds(): Boolean = kitsuId != null || imdbId != null
+    private fun AnimeIdMappings.hasSourceIds(): Boolean = kitsuId != null || imdbId != null || combinedRootKitsuId != null
 
     private fun cachedMappings(anilistId: Int, fallbackTitle: String): AnimeIdMappings? {
         mappingCache[anilistId]?.let { (cachedAt, mappings) ->
@@ -194,13 +220,17 @@ object CrunchyrollStreamEngine {
         return null
     }
 
-    private suspend fun fetchAnimeMappings(anilistId: Int, fallbackTitle: String): AnimeIdMappings {
+    private suspend fun fetchAnimeMappings(
+        anilistId: Int,
+        prioritizedTitles: List<String>,
+        isAdult: Boolean
+    ): AnimeIdMappings {
         var kitsuId: String? = null
         var malId: Int? = null
         var imdbId: String? = null
         var tvdbId: Int? = null
         var epCount: Int? = null
-        val episodesList = mutableListOf<CrunchyEpisodeMeta>()
+        val rawEpisodesList = mutableListOf<CrunchyEpisodeMeta>()
 
         try {
             val req = Request.Builder()
@@ -249,21 +279,22 @@ object CrunchyrollStreamEngine {
                             ?: epObj.optString("airdate").takeIf { it.isNotBlank() && it != "null" }
                         val length = epObj.optInt("length", 0).takeIf { it > 0 }
                             ?: epObj.optInt("runtime", 0).takeIf { it > 0 }
-                        val seasonNum = epObj.optInt("seasonNumber", -1).takeIf { it >= 0 } ?: 1
+                        val parsedSeason = epObj.optInt("seasonNumber", -1).takeIf { it >= 0 }
                         val tvdbEpNum = epObj.optInt("episodeNumber", epNum).takeIf { it > 0 } ?: epNum
                         val absEpNum = epObj.optInt("absoluteEpisodeNumber", 0).takeIf { it > 0 }
 
-                        episodesList.add(
+                        rawEpisodesList.add(
                             CrunchyEpisodeMeta(
                                 episodeNumber = epNum,
-                                seasonNumber = seasonNum,
+                                seasonNumber = parsedSeason ?: 1,
                                 tvdbEpisodeNumber = tvdbEpNum,
                                 absoluteEpisodeNumber = absEpNum,
                                 title = epTitle,
                                 overview = overview,
                                 thumbnail = image,
                                 airDate = airDate,
-                                durationMinutes = length
+                                durationMinutes = length,
+                                hasExplicitSeason = parsedSeason != null
                             )
                         )
                     }
@@ -273,8 +304,62 @@ object CrunchyrollStreamEngine {
             throw e
         } catch (_: Exception) {}
 
-        if (kitsuId.isNullOrBlank() && fallbackTitle.isNotBlank()) {
-            kitsuId = resolveKitsuIdByTitle(fallbackTitle)
+        if (kitsuId.isNullOrBlank() && prioritizedTitles.isNotEmpty() && !isAdult) {
+            kitsuId = resolveKitsuIdByTitles(prioritizedTitles)
+        }
+
+        // Resolve combined / split season context across AniList prequels & Kitsu
+        val seasonCtx = if (!isAdult && anilistId > 0) {
+            AniListClient.getSeasonContext(anilistId)
+        } else {
+            AniListSeasonContext(
+                mediaId = anilistId,
+                inferredSeasonNumber = extractExplicitSeasonFromTitle(*prioritizedTitles.toTypedArray()) ?: 1
+            )
+        }
+
+        val inferredSeason = extractExplicitSeasonFromTitle(*prioritizedTitles.toTypedArray())
+            ?: seasonCtx.inferredSeasonNumber
+        val prequelOffset = seasonCtx.prequelEpisodeOffset
+        val expectedSeriesEpisodes = epCount ?: seasonCtx.totalEpisodes
+
+        val episodesList = rawEpisodesList.map { ep ->
+            if (ep.hasExplicitSeason) ep else ep.copy(
+                seasonNumber = inferredSeason,
+                absoluteEpisodeNumber = ep.absoluteEpisodeNumber
+                    ?: (prequelOffset + ep.episodeNumber).takeIf { prequelOffset > 0 }
+            )
+        }
+
+        var kitsuEpCount: Int? = null
+        var kitsuUsesPrequelOffset = false
+        var combinedRootKitsuId: String? = null
+        var kitsuSegments: List<KitsuEpisodeSegment> = emptyList()
+
+        if (!isAdult) {
+            if (!kitsuId.isNullOrBlank()) {
+                kitsuEpCount = fetchKitsuEpisodeCount(kitsuId)
+                // Case A: AniList split seasons (e.g. S3 = 13 eps, prequelOffset = 26), while Kitsu combined them (39 eps)
+                if (prequelOffset > 0 && kitsuEpCount != null && expectedSeriesEpisodes != null &&
+                    kitsuEpCount >= prequelOffset + expectedSeriesEpisodes
+                ) {
+                    kitsuUsesPrequelOffset = true
+                }
+                // Case B: AniList combined seasons (e.g. Seasons 1-2 = 26 eps), while Kitsu split S1 (14 eps) + S2 (12 eps)
+                if (!kitsuUsesPrequelOffset && kitsuEpCount != null && expectedSeriesEpisodes != null &&
+                    kitsuEpCount in 1 until expectedSeriesEpisodes
+                ) {
+                    kitsuSegments = fetchKitsuSequelSegments(kitsuId, kitsuEpCount, expectedSeriesEpisodes)
+                }
+            }
+
+            // Also check root prequel's Kitsu ID when AniList split seasons so Stremio addons that merged Kitsu seasons still match
+            if (prequelOffset > 0 && !kitsuUsesPrequelOffset && seasonCtx.rootPrequelMediaId != null) {
+                val rootKitsu = fetchAniZipKitsuIdOnly(seasonCtx.rootPrequelMediaId)
+                if (!rootKitsu.isNullOrBlank() && rootKitsu != kitsuId) {
+                    combinedRootKitsuId = rootKitsu
+                }
+            }
         }
 
         return AnimeIdMappings(
@@ -283,38 +368,29 @@ object CrunchyrollStreamEngine {
             kitsuId = kitsuId,
             imdbId = imdbId,
             tvdbId = tvdbId,
-            episodeCount = epCount,
-            episodes = episodesList.sortedBy { it.episodeNumber }
+            episodeCount = expectedSeriesEpisodes,
+            episodes = episodesList.sortedBy { it.episodeNumber },
+            inferredSeasonNumber = inferredSeason,
+            prequelEpisodeOffset = prequelOffset,
+            kitsuEpisodeCount = kitsuEpCount,
+            kitsuUsesPrequelOffset = kitsuUsesPrequelOffset,
+            combinedRootKitsuId = combinedRootKitsuId,
+            kitsuSegments = kitsuSegments
         )
     }
 
-    private suspend fun resolveKitsuIdByTitle(title: String): String? {
-        val titleKey = title.filter { it.isLetterOrDigit() }.lowercase()
-        if (titleKey.isEmpty()) return null
+    private suspend fun fetchAniZipKitsuIdOnly(anilistId: Int): String? {
+        mappingCache[anilistId]?.second?.kitsuId?.let { return it }
         return try {
-            val encoded = URLEncoder.encode(title.trim(), "UTF-8")
             val req = Request.Builder()
-                .url("https://kitsu.io/api/edge/anime?filter[text]=$encoded&page[limit]=10")
+                .url("https://api.ani.zip/mappings?anilist_id=$anilistId")
                 .header("User-Agent", StremioAddonClient.BROWSER_UA)
                 .build()
-            val body = httpClient.newCall(req).readResponse { response ->
-                if (response.isSuccessful) response.body?.string() else null
+            val body = httpClient.newCall(req).readResponse { res ->
+                if (res.isSuccessful) res.body?.string() else null
             } ?: return null
-            val data = JSONObject(body).optJSONArray("data") ?: return null
-            val matchingIds = mutableSetOf<String>()
-            for (i in 0 until data.length()) {
-                val item = data.optJSONObject(i) ?: continue
-                val attrs = item.optJSONObject("attributes") ?: continue
-                val titles = mutableListOf(attrs.optString("canonicalTitle"))
-                attrs.optJSONObject("titles")?.let { aliases ->
-                    for (key in aliases.keys()) titles += aliases.optString(key)
-                }
-                if (titles.any { it.filter { c -> c.isLetterOrDigit() }.lowercase() == titleKey }) {
-                    item.optString("id").takeIf { it.toIntOrNull()?.let { id -> id > 0 } == true }
-                        ?.let(matchingIds::add)
-                }
-            }
-            matchingIds.singleOrNull()
+            val rawKitsu = JSONObject(body).optJSONObject("mappings")?.opt("kitsu_id")
+            rawKitsu?.toString()?.takeIf { it.isNotBlank() && it != "null" }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -322,7 +398,119 @@ object CrunchyrollStreamEngine {
         }
     }
 
-    private suspend fun fetchKitsuEpisodes(kitsuId: String): List<CrunchyEpisodeMeta> {
+    private suspend fun fetchKitsuEpisodeCount(kitsuId: String): Int? = try {
+        val req = Request.Builder()
+            .url("https://kitsu.io/api/edge/anime/$kitsuId")
+            .header("User-Agent", StremioAddonClient.BROWSER_UA)
+            .build()
+        val body = httpClient.newCall(req).readResponse { res ->
+            if (res.isSuccessful) res.body?.string() else null
+        }
+        body?.let {
+            JSONObject(it).optJSONObject("data")?.optJSONObject("attributes")?.optInt("episodeCount", 0)
+                ?.takeIf { count -> count > 0 }
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
+
+    private suspend fun fetchKitsuSequelSegments(
+        firstKitsuId: String,
+        firstEpisodeCount: Int,
+        targetTotalEpisodes: Int
+    ): List<KitsuEpisodeSegment> {
+        val segments = mutableListOf(KitsuEpisodeSegment(firstKitsuId, 1, firstEpisodeCount))
+        var covered = firstEpisodeCount
+        var cursorId = firstKitsuId
+        val visited = hashSetOf(firstKitsuId)
+
+        while (covered < targetTotalEpisodes && segments.size < 5) {
+            val nextPair = try {
+                val req = Request.Builder()
+                    .url("https://kitsu.io/api/edge/anime/$cursorId/media-relationships?filter[role]=sequel&include=destination")
+                    .header("User-Agent", StremioAddonClient.BROWSER_UA)
+                    .build()
+                val body = httpClient.newCall(req).readResponse { res ->
+                    if (res.isSuccessful) res.body?.string() else null
+                } ?: break
+                val included = JSONObject(body).optJSONArray("included") ?: break
+                var chosen: Pair<String, Int>? = null
+                for (i in 0 until included.length()) {
+                    val item = included.optJSONObject(i) ?: continue
+                    if (!item.optString("type").equals("anime", ignoreCase = true)) continue
+                    val id = item.optString("id").takeIf { it.isNotBlank() && it !in visited } ?: continue
+                    val attrs = item.optJSONObject("attributes") ?: continue
+                    val subtype = attrs.optString("subtype").lowercase()
+                    if (subtype in setOf("movie", "music", "special")) continue
+                    val eps = attrs.optInt("episodeCount", 0).takeIf { it > 0 } ?: continue
+                    chosen = id to eps
+                    break
+                }
+                chosen
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            } ?: break
+
+            val (nextId, nextEps) = nextPair
+            visited += nextId
+            segments += KitsuEpisodeSegment(nextId, covered + 1, covered + nextEps)
+            covered += nextEps
+            cursorId = nextId
+        }
+        return if (segments.size > 1) segments else emptyList()
+    }
+
+    private fun normalizeTitleLookupKey(s: String): String =
+        s.replace('×', 'x').replace('✕', 'x').lowercase().filter { it.isLetterOrDigit() }
+
+    private suspend fun resolveKitsuIdByTitles(titles: List<String>): String? {
+        val candidateKeys = titles.map(::normalizeTitleLookupKey).filter { it.isNotEmpty() }.toSet()
+        if (candidateKeys.isEmpty()) return null
+        for (queryTitle in titles.take(4)) {
+            val cleanQuery = cleanAnimeTitle(queryTitle).ifBlank { queryTitle.trim() }
+            if (cleanQuery.isBlank()) continue
+            try {
+                val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+                val req = Request.Builder()
+                    .url("https://kitsu.io/api/edge/anime?filter[text]=$encoded&page[limit]=10")
+                    .header("User-Agent", StremioAddonClient.BROWSER_UA)
+                    .build()
+                val body = httpClient.newCall(req).readResponse { response ->
+                    if (response.isSuccessful) response.body?.string() else null
+                } ?: continue
+                val data = JSONObject(body).optJSONArray("data") ?: continue
+                val matchingIds = mutableListOf<String>()
+                for (i in 0 until data.length()) {
+                    val item = data.optJSONObject(i) ?: continue
+                    val attrs = item.optJSONObject("attributes") ?: continue
+                    val itemTitles = mutableListOf(attrs.optString("canonicalTitle"))
+                    attrs.optJSONObject("titles")?.let { aliases ->
+                        for (key in aliases.keys()) itemTitles += aliases.optString(key)
+                    }
+                    val normalizedAliases = itemTitles.map(::normalizeTitleLookupKey).filter { it.isNotEmpty() }
+                    if (normalizedAliases.any { it in candidateKeys }) {
+                        item.optString("id").takeIf { it.toIntOrNull()?.let { id -> id > 0 } == true }
+                            ?.let { id -> if (id !in matchingIds) matchingIds += id }
+                    }
+                }
+                if (matchingIds.isNotEmpty()) return matchingIds.first()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
+
+    private suspend fun fetchKitsuEpisodes(
+        kitsuId: String,
+        defaultSeasonNumber: Int = 1,
+        prequelOffset: Int = 0
+    ): List<CrunchyEpisodeMeta> {
         val list = mutableListOf<CrunchyEpisodeMeta>()
         try {
             var offset = 0
@@ -348,11 +536,14 @@ object CrunchyrollStreamEngine {
                     list.add(
                         CrunchyEpisodeMeta(
                             episodeNumber = num,
+                            seasonNumber = defaultSeasonNumber,
+                            absoluteEpisodeNumber = (prequelOffset + num).takeIf { prequelOffset > 0 },
                             title = canonical,
                             overview = synopsis,
                             thumbnail = thumb,
                             airDate = airDate,
-                            durationMinutes = length
+                            durationMinutes = length,
+                            hasExplicitSeason = defaultSeasonNumber > 1
                         )
                     )
                 }
@@ -573,15 +764,29 @@ object CrunchyrollStreamEngine {
         externalLinks: List<io.maru.manime.ExternalLink> = emptyList(),
         onStreamsUpdated: (List<StreamLink>) -> Unit = {}
     ): List<StreamLink> = coroutineScope {
-        val mappings = getAnimeMappings(anilistId, animeTitle, includeEpisodeMetadata = false)
-        val lookups = streamLookups(mappings, episodeNum, isMovie)
-        val candidateTitles = (listOf(animeTitle) + altTitles)
+        // Prioritize `altTitles` (which begins with Romanized `titleRomaji` & synonyms) BEFORE Western `animeTitle`!
+        val candidateTitles = (altTitles + listOf(animeTitle))
             .flatMap { listOf(it, cleanAnimeTitle(it)) }
             .map { it.trim() }
             .filter { it.length >= 2 }
             .distinct()
         val isExplicitAdult = isExplicitAdultAnime(isAdult, genres)
         val isEcchi = genres.any { it.equals("Ecchi", true) }
+        val mappings = getAnimeMappings(
+            anilistId = anilistId,
+            fallbackTitle = animeTitle,
+            includeEpisodeMetadata = false,
+            candidateTitles = candidateTitles,
+            isAdult = isExplicitAdult
+        )
+        val lookups = streamLookups(mappings, episodeNum, isMovie)
+        val expectedEpisodeMeta = mappings.episodes.firstOrNull { it.episodeNumber == episodeNum }
+        val expectedSeason = expectedEpisodeMeta?.takeIf { it.hasExplicitSeason }?.seasonNumber
+            ?: mappings.inferredSeasonNumber.takeIf { it > 1 }
+            ?: expectedEpisodeMeta?.seasonNumber
+            ?: 1
+        val expectedAbsoluteEp = expectedEpisodeMeta?.absoluteEpisodeNumber
+            ?: (mappings.prequelEpisodeOffset + episodeNum).takeIf { mappings.prequelEpisodeOffset > 0 }
         val runFallbackImmediately = !isExplicitAdult && (lookups.isEmpty() || isEcchi || isMusicOrConcert)
 
         val displayName = URLEncoder.encode("$animeTitle - Episode $episodeNum", "UTF-8")
@@ -596,6 +801,10 @@ object CrunchyrollStreamEngine {
                         try {
                             val rawStreams = client.getStreams(type, id)
                             for (s in rawStreams) {
+                                val fileLine = s.filename ?: s.title?.substringAfterLast('\n') ?: ""
+                                if (!isMovie && isMismatchedSeasonFile(fileLine, expectedSeason, expectedAbsoluteEp)) {
+                                    continue
+                                }
                                 val combinedText = listOfNotNull(s.name, s.title, s.filename).joinToString(" ")
                                 val audio = detectAudioType(combinedText)
                                 val quality = detectQuality(combinedText)
@@ -674,7 +883,8 @@ object CrunchyrollStreamEngine {
                         preferredAudio = preferredAudio,
                         preferredQuality = preferredQuality,
                         trailerYoutubeId = trailerYoutubeId,
-                        externalLinks = externalLinks
+                        externalLinks = externalLinks,
+                        isAdult = false
                     )
                 }
             )
@@ -684,9 +894,30 @@ object CrunchyrollStreamEngine {
         val needsFallback = initial.isEmpty() || initial.all { it.isTorrent && it.seeders == 0 }
         if (isExplicitAdult) {
             if (!needsFallback) return@coroutineScope initial
-            val verified = HstreamResolver.resolve(anilistId, episodeNum)
-            if (verified.isEmpty()) return@coroutineScope initial
-            val options = verified + initial
+            val adultRoutes = listOf(
+                async(Dispatchers.IO) { HstreamResolver.resolve(anilistId, episodeNum, candidateTitles) },
+                async(Dispatchers.IO) {
+                    FallbackStreamResolvers.resolveFallbackStreams(
+                        titles = candidateTitles,
+                        episodeNum = episodeNum,
+                        isStandalone = isStandalone,
+                        isEcchi = true,
+                        isMusicOrConcert = false,
+                        preferredAudio = preferredAudio,
+                        preferredQuality = preferredQuality,
+                        isAdult = true
+                    )
+                }
+            )
+            val adultResolved = collectRankedStreams(adultRoutes) { partial ->
+                if (partial.isNotEmpty()) {
+                    onStreamsUpdated((partial + initial).distinctBy { it.playbackIdentity }.sortedByDescending { it.score })
+                }
+            }
+            if (adultResolved.isEmpty()) return@coroutineScope initial
+            val options = (adultResolved + initial)
+                .distinctBy { it.playbackIdentity }
+                .sortedByDescending { it.score }
             onStreamsUpdated(options)
             return@coroutineScope options
         }
@@ -700,7 +931,8 @@ object CrunchyrollStreamEngine {
                 preferredAudio = preferredAudio,
                 preferredQuality = preferredQuality,
                 trailerYoutubeId = trailerYoutubeId,
-                externalLinks = externalLinks
+                externalLinks = externalLinks,
+                isAdult = false
             )
             if (fallback.isNotEmpty()) {
                 val merged = (initial + fallback)
@@ -713,23 +945,85 @@ object CrunchyrollStreamEngine {
         initial
     }
 
-    private data class StreamLookup(val type: String, val id: String, val priority: Int = 0)
+    internal data class StreamLookup(val type: String, val id: String, val priority: Int = 0)
 
-    private fun streamLookups(mappings: AnimeIdMappings, episodeNum: Int, isMovie: Boolean): List<StreamLookup> = buildList {
-        mappings.kitsuId?.let { add(StreamLookup("series", "kitsu:$it:$episodeNum", 200)) }
+    internal fun streamLookups(mappings: AnimeIdMappings, episodeNum: Int, isMovie: Boolean): List<StreamLookup> = buildList {
+        val seenIds = HashSet<String>()
+        fun addLookup(type: String, id: String, priority: Int) {
+            if (seenIds.add("$type|$id")) add(StreamLookup(type, id, priority))
+        }
+
+        // 1. Kitsu lookups with combined/split season translation
+        val matchedSegment = mappings.kitsuSegments.firstOrNull { episodeNum in it.startEpisode..it.endEpisode }
+        if (matchedSegment != null) {
+            // Combined AniList entry (e.g. Seasons 1-2 = 26 eps) mapped onto split Kitsu entries (S1 = 14 eps, S2 = 12 eps)
+            val relativeEp = (episodeNum - matchedSegment.startEpisode + 1).coerceAtLeast(1)
+            addLookup("series", "kitsu:${matchedSegment.kitsuId}:$relativeEp", 220)
+            mappings.kitsuId?.let { rootId ->
+                if (rootId != matchedSegment.kitsuId) {
+                    addLookup("series", "kitsu:$rootId:$episodeNum", 110)
+                }
+            }
+        } else if (mappings.kitsuId != null) {
+            if (mappings.kitsuUsesPrequelOffset && mappings.prequelEpisodeOffset > 0) {
+                // Split AniList season (e.g. S3 = 13 eps) mapped onto combined Kitsu entry (e.g. 39 eps)
+                val cumulativeEp = mappings.prequelEpisodeOffset + episodeNum
+                addLookup("series", "kitsu:${mappings.kitsuId}:$cumulativeEp", 220)
+                addLookup("series", "kitsu:${mappings.kitsuId}:$episodeNum", -120)
+            } else {
+                addLookup("series", "kitsu:${mappings.kitsuId}:$episodeNum", 200)
+            }
+        }
+
+        // Secondary fallback to root prequel's Kitsu ID at cumulative offset when addons merged Kitsu seasons
+        if (mappings.combinedRootKitsuId != null && mappings.prequelEpisodeOffset > 0) {
+            val cumulativeEp = mappings.prequelEpisodeOffset + episodeNum
+            addLookup("series", "kitsu:${mappings.combinedRootKitsuId}:$cumulativeEp", 80)
+        }
+
+        // 2. IMDb / TVDB lookups (respecting inferredSeasonNumber when ani.zip omits seasonNumber, e.g. Sailor Moon Crystal S3!)
         val imdb = mappings.imdbId ?: return@buildList
         if (isMovie) {
-            add(StreamLookup("movie", imdb))
+            addLookup("movie", imdb, 0)
             return@buildList
         }
         val episode = mappings.episodes.firstOrNull { it.episodeNumber == episodeNum }
-        val season = episode?.seasonNumber ?: mappings.episodes.firstOrNull()?.seasonNumber ?: 1
-        val number = episode?.tvdbEpisodeNumber ?: episodeNum
-        add(StreamLookup("series", "$imdb:$season:$number"))
-        val absolute = episode?.absoluteEpisodeNumber
-        if (absolute != null && (season != 1 || absolute != number)) {
-            add(StreamLookup("series", "$imdb:1:$absolute", -300))
+        val defaultMappingSeason = mappings.episodes.firstOrNull { it.hasExplicitSeason }?.seasonNumber
+            ?: mappings.inferredSeasonNumber.takeIf { it > 1 }
+            ?: mappings.episodes.firstOrNull()?.seasonNumber
+            ?: 1
+        val season = when {
+            episode != null && episode.hasExplicitSeason -> episode.seasonNumber
+            mappings.inferredSeasonNumber > 1 -> mappings.inferredSeasonNumber
+            episode != null -> episode.seasonNumber
+            else -> defaultMappingSeason
         }
+        val number = episode?.tvdbEpisodeNumber ?: episodeNum
+        addLookup("series", "$imdb:$season:$number", 0)
+        val absolute = episode?.absoluteEpisodeNumber
+            ?: (mappings.prequelEpisodeOffset + episodeNum).takeIf { mappings.prequelEpisodeOffset > 0 }
+        if (absolute != null && (season != 1 || absolute != number)) {
+            addLookup("series", "$imdb:1:$absolute", -300)
+        }
+    }
+
+    private val explicitFileSeasonEpRegex = Regex(
+        "(?i)(?:\\bs0*(\\d{1,2})\\s*e0*(\\d{1,3})\\b|\\bseason\\s*0*(\\d{1,2})(?!\\s*[-~]\\s*(?:s?0*\\d))\\s*(?:/|[-_:]|\\be|ep\\.?\\s*)\\s*0*(\\d{1,3})\\b)"
+    )
+
+    internal fun isMismatchedSeasonFile(
+        fileLine: String,
+        expectedSeason: Int,
+        expectedAbsoluteEpisode: Int?
+    ): Boolean {
+        if (expectedSeason <= 1 || fileLine.isBlank()) return false
+        val match = explicitFileSeasonEpRegex.find(fileLine) ?: return false
+        val fileSeason = (match.groupValues[1].ifEmpty { match.groupValues[3] }).toIntOrNull() ?: return false
+        val fileEp = (match.groupValues[2].ifEmpty { match.groupValues[4] }).toIntOrNull() ?: return false
+        if (fileSeason == expectedSeason) return false
+        // Allow S01E<absolute> when release group numbered multi-season anime continuously under S01
+        if (fileSeason == 1 && expectedAbsoluteEpisode != null && fileEp == expectedAbsoluteEpisode) return false
+        return true
     }
 
     private fun formatCleanSourceLabel(audioType: String, quality: String): String {

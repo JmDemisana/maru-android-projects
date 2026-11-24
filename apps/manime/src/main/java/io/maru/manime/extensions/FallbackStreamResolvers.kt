@@ -79,21 +79,23 @@ internal object FallbackStreamResolvers {
         preferredAudio: String,
         preferredQuality: String,
         trailerYoutubeId: String? = null,
-        externalLinks: List<ExternalLink> = emptyList()
+        externalLinks: List<ExternalLink> = emptyList(),
+        isAdult: Boolean = false
     ): List<StreamLink> = coroutineScope {
         val cleanTitles = titles
             .flatMap { listOf(it, cleanAnimeTitle(it)) }
             .map { it.trim() }
             .filter { it.length >= 2 }
             .distinctBy { normalizeKey(it) }
-            .take(6)
+            .take(8)
         if (cleanTitles.isEmpty()) return@coroutineScope emptyList()
 
+        val isAdultOrEcchi = isAdult || isEcchi
         val displayTitle = cleanTitles.first()
         val tasks = buildList {
-            // 1. Uncensored Ecchi -> Sukebei Nyaa (Art - Anime c=1_1)
-            if (isEcchi) {
-                for (t in cleanTitles.take(3)) {
+            // 1. Uncensored Adult / Ecchi -> Sukebei Nyaa (Art - Anime c=1_1) using Romanized titles first
+            if (isAdultOrEcchi) {
+                for (t in cleanTitles.take(4)) {
                     val cleanBase = cleanAnimeTitle(t).ifBlank { t }
                     add(async(Dispatchers.IO) {
                         searchNyaaRss(
@@ -114,27 +116,29 @@ internal object FallbackStreamResolvers {
 
             // 2. Nyaa RSS (main anime index):
             // Catches English-translated anime (c=1_2) and general anime (c=1_0), or all categories (c=0_0) for concerts
-            val nyaaCategories = when {
-                isMusicOrConcert -> listOf("0_0")
-                else -> listOf("1_2", "1_0")
-            }
-            for (t in cleanTitles.take(3)) {
-                val cleanBase = cleanAnimeTitle(t).ifBlank { t }
-                for (cat in nyaaCategories) {
-                    add(async(Dispatchers.IO) {
-                        searchNyaaRss(
-                            bases = NYAA_BASES,
-                            category = cat,
-                            queryTitle = cleanBase,
-                            allTitles = cleanTitles,
-                            episodeNum = episodeNum,
-                            isStandalone = isStandalone || isMusicOrConcert,
-                            isAdultOrEcchi = isEcchi,
-                            preferredAudio = preferredAudio,
-                            preferredQuality = preferredQuality,
-                            sourceLabelPrefix = if (isMusicOrConcert) "Concert / MV Archive" else if (isEcchi) "Ecchi / Archive" else "Archive"
-                        )
-                    })
+            if (!isAdult) {
+                val nyaaCategories = when {
+                    isMusicOrConcert -> listOf("0_0")
+                    else -> listOf("1_2", "1_0")
+                }
+                for (t in cleanTitles.take(3)) {
+                    val cleanBase = cleanAnimeTitle(t).ifBlank { t }
+                    for (cat in nyaaCategories) {
+                        add(async(Dispatchers.IO) {
+                            searchNyaaRss(
+                                bases = NYAA_BASES,
+                                category = cat,
+                                queryTitle = cleanBase,
+                                allTitles = cleanTitles,
+                                episodeNum = episodeNum,
+                                isStandalone = isStandalone || isMusicOrConcert,
+                                isAdultOrEcchi = isEcchi,
+                                preferredAudio = preferredAudio,
+                                preferredQuality = preferredQuality,
+                                sourceLabelPrefix = if (isMusicOrConcert) "Concert / MV Archive" else if (isEcchi) "Ecchi / Archive" else "Archive"
+                            )
+                        })
+                    }
                 }
             }
 
@@ -609,10 +613,10 @@ internal object FallbackStreamResolvers {
     }
 
     private fun normalizeKey(s: String): String =
-        s.lowercase().filter { it.isLetterOrDigit() }
+        s.replace('×', 'x').replace('✕', 'x').lowercase().filter { it.isLetterOrDigit() }
 
     private fun normalizeWords(s: String): Set<String> =
-        s.lowercase().split(Regex("[^a-z0-9]+")).filter { it.isNotBlank() }.toSet()
+        s.replace('×', 'x').replace('✕', 'x').lowercase().split(Regex("[^a-z0-9]+")).filter { it.isNotBlank() }.toSet()
 
     private fun detectFallbackQuality(raw: String): String {
         val lower = raw.lowercase()

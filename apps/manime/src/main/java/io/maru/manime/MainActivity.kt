@@ -131,7 +131,11 @@ fun AppNavigation(prefs: MAnimePrefs) {
     val anilistUsername = session?.username.orEmpty()
     val scoreFormat by prefs.anilistScoreFormat.collectAsStateWithLifecycle(initialValue = "POINT_100")
     val reportProgress by prefs.reportProgress.collectAsStateWithLifecycle(initialValue = true)
+    val trackWatchedPercent by prefs.trackWatchedPercent.collectAsStateWithLifecycle(initialValue = 80)
     val rememberPosition by prefs.rememberPosition.collectAsStateWithLifecycle(initialValue = true)
+    val playbackSpeed by prefs.playbackSpeed.collectAsStateWithLifecycle(initialValue = 1.0f)
+    val allowCellularDownload by prefs.allowCellularDownload.collectAsStateWithLifecycle(initialValue = false)
+    val seedDownloadOnWifi by prefs.seedDownloadOnWifi.collectAsStateWithLifecycle(initialValue = false)
     val preferredAudio by prefs.preferredAudio.collectAsStateWithLifecycle(initialValue = "SUB")
     val preferredQuality by prefs.preferredQuality.collectAsStateWithLifecycle(initialValue = "1080p")
     val autoSkipIntro by prefs.autoSkipIntro.collectAsStateWithLifecycle(initialValue = false)
@@ -140,6 +144,7 @@ fun AppNavigation(prefs: MAnimePrefs) {
     val subtitleSize by prefs.subtitleSize.collectAsStateWithLifecycle(initialValue = "MEDIUM")
     val persistentDurationLine by prefs.persistentDurationLine.collectAsStateWithLifecycle(initialValue = false)
     val hideNsfwPreference by prefs.hideNsfwContent.collectAsStateWithLifecycle(initialValue = true)
+    val doNotTrackNsfw by prefs.doNotTrackNsfw.collectAsStateWithLifecycle(initialValue = false)
     val nsfwAnilistAccountId by prefs.nsfwAnilistAccountId.collectAsStateWithLifecycle(initialValue = null)
     val contentOptions = session?.contentOptions
     val canShowNsfwContent = anilistToken.isNotBlank() && contentOptions?.displayAdultContent == true
@@ -279,11 +284,25 @@ fun AppNavigation(prefs: MAnimePrefs) {
     var activityLoadFailed by remember(anilistToken) { mutableStateOf(false) }
 
     var selectedRecCategory by rememberSaveable { mutableStateOf("For You") }
+    LaunchedEffect(hideNsfwContent, selectedRecCategory) {
+        if (hideNsfwContent && selectedRecCategory == HENTAI_BROWSE_CATEGORY) {
+            selectedRecCategory = "For You"
+        }
+    }
     var recommendations by remember(accountKey, selectedRecCategory) { mutableStateOf<List<AnimeMedia>>(emptyList()) }
     var isRecLoading by remember(accountKey, selectedRecCategory) { mutableStateOf(true) }
     var recLoadFailed by remember(accountKey, selectedRecCategory) { mutableStateOf(false) }
     var recRefresh by remember { mutableIntStateOf(0) }
     val recommendationSeeds = if (selectedRecCategory == "For You") watchingList.take(12).map { it.mediaId } else emptyList()
+    val hentaiRecommendationSeeds = remember(mergedLists, selectedRecCategory) {
+        if (selectedRecCategory != HENTAI_BROWSE_CATEGORY) emptyList()
+        else mergedLists.values.asSequence().flatten()
+            .filter { isExplicitAdultAnime(it.isAdult, it.genres) }
+            .map { it.mediaId }
+            .distinct()
+            .take(12)
+            .toList()
+    }
     val waitingForSeeds = selectedRecCategory == "For You" && isProfileLoading && recommendationSeeds.isEmpty()
 
     LaunchedEffect(anilistToken) {
@@ -330,12 +349,18 @@ fun AppNavigation(prefs: MAnimePrefs) {
     }
 
     val isSearchTabActive = selectedScreen == NavigationScreen.SEARCH
-    LaunchedEffect(isSearchTabActive, accountKey, selectedRecCategory, recommendationSeeds, waitingForSeeds, recRefresh) {
+    LaunchedEffect(isSearchTabActive, accountKey, selectedRecCategory, recommendationSeeds, hentaiRecommendationSeeds, waitingForSeeds, recRefresh, hideNsfwContent) {
         if (!isSearchTabActive || waitingForSeeds) return@LaunchedEffect
+        if (selectedRecCategory == HENTAI_BROWSE_CATEGORY && hideNsfwContent) return@LaunchedEffect
         isRecLoading = true
         recLoadFailed = false
         val result = loadAniList {
             when (selectedRecCategory) {
+                HENTAI_BROWSE_CATEGORY -> AniListClient.browseHentaiSuggestions(
+                    seedMediaIds = hentaiRecommendationSeeds,
+                    perPage = 40,
+                    token = anilistToken.ifBlank { null }
+                )
                 "For You" -> {
                     if (recommendationSeeds.isEmpty()) AniListClient.getTrending(36)
                     else AniListClient.getRecommendations(recommendationSeeds)
@@ -669,6 +694,7 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     anilistToken = anilistToken,
                                     browseItems = recommendations.filterNsfw(hideNsfwContent),
                                     hideNsfwContent = hideNsfwSearch,
+                                    nsfwEnabled = !hideNsfwContent,
                                     isBrowseLoading = isRecLoading,
                                     browseLoadFailed = recLoadFailed,
                                     onRetryBrowse = { recRefresh++ },
@@ -689,6 +715,8 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     hideNsfwContent = hideNsfwContent,
                                     canShowNsfwContent = canShowNsfwContent,
                                     onToggleHideNsfwContent = { value -> scope.launch { prefs.setHideNsfwContent(value) } },
+                                    doNotTrackNsfw = doNotTrackNsfw,
+                                    onToggleDoNotTrackNsfw = { value -> scope.launch { prefs.setDoNotTrackNsfw(value) } },
                                     nsfwAnilistAccountId = nsfwAnilistAccountId,
                                     onSelectNsfwAnilistAccount = { accountId -> scope.launch { prefs.setNsfwAnilistAccountId(accountId) } },
                                     pendingSyncCount = accountPendingCount,
@@ -701,10 +729,16 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     },
                                     offlineCount = completedDownloads.size,
                                     offlineTotalMb = offlineTotalMb,
+                                    allowCellularDownload = allowCellularDownload,
+                                    onToggleAllowCellularDownload = { scope.launch { prefs.setAllowCellularDownload(it) } },
+                                    seedDownloadOnWifi = seedDownloadOnWifi,
+                                    onToggleSeedDownloadOnWifi = { scope.launch { prefs.setSeedDownloadOnWifi(it) } },
                                     preferredAudio = preferredAudio,
                                     onSelectPreferredAudio = { scope.launch { prefs.setPreferredAudio(it) } },
                                     preferredQuality = preferredQuality,
                                     onSelectPreferredQuality = { scope.launch { prefs.setPreferredQuality(it) } },
+                                    playbackSpeed = playbackSpeed,
+                                    onSelectPlaybackSpeed = { scope.launch { prefs.setPlaybackSpeed(it) } },
                                     autoSkipIntro = autoSkipIntro,
                                     onToggleAutoSkipIntro = { scope.launch { prefs.setAutoSkipIntro(it) } },
                                     swipeGesturesEnabled = swipeGesturesEnabled,
@@ -717,6 +751,8 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     onSelectSubtitleSize = { scope.launch { prefs.setSubtitleSize(it) } },
                                     reportProgress = reportProgress,
                                     onToggleReportProgress = { scope.launch { prefs.setReportProgress(it) } },
+                                    trackWatchedPercent = trackWatchedPercent,
+                                    onSelectTrackWatchedPercent = { scope.launch { prefs.setTrackWatchedPercent(it) } },
                                     rememberPosition = rememberPosition,
                                     onToggleRememberPosition = { scope.launch { prefs.setRememberPosition(it) } },
                                     onLoginClick = { openAuthDialog(clearCookies = false) },

@@ -85,6 +85,7 @@ object KnownDubRegistry {
         val toProbe = candidates
             .filter { media ->
                 media.mediaId > 0 &&
+                    !isExplicitAdultAnime(media.isAdult, media.genres) &&
                     !media.hasEnglishDub &&
                     media.mediaId !in _dubbedIds.value &&
                     !media.status.equals("NOT_YET_RELEASED", ignoreCase = true) &&
@@ -101,7 +102,8 @@ object KnownDubRegistry {
                         anilistId = media.mediaId,
                         animeTitle = media.title,
                         episodeNum = 1,
-                        isMovie = media.format.equals("MOVIE", ignoreCase = true)
+                        isMovie = media.format.equals("MOVIE", ignoreCase = true),
+                        altTitles = media.candidateTitlesForStream
                     )
                     probedSessionMap[media.mediaId] = status.hasStreamDubOrDual
                     persistedTimestampMap[media.mediaId] = System.currentTimeMillis()

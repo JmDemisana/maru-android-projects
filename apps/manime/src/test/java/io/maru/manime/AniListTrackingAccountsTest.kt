@@ -19,6 +19,14 @@ class AniListTrackingAccountsTest {
     }
 
     @Test
+    fun doNotTrackNsfwSuppressesNsfwTrackingWhilePreservingSafeAnimeTracking() {
+        val tracking = AniListTrackingAccounts(main, adult, listOf(main, adult), doNotTrackNsfw = true)
+
+        assertEquals(main, tracking.forTitle(isNsfw = false))
+        assertNull(tracking.forTitle(isNsfw = true))
+    }
+
+    @Test
     fun queuedRemovalKeepsItsAccountAfterRouteAndCredentialsChange() {
         val updatedAccount = adult.copy(username = "Renamed", token = "new-token", scoreFormat = "POINT_10")
         val queued = LocalLibraryStore.parseQueueJson(

@@ -277,7 +277,9 @@ private fun EpisodePlayerScreen(
     var doubleTapTick by remember { mutableIntStateOf(0) }
 
     val reportProgress by prefs.reportProgress.collectAsState(initial = true)
+    val trackWatchedPercent by prefs.trackWatchedPercent.collectAsState(initial = 80)
     val rememberPosition by prefs.rememberPosition.collectAsState(initial = true)
+    val savedPlaybackSpeed by prefs.playbackSpeed.collectAsState(initial = 1.0f)
     val autoSkipIntro by prefs.autoSkipIntro.collectAsState(initial = false)
     val swipeGesturesEnabled by prefs.swipeGesturesEnabled.collectAsState(initial = true)
     val subtitleBlackFill by prefs.subtitleBlackFill.collectAsState(initial = true)
@@ -294,6 +296,7 @@ private fun EpisodePlayerScreen(
     val latestRememberPosition by rememberUpdatedState(rememberPosition)
     val latestWatchedCallback by rememberUpdatedState(onEpisodeWatched)
     val latestReportProgress by rememberUpdatedState(reportProgress)
+    val latestTrackWatchedPercent by rememberUpdatedState(trackWatchedPercent)
     val latestMedia by rememberUpdatedState(media)
     val latestSwipeEnabled by rememberUpdatedState(swipeGesturesEnabled)
 
@@ -318,14 +321,14 @@ private fun EpisodePlayerScreen(
         val shouldSyncRemote = latestReportProgress
         persistenceScope.launch {
             val accounts = prefs.trackingAccounts.first()
-            LocalLibraryStore.recordEpisodeWatchedAt80Percent(
+            val recorded = LocalLibraryStore.recordEpisodeWatchedAt80Percent(
                 context = context.applicationContext,
                 media = snapshot,
                 episodeNum = episodeNum,
                 reportProgress = shouldSyncRemote && (snapshot.hasKnownAdultRating || accounts.nsfw == null),
                 accounts = accounts
             )
-            if (isAttached) {
+            if (recorded && isAttached) {
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
                     latestWatchedCallback(episodeNum)
                 }
@@ -341,11 +344,20 @@ private fun EpisodePlayerScreen(
             setAudioAttributes(AudioAttributes.DEFAULT, true)
             setHandleAudioBecomingNoisy(true)
             playWhenReady = true
+            playbackParameters = PlaybackParameters(playbackSpeed)
             trackSelectionParameters = trackSelectionParameters.buildUpon()
                 .setPreferredAudioLanguage(if (activeAudioMode == "DUB") "en" else "ja")
                 .setPreferredTextLanguage("en")
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, activeAudioMode == "DUB")
                 .build()
+        }
+    }
+
+    LaunchedEffect(savedPlaybackSpeed) {
+        val clamped = savedPlaybackSpeed.coerceIn(0.5f, 3.0f)
+        playbackSpeed = clamped
+        if (exoPlayer.playbackParameters.speed != clamped) {
+            exoPlayer.playbackParameters = PlaybackParameters(clamped)
         }
     }
 
@@ -414,6 +426,7 @@ private fun EpisodePlayerScreen(
             if (saved >= 10_000L) saved else C.TIME_UNSET
         }
         exoPlayer.setMediaSource(source, startMs)
+        exoPlayer.playbackParameters = PlaybackParameters(playbackSpeed)
         exoPlayer.prepare()
         exoPlayer.playWhenReady = if (castController.isConnected) false else playAfterSwitch
     }
@@ -503,7 +516,13 @@ private fun EpisodePlayerScreen(
         if (offlineOnly) return@LaunchedEffect
         launch {
             try {
-                val mappings = CrunchyrollStreamEngine.getAnimeMappings(media.mediaId, media.title, includeEpisodeMetadata = false)
+                val mappings = CrunchyrollStreamEngine.getAnimeMappings(
+                    anilistId = media.mediaId,
+                    fallbackTitle = media.title,
+                    includeEpisodeMetadata = false,
+                    candidateTitles = media.candidateTitlesForStream,
+                    isAdult = isExplicitAdultAnime(media.isAdult, media.genres)
+                )
                 skipIntervals = CrunchyrollStreamEngine.getAniSkipIntervals(mappings.malId, episodeNum)
             } catch (e: CancellationException) {
                 throw e
@@ -596,7 +615,8 @@ private fun EpisodePlayerScreen(
     var streamReload by remember { mutableIntStateOf(0) }
     val isExplicitAdult = isExplicitAdultAnime(media.isAdult, media.genres)
     var triedHstream by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
-    val canTryHstream = isExplicitAdult && !triedHstream && HstreamResolver.supports(media.mediaId, episodeNum)
+    val canTryHstream = isExplicitAdult && !triedHstream &&
+        HstreamResolver.supports(media.mediaId, episodeNum, media.candidateTitlesForStream)
     LaunchedEffect(streamReload) {
         try {
             isResolvingStreams = true
@@ -607,6 +627,9 @@ private fun EpisodePlayerScreen(
             triedHstream = false
             resetPlayback()
             rankedStreams = emptyList()
+            val loadSpeed = async {
+                prefs.playbackSpeed.first().coerceIn(0.5f, 3.0f)
+            }
             val loadPosition = async {
                 if (savedPositionMs == null && prefs.rememberPosition.first()) {
                     prefs.getPositionFlow(media.mediaId, episodeNum).first().coerceAtLeast(0) * 1000L
@@ -615,6 +638,9 @@ private fun EpisodePlayerScreen(
             val offlineEntry = if (skipOffline) null else {
                 TorrentStreamService.getCompletedOfflineEpisode(context, media.mediaId, episodeNum)
             }
+            val resolvedSpeed = loadSpeed.await()
+            playbackSpeed = resolvedSpeed
+            exoPlayer.playbackParameters = PlaybackParameters(resolvedSpeed)
             if (savedPositionMs == null) savedPositionMs = loadPosition.await() ?: 0L
             if (offlineEntry != null) {
                 isOfflinePlayback = true
@@ -727,7 +753,7 @@ private fun EpisodePlayerScreen(
             return@LaunchedEffect
         }
         triedHstream = true
-        val sources = HstreamResolver.resolve(media.mediaId, episodeNum)
+        val sources = HstreamResolver.resolve(media.mediaId, episodeNum, media.candidateTitlesForStream)
         if (sources.isNotEmpty()) {
             rankedStreams = (rankedStreams + sources).distinctBy { it.playbackIdentity }
             playStream(sources.first())
@@ -929,10 +955,11 @@ private fun EpisodePlayerScreen(
                 currentPosition.longValue = target
             }
 
-            // Mark watched at 80% (even offline or in guest mode!)
-            if (duration > 45_000L && !hasScrobbled80Percent) {
+            // Mark watched at configured N% threshold (default 80%; works offline & in guest mode!)
+            if (duration > 15_000L && !hasScrobbled80Percent) {
+                val threshold = latestTrackWatchedPercent.coerceIn(10, 100) / 100.0
                 val ratio = position.toDouble() / duration.toDouble()
-                if (ratio >= 0.80) {
+                if (ratio >= threshold) {
                     markWatched()
                 }
             }
@@ -1687,6 +1714,7 @@ private fun EpisodePlayerScreen(
                                                 onClick = {
                                                     playbackSpeed = spd
                                                     exoPlayer.playbackParameters = PlaybackParameters(spd)
+                                                    persistenceScope.launch { prefs.setPlaybackSpeed(spd) }
                                                 },
                                                 shape = RoundedCornerShape(4.dp),
                                                 color = if (sel) CrunchyOrange else CrunchyCardBg,

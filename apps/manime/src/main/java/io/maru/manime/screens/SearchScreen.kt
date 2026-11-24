@@ -1,5 +1,7 @@
 package io.maru.manime.screens
 
+import android.os.SystemClock
+import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -40,6 +42,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
+internal const val HENTAI_BROWSE_CATEGORY = "Hentai"
+internal const val HENTAI_CONFIRM_TOAST_MESSAGE =
+    "Press this pill three times in a row to confirm that you want to see NSFW Anime suggestions."
+
+internal fun nextHentaiConfirmTapState(
+    previousCount: Int,
+    lastTapAtMs: Long,
+    nowMs: Long,
+    maxIntervalMs: Long = 4_500L
+): Pair<Int, Boolean> {
+    val withinStreak = previousCount > 0 && lastTapAtMs > 0L && (nowMs - lastTapAtMs) in 0L..maxIntervalMs
+    val nextCount = if (withinStreak) previousCount + 1 else 1
+    return if (nextCount >= 3) 0 to true else nextCount to false
+}
+
 private val browseCategories = listOf(
     "For You", "Simulcast Calendar", "Trending Now", "Romance & CGDCT", "Music & Idols",
     "Slice of Life", "Action & Shounen", "Sci-Fi & Cyberpunk", "Fantasy", "Comedy"
@@ -51,6 +68,7 @@ fun SearchScreen(
     anilistToken: String,
     browseItems: List<AnimeMedia> = emptyList(),
     hideNsfwContent: Boolean = true,
+    nsfwEnabled: Boolean = !hideNsfwContent,
     isBrowseLoading: Boolean = false,
     browseLoadFailed: Boolean = false,
     onRetryBrowse: () -> Unit = {},
@@ -69,6 +87,14 @@ fun SearchScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var searchUsers by rememberSaveable { mutableStateOf(false) }
     var dubbedOnly by rememberSaveable { mutableStateOf(false) }
+    var hentaiConfirmTapCount by remember { mutableIntStateOf(0) }
+    var lastHentaiTapAtMs by remember { mutableLongStateOf(0L) }
+    var activeHentaiToast by remember { mutableStateOf<Toast?>(null) }
+
+    fun resetHentaiConfirmStreak() {
+        hentaiConfirmTapCount = 0
+        lastHentaiTapAtMs = 0L
+    }
     val term = query.trim()
     val token = anilistToken.takeUnless { searchUsers || it.isBlank() }
     var submitCount by remember(term, searchUsers) { mutableIntStateOf(0) }
@@ -83,6 +109,12 @@ fun SearchScreen(
     fun dismissKeyboard() {
         focusManager.clearFocus()
         keyboard?.hide()
+    }
+
+    LaunchedEffect(term.isNotEmpty(), searchUsers, nsfwEnabled) {
+        if (term.isNotEmpty() || searchUsers || !nsfwEnabled) {
+            resetHentaiConfirmStreak()
+        }
     }
 
     LaunchedEffect(term, searchUsers, token, submitCount, hideNsfwContent) {
@@ -193,19 +225,28 @@ fun SearchScreen(
                 CrunchyChip(
                     label = "Anime",
                     selected = !searchUsers,
-                    onClick = { searchUsers = false }
+                    onClick = {
+                        resetHentaiConfirmStreak()
+                        searchUsers = false
+                    }
                 )
                 CrunchyChip(
                     label = "AniList Users",
                     selected = searchUsers,
-                    onClick = { searchUsers = true }
+                    onClick = {
+                        resetHentaiConfirmStreak()
+                        searchUsers = true
+                    }
                 )
                 if (!searchUsers) {
                     CrunchyChip(
                         label = "Dubbed Only",
                         selected = dubbedOnly,
                         accent = CrunchyTeal,
-                        onClick = { dubbedOnly = !dubbedOnly }
+                        onClick = {
+                            resetHentaiConfirmStreak()
+                            dubbedOnly = !dubbedOnly
+                        }
                     )
                 }
             }
@@ -232,15 +273,48 @@ fun SearchScreen(
                                         label = category,
                                         selected = category == selectedBrowseCategory,
                                         onClick = {
+                                            resetHentaiConfirmStreak()
                                             if (category != selectedBrowseCategory) onSelectBrowseCategory(category)
                                         }
                                     )
+                                }
+                                if (nsfwEnabled) {
+                                    item(key = "browse_hentai_pill") {
+                                        val isHentaiSelected = selectedBrowseCategory == HENTAI_BROWSE_CATEGORY
+                                        CrunchyChip(
+                                            label = HENTAI_BROWSE_CATEGORY,
+                                            selected = isHentaiSelected,
+                                            onClick = {
+                                                if (isHentaiSelected) return@CrunchyChip
+                                                val now = SystemClock.elapsedRealtime()
+                                                val (nextCount, confirmed) = nextHentaiConfirmTapState(
+                                                    previousCount = hentaiConfirmTapCount,
+                                                    lastTapAtMs = lastHentaiTapAtMs,
+                                                    nowMs = now
+                                                )
+                                                hentaiConfirmTapCount = nextCount
+                                                lastHentaiTapAtMs = if (confirmed) 0L else now
+                                                activeHentaiToast?.cancel()
+                                                if (confirmed) {
+                                                    activeHentaiToast = null
+                                                    onSelectBrowseCategory(HENTAI_BROWSE_CATEGORY)
+                                                } else {
+                                                    activeHentaiToast = Toast.makeText(
+                                                        context,
+                                                        HENTAI_CONFIRM_TOAST_MESSAGE,
+                                                        Toast.LENGTH_SHORT
+                                                    ).also { it.show() }
+                                                }
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
 
                         item(span = { GridItemSpan(maxLineSpan) }, key = "browse_header_row") {
                             val titleText = when {
+                                selectedBrowseCategory == HENTAI_BROWSE_CATEGORY -> "NSFW Anime Suggestions"
                                 selectedBrowseCategory != "For You" -> selectedBrowseCategory
                                 isLoggedIn -> "For You, $username"
                                 hasLocalSeeds -> "Recommended From Your Watchlist"

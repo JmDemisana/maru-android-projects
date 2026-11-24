@@ -87,7 +87,8 @@ data class AnimeMedia(
     val startDateMonth: Int? = null,
     val startDateDay: Int? = null,
     val createdAt: Long? = null,
-    val hasKnownAdultRating: Boolean = true
+    val hasKnownAdultRating: Boolean = true,
+    val synonyms: List<String> = emptyList()
 ) {
     val releaseSortKey: Long
         get() {
@@ -105,21 +106,20 @@ data class AnimeMedia(
 
     val addedToListSortKey: Long
         get() = createdAt?.takeIf { it > 0 } ?: updatedAt?.takeIf { it > 0 } ?: listEntryId?.toLong() ?: 0L
-    val candidateTitlesForStream: List<String>
-        get() = buildList {
-            titleRomaji?.takeIf { it.isNotBlank() }?.let { add(it) }
-            titleNative?.takeIf { it.isNotBlank() }?.let { add(it) }
-            titleEnglish?.takeIf { it.isNotBlank() }?.let { add(it) }
-            if (title.isNotBlank()) add(title)
 
-            val snapshot = toList()
-            for (t in snapshot) {
-                val cleaned = cleanAnimeTitle(t)
-                if (cleaned.isNotBlank() && cleaned != t) {
-                    add(cleaned)
-                }
-            }
-        }.distinct()
+    /**
+     * Ordered candidate titles for stream providers (Stremio/Kitsu, Hstream, Sukebei/Nyaa, Cloudstream, Aniyomi).
+     * Providers overwhelmingly index anime and hentai by Romanized title rather than Western localized titles,
+     * so `titleRomaji` and its cleaned/prefix variants always lead before synonyms, native, and English titles.
+     */
+    val candidateTitlesForStream: List<String>
+        get() = buildProviderCandidateTitles(
+            titleRomaji = titleRomaji,
+            titleNative = titleNative,
+            titleEnglish = titleEnglish,
+            displayTitle = title,
+            synonyms = synonyms
+        )
 
     val isReleasing: Boolean get() = status.equals("RELEASING", ignoreCase = true)
 
@@ -181,12 +181,120 @@ data class ExternalLink(
 
 internal fun cleanAnimeTitle(raw: String): String {
     var s = raw.trim()
+    s = s.replace('×', 'x').replace('✕', 'x').replace('✖', 'x')
+    s = s.replace(Regex("[♥♡★☆♪♫♦♠♣]"), "")
     s = s.replace(Regex("(?i)\\s*\\((?:tv|ova|oad|ona|movie|special|specials|bd|preview|raw)\\)"), "")
     s = s.replace(Regex("(?i)\\s*:\\s*seasons?\\s*\\d+(?:-\\d+)?"), "")
-    s = s.replace(Regex("(?i)\\s+seasons?\\s*\\d+(?:-\\d+)?"), "")
+    s = s.replace(Regex("(?i)\\s+seasons?\\s*(?:[ivx]+|\\d+(?:-\\d+)?)"), "")
     s = s.replace(Regex("(?i)\\s+\\d+(?:st|nd|rd|th)\\s+season"), "")
+    s = s.replace(Regex("\\s+"), " ")
     s = s.replace(Regex("[\\s!?.:~-]+$"), "")
     return s.trim()
+}
+
+internal fun buildProviderCandidateTitles(
+    titleRomaji: String?,
+    titleNative: String?,
+    titleEnglish: String?,
+    displayTitle: String,
+    synonyms: List<String> = emptyList()
+): List<String> {
+    val result = mutableListOf<String>()
+    fun pushWithVariants(raw: String?) {
+        val trimmed = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return
+        result += trimmed
+        val symbolNormalized = trimmed
+            .replace('×', 'x').replace('✕', 'x')
+            .replace(Regex("[♥♡★☆♪♫]"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        if (symbolNormalized.isNotEmpty() && symbolNormalized != trimmed) {
+            result += symbolNormalized
+        }
+        val cleaned = cleanAnimeTitle(trimmed)
+        if (cleaned.isNotEmpty() && cleaned != trimmed) {
+            result += cleaned
+        }
+        val withoutTheAnimation = cleaned.replace(Regex("(?i)\\s+the\\s+animation$"), "").trim()
+        if (withoutTheAnimation.length >= 4 && withoutTheAnimation != cleaned) {
+            result += withoutTheAnimation
+        }
+        // Main Romaji/title prefix before subtitle separator (e.g. "Eroge!: H mo Game mo..." -> "Eroge!")
+        val prefix = symbolNormalized.split(':', '～', '~').firstOrNull()?.trim()
+            ?.let(::cleanAnimeTitle)
+        if (prefix != null && prefix.length >= 5 && !prefix.equals(cleaned, ignoreCase = true)) {
+            result += prefix
+        }
+    }
+
+    // 1. Romanized title & clean Romaji variants ALWAYS first
+    pushWithVariants(titleRomaji)
+    // 2. Latin/Romanized synonyms next (skipping Hangul/Cyrillic/Spanish clutter if non-ASCII non-Japanese)
+    val asciiSynonyms = synonyms.filter { syn -> syn.any { it in 'A'..'Z' || it in 'a'..'z' } }
+    for (syn in asciiSynonyms.take(4)) {
+        pushWithVariants(syn)
+    }
+    // 3. Native Japanese title (for Nyaa/Sukebei raw/BD packs)
+    pushWithVariants(titleNative)
+    // 4. English / Western localized title & display fallback last
+    pushWithVariants(titleEnglish)
+    if (!displayTitle.equals(titleEnglish, ignoreCase = true) && !displayTitle.equals(titleRomaji, ignoreCase = true)) {
+        pushWithVariants(displayTitle)
+    }
+
+    val seenLower = HashSet<String>()
+    return result.filter { seenLower.add(it.lowercase()) }
+}
+
+internal data class AniListSeasonContext(
+    val mediaId: Int,
+    val inferredSeasonNumber: Int = 1,
+    val seasonsSpanned: Int = 1,
+    val prequelEpisodeOffset: Int = 0,
+    val rootPrequelMediaId: Int? = null,
+    val directPrequelMediaId: Int? = null,
+    val directSequelMediaId: Int? = null,
+    val totalEpisodes: Int? = null
+)
+
+internal fun inferSeasonsSpannedFromTitle(vararg titles: String?): Int {
+    val rangeRegex = Regex("(?i)\\bseasons?\\s*(\\d+)\\s*[-~]\\s*(\\d+)\\b")
+    for (t in titles) {
+        if (t.isNullOrBlank()) continue
+        val m = rangeRegex.find(t) ?: continue
+        val start = m.groupValues[1].toIntOrNull() ?: continue
+        val end = m.groupValues[2].toIntOrNull() ?: continue
+        if (end >= start && end - start in 1..10) return end - start + 1
+    }
+    return 1
+}
+
+internal fun extractExplicitSeasonFromTitle(vararg titles: String?): Int? {
+    val patterns = listOf(
+        Regex("(?i)\\bseason\\s*(\\d{1,2})\\b(?!\\s*[-~]\\s*\\d)"),
+        Regex("(?i)\\b(\\d{1,2})(?:st|nd|rd|th)\\s+season\\b"),
+        Regex("(?i)\\bs(\\d{1,2})\\b(?!\\s*[-~]\\s*(?:s?\\d))"),
+        Regex("(?i)\\bseason\\s*(ii|iii|iv|v|vi)\\b")
+    )
+    for (t in titles) {
+        if (t.isNullOrBlank()) continue
+        // Do not treat combined "Seasons 1-2" as single season 1
+        if (Regex("(?i)\\bseasons?\\s*\\d+\\s*[-~]\\s*\\d+").containsMatchIn(t)) continue
+        for (regex in patterns) {
+            val match = regex.find(t) ?: continue
+            val raw = match.groupValues[1].lowercase()
+            val num = when (raw) {
+                "ii" -> 2
+                "iii" -> 3
+                "iv" -> 4
+                "v" -> 5
+                "vi" -> 6
+                else -> raw.toIntOrNull()
+            }
+            if (num != null && num in 2..20) return num
+        }
+    }
+    return null
 }
 
 data class VoiceActor(
@@ -384,6 +492,13 @@ object AniListClient {
             if (g.isNotEmpty() && !g.equals("null", ignoreCase = true)) genres += g
         }
 
+        val synonyms = mutableListOf<String>()
+        val rawSynonyms = obj.optJSONArray("synonyms")
+        if (rawSynonyms != null) for (i in 0 until rawSynonyms.length()) {
+            val syn = rawSynonyms.optString(i, "").trim()
+            if (syn.isNotEmpty() && !syn.equals("null", ignoreCase = true)) synonyms += syn
+        }
+
         val mediaTags = mutableListOf<MediaTag>()
         val rawTags = obj.optJSONArray("tags")
         if (rawTags != null) for (i in 0 until rawTags.length()) {
@@ -471,7 +586,8 @@ object AniListClient {
             startDateMonth = startMonth,
             startDateDay = startDay,
             createdAt     = entryCreatedAt,
-            hasKnownAdultRating = obj.opt("isAdult") is Boolean
+            hasKnownAdultRating = obj.opt("isAdult") is Boolean,
+            synonyms      = synonyms
         )
     }
 
@@ -479,6 +595,7 @@ object AniListClient {
         id episodes format status season seasonYear meanScore averageScore isAdult siteUrl bannerImage
         startDate { year month day }
         title { userPreferred english romaji native }
+        synonyms
         coverImage { large color }
         nextAiringEpisode { episode airingAt }
         externalLinks { id url site type language }
@@ -927,6 +1044,116 @@ object AniListClient {
         )
     }
 
+    private val seasonContextCache = ConcurrentHashMap<Int, AniListSeasonContext>()
+
+    internal suspend fun getSeasonContext(mediaId: Int): AniListSeasonContext {
+        if (mediaId <= 0) return AniListSeasonContext(mediaId)
+        seasonContextCache[mediaId]?.let { return it }
+
+        data class NodeInfo(
+            val id: Int,
+            val format: String?,
+            val episodes: Int?,
+            val romaji: String?,
+            val english: String?,
+            val prequelId: Int?,
+            val sequelId: Int?
+        )
+
+        val seriesFormats = setOf("TV", "TV_SHORT", "ONA", "OVA")
+        suspend fun fetchNode(id: Int): NodeInfo? = try {
+            val data = query("""
+                query (${'$'}id: Int!) {
+                  Media(id: ${'$'}id, type: ANIME) {
+                    id format episodes
+                    title { romaji english }
+                    relations {
+                      edges {
+                        relationType
+                        node { id type format episodes title { romaji english } }
+                      }
+                    }
+                  }
+                }
+            """.trimIndent(), mapOf("id" to id))
+            val m = data.optJSONObject("Media") ?: return null
+            val titleObj = m.optJSONObject("title")
+            val edges = m.optJSONObject("relations")?.optJSONArray("edges")
+            var prequelId: Int? = null
+            var sequelId: Int? = null
+            if (edges != null) {
+                for (i in 0 until edges.length()) {
+                    val edge = edges.optJSONObject(i) ?: continue
+                    val rel = edge.optNullableString("relationType")?.uppercase() ?: continue
+                    val node = edge.optJSONObject("node") ?: continue
+                    if (!node.optNullableString("type").equals("ANIME", ignoreCase = true)) continue
+                    val fmt = node.optNullableString("format")?.uppercase()
+                    val nId = node.optInt("id")
+                    if (nId <= 0) continue
+                    if (rel == "PREQUEL" && fmt in seriesFormats && prequelId == null) prequelId = nId
+                    if (rel == "SEQUEL" && fmt in seriesFormats && sequelId == null) sequelId = nId
+                }
+            }
+            NodeInfo(
+                id = id,
+                format = m.optNullableString("format")?.uppercase(),
+                episodes = m.optInt("episodes").takeIf { it > 0 },
+                romaji = titleObj?.optNullableString("romaji"),
+                english = titleObj?.optNullableString("english"),
+                prequelId = prequelId,
+                sequelId = sequelId
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+        val start = fetchNode(mediaId) ?: return AniListSeasonContext(mediaId)
+        val selfSpanned = inferSeasonsSpannedFromTitle(start.english, start.romaji)
+        val explicitSelfSeason = extractExplicitSeasonFromTitle(start.english, start.romaji)
+        if (start.format !in seriesFormats) {
+            val ctx = AniListSeasonContext(
+                mediaId = mediaId,
+                inferredSeasonNumber = explicitSelfSeason ?: 1,
+                seasonsSpanned = selfSpanned,
+                totalEpisodes = start.episodes
+            )
+            seasonContextCache[mediaId] = ctx
+            return ctx
+        }
+
+        val chain = mutableListOf<NodeInfo>()
+        val visited = hashSetOf(mediaId)
+        var cursorId = start.prequelId
+        while (cursorId != null && visited.add(cursorId) && chain.size < 6) {
+            val node = fetchNode(cursorId) ?: break
+            if (node.format !in seriesFormats) break
+            chain += node
+            cursorId = node.prequelId
+        }
+
+        val orderedPrequels = chain.asReversed()
+        val prequelSeasons = orderedPrequels.sumOf { inferSeasonsSpannedFromTitle(it.english, it.romaji) }
+        val prequelEpisodes = if (orderedPrequels.isNotEmpty() && orderedPrequels.all { (it.episodes ?: 0) > 0 }) {
+            orderedPrequels.sumOf { it.episodes ?: 0 }
+        } else 0
+        val inferredSeason = explicitSelfSeason ?: (1 + prequelSeasons).coerceAtLeast(1)
+
+        val ctx = AniListSeasonContext(
+            mediaId = mediaId,
+            inferredSeasonNumber = inferredSeason,
+            seasonsSpanned = selfSpanned,
+            prequelEpisodeOffset = prequelEpisodes,
+            rootPrequelMediaId = orderedPrequels.firstOrNull()?.id,
+            directPrequelMediaId = start.prequelId,
+            directSequelMediaId = start.sequelId,
+            totalEpisodes = start.episodes
+        )
+        seasonContextCache[mediaId] = ctx
+        return ctx
+    }
+
     suspend fun browseCategory(genre: String? = null, tag: String? = null, perPage: Int = 40): List<AnimeMedia> {
         val data = query("""
             query (${'$'}genre: String, ${'$'}tag: String, ${'$'}perPage: Int) {
@@ -936,6 +1163,41 @@ object AniListClient {
             }
         """, mapOf("genre" to genre, "tag" to tag, "perPage" to perPage))
         return parsePageMedia(data)
+    }
+
+    suspend fun browseHentaiSuggestions(
+        seedMediaIds: List<Int> = emptyList(),
+        perPage: Int = 40,
+        token: String? = null
+    ): List<AnimeMedia> {
+        val results = mutableListOf<AnimeMedia>()
+        val seen = mutableSetOf<Int>()
+
+        if (seedMediaIds.isNotEmpty()) {
+            runCatching {
+                val recs = getRecommendations(seedMediaIds.take(12))
+                for (item in recs) {
+                    if (isExplicitAdultAnime(item.isAdult, item.genres) && seen.add(item.mediaId)) {
+                        results += item
+                    }
+                }
+            }
+        }
+
+        val data = query("""
+            query (${'$'}perPage: Int) {
+              Page(page: 1, perPage: ${'$'}perPage) {
+                media(type: ANIME, isAdult: true, genre: "Hentai", sort: [TRENDING_DESC, POPULARITY_DESC, SCORE_DESC]) {
+                  ${mediaFields(includeDubCast = false)}
+                }
+              }
+            }
+        """.trimIndent(), mapOf("perPage" to perPage), token)
+
+        for (item in parsePageMedia(data)) {
+            if (seen.add(item.mediaId)) results += item
+        }
+        return results.take(perPage)
     }
 
     suspend fun getRecommendations(mediaIds: List<Int>): List<AnimeMedia> {

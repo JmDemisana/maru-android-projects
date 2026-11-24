@@ -25,29 +25,38 @@ class ExtensionRouter(
         .readTimeout(8, TimeUnit.SECONDS)
         .build()
 
-    private fun generateSearchQueries(title: String): List<String> {
+    private fun generateSearchQueries(titles: List<String>): List<String> {
         val queries = mutableListOf<String>()
-        val clean = title.replace("–", "-").replace("—", "-").replace(":", " ").replace(Regex("\\s+"), " ").trim()
-        queries.add(clean)
+        for (title in titles) {
+            if (title.isBlank()) continue
+            val clean = title
+                .replace('×', 'x').replace('✕', 'x')
+                .replace(Regex("[♥♡★☆♪♫]"), "")
+                .replace("–", "-").replace("—", "-")
+                .replace(":", " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (clean.isNotBlank()) queries.add(clean)
 
-        // Split by main title before dash or colon
-        val baseTitle = title.split(":", "-", "–", "—").firstOrNull()?.trim()
-        if (!baseTitle.isNullOrBlank() && !queries.contains(baseTitle)) {
-            queries.add(baseTitle)
-        }
+            // Split by main title before dash or colon
+            val baseTitle = title.split(":", "-", "–", "—").firstOrNull()?.trim()
+            if (!baseTitle.isNullOrBlank()) {
+                queries.add(baseTitle)
+            }
 
-        // Alphanumeric only
-        val alphaOnly = title.replace(Regex("[^a-zA-Z0-9 ]"), " ").replace(Regex("\\s+"), " ").trim()
-        if (alphaOnly.isNotBlank() && !queries.contains(alphaOnly)) {
-            queries.add(alphaOnly)
+            // Alphanumeric only
+            val alphaOnly = clean.replace(Regex("[^a-zA-Z0-9 ]"), " ").replace(Regex("\\s+"), " ").trim()
+            if (alphaOnly.isNotBlank()) {
+                queries.add(alphaOnly)
+            }
         }
         return queries.distinct()
     }
 
-    // Helper to resolve Kitsu ID from anime title
-    private suspend fun resolveKitsuId(animeTitle: String): String? = withContext(Dispatchers.IO) {
-        val searchVariants = generateSearchQueries(animeTitle)
-        for (query in searchVariants) {
+    // Helper to resolve Kitsu ID from anime titles (prioritizing Romanized titles)
+    private suspend fun resolveKitsuId(titles: List<String>): String? = withContext(Dispatchers.IO) {
+        val searchVariants = generateSearchQueries(titles)
+        for (query in searchVariants.take(6)) {
             try {
                 val encoded = URLEncoder.encode(query, "UTF-8")
                 val url = "https://kitsu.io/api/edge/anime?filter[text]=$encoded&page[limit]=1"
@@ -97,9 +106,11 @@ class ExtensionRouter(
         episodeNum: Int,
         imdbId: String? = null,
         kitsuId: String? = null,
+        altTitles: List<String> = emptyList(),
         onStreamsUpdated: (List<StreamLink>) -> Unit = {}
     ): List<StreamLink> = coroutineScope {
         val syncResults = Collections.synchronizedList(mutableListOf<StreamLink>())
+        val prioritizedTitles = (altTitles + listOf(animeTitle)).filter { it.isNotBlank() }.distinct()
 
         fun pushResults(newLinks: List<StreamLink>) {
             if (newLinks.isEmpty()) return
@@ -115,8 +126,8 @@ class ExtensionRouter(
             }
         }
 
-        // 1. Resolve Kitsu ID asynchronously
-        val resolvedKitsuId = kitsuId ?: withTimeoutOrNull(3000) { resolveKitsuId(animeTitle) }
+        // 1. Resolve Kitsu ID asynchronously (prioritizing Romanized candidate titles)
+        val resolvedKitsuId = kitsuId ?: withTimeoutOrNull(3000) { resolveKitsuId(prioritizedTitles) }
 
         // 2. Query Stremio Addons
         val stremioAddons = prefs.stremioAddons.first()
@@ -190,7 +201,7 @@ class ExtensionRouter(
 
         // 3. Query Installed Cloudstream Plugins concurrently
         val installedCs = csClient.getInstalledPlugins()
-        val searchVariants = generateSearchQueries(animeTitle)
+        val searchVariants = generateSearchQueries(prioritizedTitles)
 
         val csDeferreds = installedCs.map { jar ->
             async(Dispatchers.IO) {

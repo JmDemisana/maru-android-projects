@@ -40,6 +40,8 @@ fun SettingsScreen(
     hideNsfwContent: Boolean = true,
     canShowNsfwContent: Boolean = false,
     onToggleHideNsfwContent: (Boolean) -> Unit = {},
+    doNotTrackNsfw: Boolean = false,
+    onToggleDoNotTrackNsfw: (Boolean) -> Unit = {},
     nsfwAnilistAccountId: Int? = null,
     onSelectNsfwAnilistAccount: (Int?) -> Unit = {},
     pendingSyncCount: Int = 0,
@@ -47,10 +49,16 @@ fun SettingsScreen(
     onSyncNow: () -> Unit = {},
     offlineCount: Int = 0,
     offlineTotalMb: Long = 0L,
+    allowCellularDownload: Boolean = false,
+    onToggleAllowCellularDownload: (Boolean) -> Unit = {},
+    seedDownloadOnWifi: Boolean = false,
+    onToggleSeedDownloadOnWifi: (Boolean) -> Unit = {},
     preferredAudio: String = "SUB",
     onSelectPreferredAudio: (String) -> Unit = {},
     preferredQuality: String = "1080p",
     onSelectPreferredQuality: (String) -> Unit = {},
+    playbackSpeed: Float = 1.0f,
+    onSelectPlaybackSpeed: (Float) -> Unit = {},
     autoSkipIntro: Boolean = false,
     onToggleAutoSkipIntro: (Boolean) -> Unit = {},
     swipeGesturesEnabled: Boolean = true,
@@ -63,6 +71,8 @@ fun SettingsScreen(
     onSelectSubtitleSize: (String) -> Unit = {},
     reportProgress: Boolean,
     onToggleReportProgress: (Boolean) -> Unit,
+    trackWatchedPercent: Int = 80,
+    onSelectTrackWatchedPercent: (Int) -> Unit = {},
     rememberPosition: Boolean,
     onToggleRememberPosition: (Boolean) -> Unit,
     onLoginClick: () -> Unit,
@@ -136,7 +146,7 @@ fun SettingsScreen(
                             )
                             Text(
                                 text = if (isLoggedIn) {
-                                    "Syncing watchlist & watched episodes at 80%"
+                                    "Syncing watchlist & watched episodes at ${trackWatchedPercent}%"
                                 } else {
                                     "Watchlists, progress & downloads work locally without signing in."
                                 },
@@ -328,6 +338,8 @@ fun SettingsScreen(
                 hideNsfwContent = hideNsfwContent,
                 canShowNsfwContent = canShowNsfwContent,
                 onToggleHideNsfwContent = onToggleHideNsfwContent,
+                doNotTrackNsfw = doNotTrackNsfw,
+                onToggleDoNotTrackNsfw = onToggleDoNotTrackNsfw,
                 nsfwAnilistAccountId = nsfwAnilistAccountId,
                 onSelectNsfwAnilistAccount = onSelectNsfwAnilistAccount
             )
@@ -437,12 +449,73 @@ fun SettingsScreen(
 
                     HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
 
+                    Text("Playback speed", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = MaruTextStrong)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectableGroup(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { spd ->
+                            SettingChoice("${spd}×", playbackSpeed == spd, Modifier.weight(1f)) {
+                                onSelectPlaybackSpeed(spd)
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
+
                     GlassFeatureRow(
-                        label = "Mark watched at 80% & queue offline sync",
+                        label = "Mark watched at ${trackWatchedPercent}% & queue offline sync",
                         subtitle = "Marks watched locally even offline and syncs to AniList once online",
                         checked = reportProgress,
                         onCheckedChange = onToggleReportProgress
                     )
+
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Track watched at percentage",
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaruTextStrong
+                            )
+                            Text(
+                                text = "${trackWatchedPercent}%",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = CrunchyOrange
+                            )
+                        }
+                        Slider(
+                            value = trackWatchedPercent.coerceIn(10, 100).toFloat(),
+                            onValueChange = { raw ->
+                                onSelectTrackWatchedPercent(raw.toInt().coerceIn(10, 100))
+                            },
+                            valueRange = 10f..100f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = CrunchyOrange,
+                                activeTrackColor = CrunchyOrange,
+                                inactiveTrackColor = CrunchyBorder
+                            )
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .selectableGroup(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(50, 75, 80, 90, 95).forEach { preset ->
+                                SettingChoice("${preset}%", trackWatchedPercent == preset, Modifier.weight(1f)) {
+                                    onSelectTrackWatchedPercent(preset)
+                                }
+                            }
+                        }
+                    }
 
                     HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
 
@@ -494,6 +567,19 @@ fun SettingsScreen(
                         lineHeight = 17.sp
                     )
                     HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
+                    GlassFeatureRow(
+                        label = "Allow Download with Cellular",
+                        subtitle = "Allow offline episode downloads over mobile data when Wi-Fi is unavailable",
+                        checked = allowCellularDownload,
+                        onCheckedChange = onToggleAllowCellularDownload
+                    )
+                    GlassFeatureRow(
+                        label = "Seed My Download on WiFi",
+                        subtitle = "Shares completed torrent pieces over Wi-Fi (using zero extra storage or mobile data) to keep rare and older anime alive and fast for everyone",
+                        checked = seedDownloadOnWifi,
+                        onCheckedChange = onToggleSeedDownloadOnWifi
+                    )
+                    HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
                     Text(
                         text = "Nanami Anime $versionName".trimEnd(),
                         fontSize = 13.sp,
@@ -513,13 +599,15 @@ private fun NsfwContentSettings(
     hideNsfwContent: Boolean,
     canShowNsfwContent: Boolean,
     onToggleHideNsfwContent: (Boolean) -> Unit,
+    doNotTrackNsfw: Boolean,
+    onToggleDoNotTrackNsfw: (Boolean) -> Unit,
     nsfwAnilistAccountId: Int?,
     onSelectNsfwAnilistAccount: (Int?) -> Unit
 ) {
     val hideContent = hideNsfwContent || !canShowNsfwContent
     val trackingAccounts = savedAccounts.filter { it.id > 0 }
     val selectedAccount = trackingAccounts.firstOrNull { it.id == nsfwAnilistAccountId }
-    val canSelectTrackingAccount = isLoggedIn && trackingAccounts.isNotEmpty()
+    val canSelectTrackingAccount = isLoggedIn && trackingAccounts.isNotEmpty() && !doNotTrackNsfw
     var accountMenuExpanded by remember(canSelectTrackingAccount) { mutableStateOf(false) }
 
     GlassCard(modifier = Modifier.fillMaxWidth()) {
@@ -569,9 +657,22 @@ private fun NsfwContentSettings(
             }
 
             HorizontalDivider(color = CrunchyBorder)
+
+            GlassFeatureRow(
+                label = "Do not track NSFW anime",
+                subtitle = "Never record watch progress or list updates for explicit 18+ titles locally or on AniList.",
+                checked = doNotTrackNsfw,
+                onCheckedChange = onToggleDoNotTrackNsfw
+            )
+
+            HorizontalDivider(color = CrunchyBorder)
             Text("NSFW tracking account", color = MaruTextStrong, fontSize = 14.sp, fontWeight = FontWeight.Medium)
             Text(
-                "Choose which saved AniList account receives NSFW list updates and watch progress.",
+                text = if (doNotTrackNsfw) {
+                    "NSFW tracking is turned off while 'Do not track NSFW anime' is enabled."
+                } else {
+                    "Choose which saved AniList account receives NSFW list updates and watch progress."
+                },
                 color = MaruTextMuted,
                 fontSize = 11.5.sp,
                 lineHeight = 15.sp
@@ -583,7 +684,14 @@ private fun NsfwContentSettings(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(6.dp)
                 ) {
-                    Text(selectedAccount?.let { "@${it.username}" } ?: "Use active account", modifier = Modifier.weight(1f))
+                    Text(
+                        text = when {
+                            doNotTrackNsfw -> "Do not track NSFW anime"
+                            selectedAccount != null -> "@${selectedAccount.username}"
+                            else -> "Use active account"
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
                     Icon(Icons.Default.ArrowDropDown, contentDescription = null)
                 }
                 DropdownMenu(expanded = accountMenuExpanded, onDismissRequest = { accountMenuExpanded = false }) {

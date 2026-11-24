@@ -204,15 +204,75 @@ fun AnimeDetailScreen(
 
     val preferredAudioFlow by prefs.preferredAudio.collectAsState(initial = "SUB")
     val reportProgress by prefs.reportProgress.collectAsState(initial = true)
+    val allowCellularDownload by prefs.allowCellularDownload.collectAsState(initial = false)
+    val seedDownloadOnWifi by prefs.seedDownloadOnWifi.collectAsState(initial = false)
     val userScoreFormat = trackingAccount?.scoreFormat ?: "POINT_100"
     var selectedAudioMode by remember(preferredAudioFlow) { mutableStateOf(preferredAudioFlow) }
 
     var activePlayingEp by remember { mutableStateOf<CrunchyEpisodeMeta?>(null) }
     var animeMappings by remember { mutableStateOf<AnimeIdMappings?>(null) }
     var streamDubStatus by remember { mutableStateOf(StreamDubStatus()) }
+    var showSeriesDownloadDialog by rememberSaveable(currentMedia.mediaId) { mutableStateOf(false) }
 
     val offlineVaultList by TorrentStreamService.offlineEpisodes.collectAsState()
     val pendingOfflineActions = remember { mutableStateMapOf<Pair<Int, Int>, Unit>() }
+    var isBatchQueueingUnwatched by remember(currentMedia.mediaId) { mutableStateOf(false) }
+
+    suspend fun resolveAndEnqueueEpisodeDownload(
+        anime: AnimeMedia,
+        episode: CrunchyEpisodeMeta,
+        episodeTitle: String,
+        audioMode: String,
+        preferredQuality: String,
+        silentToast: Boolean = false
+    ): Boolean {
+        val episodeNum = episode.episodeNumber
+        val streams = CrunchyrollStreamEngine.resolveRankedStreams(
+            anilistId = anime.mediaId,
+            animeTitle = anime.title,
+            episodeNum = episodeNum,
+            preferredAudio = audioMode,
+            preferredQuality = preferredQuality,
+            isMovie = anime.format == "MOVIE",
+            altTitles = anime.candidateTitlesForStream,
+            isStandalone = anime.isStandaloneFeature,
+            isAdult = anime.isAdult,
+            genres = anime.genres,
+            isMusicOrConcert = anime.isMusicOrConcert,
+            trailerYoutubeId = anime.trailerYoutubeId,
+            externalLinks = anime.externalLinks
+        )
+        val candidates = selectDownloadCandidates(streams, audioMode)
+        if (candidates.isEmpty()) {
+            if (!silentToast) {
+                val audioLabel = if (audioMode == "DUB") "English dub" else "playable"
+                Toast.makeText(context, "No $audioLabel download source found right now.", Toast.LENGTH_SHORT).show()
+            }
+            return false
+        }
+        val primary = candidates.first()
+        TorrentStreamService.startOfflineDownload(
+            context = context,
+            magnetUri = primary.url,
+            fileIdx = primary.fileIdx,
+            mediaId = anime.mediaId,
+            animeTitle = anime.title,
+            episodeNum = episodeNum,
+            episodeTitle = episodeTitle,
+            coverUrl = anime.coverUrl,
+            thumbnailUrl = episode.thumbnail ?: anime.bannerUrl ?: anime.coverUrl,
+            audioType = primary.audioType,
+            quality = primary.quality,
+            candidates = candidates,
+            isAdultContent = isExplicitAdultAnime(anime.isAdult, anime.genres)
+                .takeIf { anime.hasKnownAdultRating }
+        )
+        if (!silentToast) {
+            val label = if (anime.isStandaloneFeature) anime.title else "Episode $episodeNum"
+            Toast.makeText(context, "Downloading $label privately inside the app…", Toast.LENGTH_SHORT).show()
+        }
+        return true
+    }
 
     fun onOfflineAction(episode: CrunchyEpisodeMeta, episodeTitle: String, entry: OfflineEpisodeEntry?, audioMode: String) {
         val anime = currentMedia
@@ -232,52 +292,88 @@ fun AnimeDetailScreen(
                     return@launch
                 }
 
-                val streams = CrunchyrollStreamEngine.resolveRankedStreams(
-                    anilistId = anime.mediaId,
-                    animeTitle = anime.title,
-                    episodeNum = episodeNum,
-                    preferredAudio = audioMode,
-                    preferredQuality = prefs.preferredQuality.first(),
-                    isMovie = anime.format == "MOVIE",
-                    altTitles = anime.candidateTitlesForStream,
-                    isStandalone = anime.isStandaloneFeature,
-                    isAdult = anime.isAdult,
-                    genres = anime.genres,
-                    isMusicOrConcert = anime.isMusicOrConcert,
-                    trailerYoutubeId = anime.trailerYoutubeId,
-                    externalLinks = anime.externalLinks
-                )
-                val candidates = selectDownloadCandidates(streams, audioMode)
-                if (candidates.isEmpty()) {
-                    val audioLabel = if (audioMode == "DUB") "English dub" else "playable"
-                    Toast.makeText(context, "No $audioLabel download source found right now.", Toast.LENGTH_SHORT).show()
+                if (!TorrentStreamService.canDownloadWithNetworkPolicy(context, prefs.allowCellularDownload.first())) {
+                    Toast.makeText(
+                        context,
+                        "Cellular downloads are off. Connect to Wi-Fi or enable 'Allow Download with Cellular'.",
+                        Toast.LENGTH_LONG
+                    ).show()
                     return@launch
                 }
-                val primary = candidates.first()
-                TorrentStreamService.startOfflineDownload(
-                    context = context,
-                    magnetUri = primary.url,
-                    fileIdx = primary.fileIdx,
-                    mediaId = anime.mediaId,
-                    animeTitle = anime.title,
-                    episodeNum = episodeNum,
+
+                resolveAndEnqueueEpisodeDownload(
+                    anime = anime,
+                    episode = episode,
                     episodeTitle = episodeTitle,
-                    coverUrl = anime.coverUrl,
-                    thumbnailUrl = episode.thumbnail ?: anime.bannerUrl ?: anime.coverUrl,
-                    audioType = primary.audioType,
-                    quality = primary.quality,
-                    candidates = candidates,
-                    isAdultContent = isExplicitAdultAnime(anime.isAdult, anime.genres)
-                        .takeIf { anime.hasKnownAdultRating }
+                    audioMode = audioMode,
+                    preferredQuality = prefs.preferredQuality.first(),
+                    silentToast = false
                 )
-                val label = if (anime.isStandaloneFeature) anime.title else "Episode $episodeNum"
-                Toast.makeText(context, "Downloading $label privately inside the app…", Toast.LENGTH_SHORT).show()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
                 Toast.makeText(context, "Could not start the download. Try again.", Toast.LENGTH_SHORT).show()
             } finally {
                 pendingOfflineActions.remove(key)
+            }
+        }
+    }
+
+    fun onDownloadUnwatchedBatch(episodesToDownload: List<CrunchyEpisodeMeta>, audioMode: String) {
+        val anime = currentMedia
+        if (episodesToDownload.isEmpty() || isBatchQueueingUnwatched) return
+        if (!TorrentStreamService.canDownloadWithNetworkPolicy(context, allowCellularDownload)) {
+            Toast.makeText(
+                context,
+                "Check 'Allow Download with Cellular' or connect to Wi-Fi before downloading.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        val targets = episodesToDownload.filter { ep ->
+            pendingOfflineActions.put(anime.mediaId to ep.episodeNumber, Unit) == null
+        }
+        if (targets.isEmpty()) return
+        isBatchQueueingUnwatched = true
+        Toast.makeText(
+            context,
+            "Queueing ${targets.size} unwatched episode${if (targets.size == 1) "" else "s"} for offline download…",
+            Toast.LENGTH_SHORT
+        ).show()
+
+        scope.launch {
+            var queuedCount = 0
+            try {
+                val prefQual = prefs.preferredQuality.first()
+                for (ep in targets) {
+                    val key = anime.mediaId to ep.episodeNumber
+                    try {
+                        val epTitle = ep.title.ifBlank { "Episode ${ep.episodeNumber}" }
+                        val ok = resolveAndEnqueueEpisodeDownload(
+                            anime = anime,
+                            episode = ep,
+                            episodeTitle = epTitle,
+                            audioMode = audioMode,
+                            preferredQuality = prefQual,
+                            silentToast = true
+                        )
+                        if (ok) queuedCount++
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                    } finally {
+                        pendingOfflineActions.remove(key)
+                    }
+                }
+                val summary = when {
+                    queuedCount == 0 -> "No downloadable sources found for unwatched episodes right now."
+                    queuedCount == targets.size -> "Queued $queuedCount unwatched episode${if (queuedCount == 1) "" else "s"} in Downloads."
+                    else -> "Queued $queuedCount of ${targets.size} unwatched episodes in Downloads."
+                }
+                Toast.makeText(context, summary, Toast.LENGTH_SHORT).show()
+            } finally {
+                targets.forEach { pendingOfflineActions.remove(anime.mediaId to it.episodeNumber) }
+                isBatchQueueingUnwatched = false
             }
         }
     }
@@ -307,7 +403,12 @@ fun AnimeDetailScreen(
         val mappingsJob = launch {
             try {
                 animeMappings = withContext(Dispatchers.IO) {
-                    CrunchyrollStreamEngine.getAnimeMappings(currentMedia.mediaId, currentMedia.title)
+                    CrunchyrollStreamEngine.getAnimeMappings(
+                        anilistId = currentMedia.mediaId,
+                        fallbackTitle = currentMedia.title,
+                        candidateTitles = currentMedia.candidateTitlesForStream,
+                        isAdult = isExplicitAdultAnime(currentMedia.isAdult, currentMedia.genres)
+                    )
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -370,13 +471,14 @@ fun AnimeDetailScreen(
             KnownDubRegistry.recordKnownDub(media.mediaId, context)
             return@LaunchedEffect
         }
-        if (!isActive || isPlaybackOpen || streamDubStatus.hasStreamDubOrDual) return@LaunchedEffect
+        if (!isActive || isPlaybackOpen || streamDubStatus.hasStreamDubOrDual || isNsfwForTracking) return@LaunchedEffect
         try {
             val detected = CrunchyrollStreamEngine.checkStreamDubAvailability(
                 anilistId = media.mediaId,
                 animeTitle = media.title,
                 episodeNum = 1,
-                isMovie = media.format == "MOVIE"
+                isMovie = media.format == "MOVIE",
+                altTitles = currentMedia.candidateTitlesForStream
             )
             streamDubStatus = detected
             if (detected.hasStreamDubOrDual) {
@@ -467,6 +569,14 @@ fun AnimeDetailScreen(
     fun saveEntry(newStatus: String?, newProgress: Int?, newScore: Double?) {
         val accounts = trackingAccounts ?: return
         if (isUpdatingList || isEntryLoading) return
+        if (accounts.doNotTrackNsfw && (isNsfwForTracking || !currentMedia.hasKnownAdultRating)) {
+            Toast.makeText(
+                context,
+                "Turn off 'Do not track NSFW anime' in Account settings to track this title.",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
         val safeProgress = (newProgress ?: currentMedia.progress).coerceIn(0, currentMedia.episodes ?: 9999)
         val resolvedStatus = (newStatus ?: currentMedia.listStatus ?: "CURRENT").uppercase()
         val previous = currentMedia
@@ -594,6 +704,7 @@ fun AnimeDetailScreen(
 
     BackHandler(enabled = isActive) {
         when {
+            showSeriesDownloadDialog -> showSeriesDownloadDialog = false
             showEditPage -> showEditPage = false
             activeVoiceActor != null -> activeVoiceActor = null
             else -> onBack()
@@ -871,6 +982,93 @@ fun AnimeDetailScreen(
                             fontWeight = FontWeight.SemiBold,
                             color = if (standaloneOfflineEntry.failure != null) Color(0xFFFF8A80) else CrunchyOrange
                         )
+                    }
+
+                    // Flexible Download Series option visible across Episodes, Overview, and Cast tabs
+                    if (!isSingleStandalone && completeEpisodes.isNotEmpty()) {
+                        val allUnwatched = completeEpisodes.filter { it.episodeNumber > currentMedia.progress }
+                        val downloadableUnwatched = allUnwatched.filter { ep ->
+                            val existing = offlineVaultList.firstOrNull {
+                                it.mediaId == currentMedia.mediaId && it.episodeNumber == ep.episodeNumber
+                            }
+                            val pending = pendingOfflineActions.containsKey(currentMedia.mediaId to ep.episodeNumber)
+                            !pending && (existing == null || existing.failure != null)
+                        }
+                        val activeUnwatchedDownloads = allUnwatched.count { ep ->
+                            val existing = offlineVaultList.firstOrNull {
+                                it.mediaId == currentMedia.mediaId && it.episodeNumber == ep.episodeNumber
+                            }
+                            pendingOfflineActions.containsKey(currentMedia.mediaId to ep.episodeNumber) ||
+                                (existing != null && !existing.isCompleted && existing.failure == null)
+                        }
+
+                        if (allUnwatched.isNotEmpty()) {
+                            val allDone = downloadableUnwatched.isEmpty() && activeUnwatchedDownloads == 0
+                            Surface(
+                                onClick = {
+                                    if (!isBatchQueueingUnwatched) {
+                                        showSeriesDownloadDialog = true
+                                    }
+                                },
+                                enabled = !isBatchQueueingUnwatched,
+                                shape = RoundedCornerShape(4.dp),
+                                color = if (allDone) CrunchyTeal.copy(alpha = 0.14f) else CrunchyCardBg,
+                                border = BorderStroke(
+                                    1.dp,
+                                    when {
+                                        allDone -> CrunchyTeal
+                                        activeUnwatchedDownloads > 0 -> CrunchyOrange.copy(alpha = 0.7f)
+                                        else -> CrunchyBorder
+                                    }
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(42.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 14.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    if (isBatchQueueingUnwatched || (downloadableUnwatched.isEmpty() && activeUnwatchedDownloads > 0)) {
+                                        CircularProgressIndicator(
+                                            color = CrunchyOrange,
+                                            strokeWidth = 2.dp,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = if (allDone) Icons.Default.DownloadDone else Icons.Default.Download,
+                                            contentDescription = null,
+                                            tint = if (allDone) CrunchyTeal else CrunchyOrange,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = when {
+                                            allDone -> "All Unwatched Downloaded (${allUnwatched.size})"
+                                            downloadableUnwatched.isEmpty() && activeUnwatchedDownloads > 0 ->
+                                                "Downloading Unwatched ($activeUnwatchedDownloads active)…"
+                                            activeUnwatchedDownloads > 0 ->
+                                                "Download Unwatched (${downloadableUnwatched.size} left • $activeUnwatchedDownloads active)"
+                                            else ->
+                                                "Download Unwatched (${downloadableUnwatched.size})"
+                                        },
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (allDone) CrunchyTeal else Color.White
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Icon(
+                                        Icons.Default.ArrowDropDown,
+                                        contentDescription = null,
+                                        tint = MaruTextMuted,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
                     }
 
                     // Audio Language Selector (Japanese Sub vs English Dub / Dual Audio)
@@ -1834,6 +2032,226 @@ fun AnimeDetailScreen(
                     }
                 }
             }
+        }
+
+        if (showSeriesDownloadDialog) {
+            val allUnwatched = completeEpisodes.filter { it.episodeNumber > currentMedia.progress }
+            val downloadableUnwatched = allUnwatched.filter { ep ->
+                val existing = offlineVaultList.firstOrNull {
+                    it.mediaId == currentMedia.mediaId && it.episodeNumber == ep.episodeNumber
+                }
+                val pending = pendingOfflineActions.containsKey(currentMedia.mediaId to ep.episodeNumber)
+                !pending && (existing == null || existing.failure != null)
+            }
+            val audioForDownload = if (hasAnyDub) selectedAudioMode else "SUB"
+            val maxSelectable = downloadableUnwatched.size.coerceAtLeast(1)
+            var customEpisodeCount by remember(downloadableUnwatched.size) {
+                mutableIntStateOf(minOf(3, maxSelectable))
+            }
+
+            AlertDialog(
+                onDismissRequest = { showSeriesDownloadDialog = false },
+                containerColor = CrunchySurface,
+                titleContentColor = Color.White,
+                textContentColor = MaruTextStrong,
+                title = {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = "Download Series Episodes",
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 17.sp,
+                            color = Color.White
+                        )
+                        Text(
+                            text = if (downloadableUnwatched.isEmpty()) {
+                                "All unwatched episodes are already downloaded or queued."
+                            } else {
+                                "${downloadableUnwatched.size} unwatched episode${if (downloadableUnwatched.size == 1) "" else "s"} ready • ${if (audioForDownload == "DUB") "English Dub" else "Japanese (Sub)"}"
+                            },
+                            fontSize = 12.sp,
+                            color = MaruTextMuted
+                        )
+                    }
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = {
+                                showSeriesDownloadDialog = false
+                                onDownloadUnwatchedBatch(downloadableUnwatched, audioForDownload)
+                            },
+                            enabled = downloadableUnwatched.isNotEmpty() && !isBatchQueueingUnwatched,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(46.dp),
+                            shape = RoundedCornerShape(4.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = CrunchyOrange,
+                                contentColor = Color.Black
+                            )
+                        ) {
+                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (downloadableUnwatched.isNotEmpty()) {
+                                    "Download All Unwatched (${downloadableUnwatched.size})"
+                                } else {
+                                    "Download All Unwatched"
+                                },
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 13.sp
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                showSeriesDownloadDialog = false
+                                onDownloadUnwatchedBatch(downloadableUnwatched.take(5), audioForDownload)
+                            },
+                            enabled = downloadableUnwatched.isNotEmpty() && !isBatchQueueingUnwatched,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(46.dp),
+                            shape = RoundedCornerShape(4.dp),
+                            border = BorderStroke(1.dp, CrunchyOrange)
+                        ) {
+                            Text(
+                                text = "Download Next 5 Episodes",
+                                color = CrunchyOrange,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 13.sp
+                            )
+                        }
+
+                        if (downloadableUnwatched.size > 1) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = CrunchyCardBg,
+                                border = BorderStroke(1.dp, CrunchyBorder),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        IconButton(
+                                            onClick = { customEpisodeCount = (customEpisodeCount - 1).coerceAtLeast(1) },
+                                            enabled = customEpisodeCount > 1,
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(Icons.Default.Remove, contentDescription = "Fewer episodes", tint = Color.White, modifier = Modifier.size(18.dp))
+                                        }
+                                        Text(
+                                            text = "Next $customEpisodeCount",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp,
+                                            color = Color.White
+                                        )
+                                        IconButton(
+                                            onClick = { customEpisodeCount = (customEpisodeCount + 1).coerceAtMost(maxSelectable) },
+                                            enabled = customEpisodeCount < maxSelectable,
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(Icons.Default.Add, contentDescription = "More episodes", tint = Color.White, modifier = Modifier.size(18.dp))
+                                        }
+                                    }
+                                    TextButton(
+                                        onClick = {
+                                            showSeriesDownloadDialog = false
+                                            onDownloadUnwatchedBatch(downloadableUnwatched.take(customEpisodeCount), audioForDownload)
+                                        },
+                                        enabled = downloadableUnwatched.isNotEmpty() && !isBatchQueueingUnwatched
+                                    ) {
+                                        Text("Download", color = CrunchyTeal, fontWeight = FontWeight.ExtraBold)
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    scope.launch { prefs.setAllowCellularDownload(!allowCellularDownload) }
+                                }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Checkbox(
+                                checked = allowCellularDownload,
+                                onCheckedChange = null,
+                                colors = CheckboxDefaults.colors(
+                                    checkedColor = CrunchyOrange,
+                                    checkmarkColor = Color.Black,
+                                    uncheckedColor = MaruTextMuted
+                                )
+                            )
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    text = "Allow Download with Cellular",
+                                    fontSize = 13.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "Allow episode downloads over mobile data when Wi-Fi is unavailable.",
+                                    fontSize = 11.5.sp,
+                                    color = MaruTextMuted,
+                                    lineHeight = 15.sp
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    scope.launch { prefs.setSeedDownloadOnWifi(!seedDownloadOnWifi) }
+                                }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Checkbox(
+                                checked = seedDownloadOnWifi,
+                                onCheckedChange = null,
+                                colors = CheckboxDefaults.colors(
+                                    checkedColor = CrunchyTeal,
+                                    checkmarkColor = Color.Black,
+                                    uncheckedColor = MaruTextMuted
+                                )
+                            )
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    text = "Seed My Download on WiFi",
+                                    fontSize = 13.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "Shares finished torrent pieces only while on Wi-Fi (using zero extra storage or mobile data) so fellow viewers can stream and download rare or older anime faster without dead sources.",
+                                    fontSize = 11.5.sp,
+                                    color = MaruTextMuted,
+                                    lineHeight = 15.sp
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showSeriesDownloadDialog = false }) {
+                        Text("Close", color = MaruTextMuted, fontWeight = FontWeight.Bold)
+                    }
+                }
+            )
         }
     }
 }

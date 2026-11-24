@@ -315,7 +315,8 @@ object LocalLibraryStore {
     }
 
     /**
-     * Marks an episode watched when >= 80% is viewed.
+     * Marks an episode watched when the configured watch percentage (default 80%) is viewed.
+     * - Honors `doNotTrackNsfw` so explicit adult anime is skipped completely when NSFW tracking is disabled.
      * - Updates local tracking immediately (if already tracked OR in guest mode so Continue Watching works!).
      * - If signed into AniList with `reportProgress`, enqueues a durable offline update and flushes immediately if online.
      */
@@ -327,7 +328,11 @@ object LocalLibraryStore {
         accounts: AniListTrackingAccounts
     ): Boolean = withContext(Dispatchers.IO) {
         ensureLoaded(context)
-        val account = accounts.forTitle(isExplicitAdultAnime(media.isAdult, media.genres))
+        val isNsfw = isExplicitAdultAnime(media.isAdult, media.genres)
+        if (accounts.doNotTrackNsfw && (isNsfw || !media.hasKnownAdultRating)) {
+            return@withContext false
+        }
+        val account = accounts.forTitle(isNsfw)
         val existingLocal = _localEntries.value[media.mediaId]
         val isTracked = media.listStatus != null || existingLocal?.listStatus != null
 

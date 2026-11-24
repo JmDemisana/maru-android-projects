@@ -35,9 +35,11 @@ data class SavedAniListAccount(
 internal data class AniListTrackingAccounts(
     val active: SavedAniListAccount? = null,
     val nsfw: SavedAniListAccount? = null,
-    private val saved: List<SavedAniListAccount> = emptyList()
+    private val saved: List<SavedAniListAccount> = emptyList(),
+    val doNotTrackNsfw: Boolean = false
 ) {
     fun forTitle(isNsfw: Boolean): SavedAniListAccount? {
+        if (isNsfw && doNotTrackNsfw) return null
         if (active == null) return null
         return if (isNsfw) nsfw ?: active else active
     }
@@ -63,13 +65,18 @@ class MAnimePrefs(private val context: Context) {
         private val KEY_ANILIST_CONTENT_OPTIONS = stringPreferencesKey("anilist_content_options")
         private val KEY_HIDE_NSFW_CONTENT = booleanPreferencesKey("hide_nsfw_content")
         private val KEY_NSFW_ANILIST_ACCOUNT_ID = intPreferencesKey("nsfw_anilist_account_id")
+        private val KEY_DO_NOT_TRACK_NSFW = booleanPreferencesKey("do_not_track_nsfw")
         val KEY_EXT_TYPE            = stringPreferencesKey("extension_type") // CLOUDSTREAM | ANIYOMI | STREMIO
         val KEY_STREMIO_URL         = stringPreferencesKey("stremio_url")
         val KEY_STREMIO_ADDONS      = stringSetPreferencesKey("stremio_addon_urls")
         val KEY_CS_REPOS            = stringSetPreferencesKey("cloudstream_repos")
         val KEY_CS_INSTALLED        = stringSetPreferencesKey("cloudstream_installed")
         val KEY_REPORT_PROGRESS     = booleanPreferencesKey("report_progress")
+        val KEY_TRACK_WATCHED_PERCENT = intPreferencesKey("track_watched_percent")
         val KEY_REMEMBER_POSITION   = booleanPreferencesKey("remember_position")
+        val KEY_PLAYBACK_SPEED      = floatPreferencesKey("player_playback_speed")
+        val KEY_ALLOW_CELLULAR_DOWNLOAD = booleanPreferencesKey("allow_cellular_download")
+        val KEY_SEED_DOWNLOAD_ON_WIFI = booleanPreferencesKey("seed_download_on_wifi")
         val KEY_TORRENT_MAX_SPEED   = intPreferencesKey("torrent_max_dl_kbps") // 0 = unlimited
         val KEY_PREFERRED_AUDIO     = stringPreferencesKey("preferred_audio") // "SUB" | "DUB"
         val KEY_PREFERRED_QUALITY   = stringPreferencesKey("preferred_quality") // "1080p" | "720p" | "4K"
@@ -142,7 +149,12 @@ class MAnimePrefs(private val context: Context) {
                 token = token
             )
         }
-        AniListTrackingAccounts(active, saved.firstOrNull { it.id == prefs[KEY_NSFW_ANILIST_ACCOUNT_ID] }, saved)
+        AniListTrackingAccounts(
+            active = active,
+            nsfw = saved.firstOrNull { it.id == prefs[KEY_NSFW_ANILIST_ACCOUNT_ID] },
+            saved = saved,
+            doNotTrackNsfw = prefs[KEY_DO_NOT_TRACK_NSFW] ?: false
+        )
     }.distinctUntilChanged()
 
     suspend fun setNsfwAnilistAccountId(accountId: Int?) = context.dataStore.edit { prefs ->
@@ -158,7 +170,19 @@ class MAnimePrefs(private val context: Context) {
     val cloudstreamRepos: Flow<Set<String>> = context.dataStore.data.map { it[KEY_CS_REPOS] ?: DEFAULT_CS_REPOS }
     val cloudstreamInstalled: Flow<Set<String>> = context.dataStore.data.map { it[KEY_CS_INSTALLED] ?: emptySet() }
     val reportProgress: Flow<Boolean> = context.dataStore.data.map { it[KEY_REPORT_PROGRESS] ?: true }
+    val trackWatchedPercent: Flow<Int> = context.dataStore.data
+        .map { (it[KEY_TRACK_WATCHED_PERCENT] ?: 80).coerceIn(10, 100) }
+        .distinctUntilChanged()
     val rememberPosition: Flow<Boolean> = context.dataStore.data.map { it[KEY_REMEMBER_POSITION] ?: true }
+    val playbackSpeed: Flow<Float> = context.dataStore.data
+        .map { (it[KEY_PLAYBACK_SPEED] ?: 1.0f).coerceIn(0.5f, 3.0f) }
+        .distinctUntilChanged()
+    val allowCellularDownload: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_ALLOW_CELLULAR_DOWNLOAD] ?: false }
+        .distinctUntilChanged()
+    val seedDownloadOnWifi: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_SEED_DOWNLOAD_ON_WIFI] ?: false }
+        .distinctUntilChanged()
     val torrentMaxSpeed: Flow<Int> = context.dataStore.data.map { it[KEY_TORRENT_MAX_SPEED] ?: 0 }
     val preferredAudio: Flow<String> = context.dataStore.data.map { it[KEY_PREFERRED_AUDIO] ?: "SUB" }
     val preferredQuality: Flow<String> = context.dataStore.data.map { it[KEY_PREFERRED_QUALITY] ?: "1080p" }
@@ -169,6 +193,9 @@ class MAnimePrefs(private val context: Context) {
     val persistentDurationLine: Flow<Boolean> = context.dataStore.data.map { it[KEY_PERSISTENT_DURATION_LINE] ?: false }
     val myListsSortOption: Flow<String> = context.dataStore.data.map { it[KEY_MY_LISTS_SORT_OPTION] ?: "RECENTLY_ADDED" }
     val hideNsfwContent: Flow<Boolean> = context.dataStore.data.map { it[KEY_HIDE_NSFW_CONTENT] ?: true }
+    val doNotTrackNsfw: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_DO_NOT_TRACK_NSFW] ?: false }
+        .distinctUntilChanged()
 
     // --- Suspend setters ---
     suspend fun setAnilistSession(token: String, viewer: AniListUser) = context.dataStore.edit { prefs ->
@@ -295,7 +322,19 @@ class MAnimePrefs(private val context: Context) {
     suspend fun setCloudstreamRepos(value: Set<String>) = context.dataStore.edit { it[KEY_CS_REPOS] = value }
     suspend fun setCloudstreamInstalled(value: Set<String>) = context.dataStore.edit { it[KEY_CS_INSTALLED] = value }
     suspend fun setReportProgress(value: Boolean) = context.dataStore.edit { it[KEY_REPORT_PROGRESS] = value }
+    suspend fun setTrackWatchedPercent(value: Int) = context.dataStore.edit {
+        it[KEY_TRACK_WATCHED_PERCENT] = value.coerceIn(10, 100)
+    }
     suspend fun setRememberPosition(value: Boolean) = context.dataStore.edit { it[KEY_REMEMBER_POSITION] = value }
+    suspend fun setPlaybackSpeed(value: Float) = context.dataStore.edit {
+        it[KEY_PLAYBACK_SPEED] = value.coerceIn(0.5f, 3.0f)
+    }
+    suspend fun setAllowCellularDownload(value: Boolean) = context.dataStore.edit {
+        it[KEY_ALLOW_CELLULAR_DOWNLOAD] = value
+    }
+    suspend fun setSeedDownloadOnWifi(value: Boolean) = context.dataStore.edit {
+        it[KEY_SEED_DOWNLOAD_ON_WIFI] = value
+    }
     suspend fun setTorrentMaxSpeed(value: Int) = context.dataStore.edit { it[KEY_TORRENT_MAX_SPEED] = value }
     suspend fun setPreferredAudio(value: String) = context.dataStore.edit { it[KEY_PREFERRED_AUDIO] = value }
     suspend fun setPreferredQuality(value: String) = context.dataStore.edit { it[KEY_PREFERRED_QUALITY] = value }
@@ -306,6 +345,7 @@ class MAnimePrefs(private val context: Context) {
     suspend fun setPersistentDurationLine(value: Boolean) = context.dataStore.edit { it[KEY_PERSISTENT_DURATION_LINE] = value }
     suspend fun setMyListsSortOption(value: String) = context.dataStore.edit { it[KEY_MY_LISTS_SORT_OPTION] = value }
     suspend fun setHideNsfwContent(value: Boolean) = context.dataStore.edit { it[KEY_HIDE_NSFW_CONTENT] = value }
+    suspend fun setDoNotTrackNsfw(value: Boolean) = context.dataStore.edit { it[KEY_DO_NOT_TRACK_NSFW] = value }
 
     // Episode watch position cache: "mediaId:ep" -> seconds
     private fun posKey(mediaId: Int, ep: Int) = longPreferencesKey("pos_${mediaId}_$ep")

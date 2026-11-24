@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
@@ -21,6 +23,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -225,6 +229,38 @@ class TorrentStreamService : Service() {
 
         val offlineEpisodes = OfflineVault.episodes
         private val offlineJobs = ConcurrentHashMap<Pair<Int, Int>, Job>()
+        private val seedingJobs = ConcurrentHashMap<Pair<Int, Int>, Job>()
+        private val offlineDownloadSemaphore = Semaphore(2)
+        private val wifiSeedSemaphore = Semaphore(2)
+
+        fun isWifiOrEthernetActive(context: Context): Boolean {
+            return try {
+                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+                val network = cm.activeNetwork ?: return false
+                val caps = cm.getNetworkCapabilities(network) ?: return false
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        fun isCellularNetworkActive(context: Context): Boolean {
+            return try {
+                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+                val network = cm.activeNetwork ?: return false
+                val caps = cm.getNetworkCapabilities(network) ?: return false
+                val onWifiOrEthernet = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+                !onWifiOrEthernet && caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        fun canDownloadWithNetworkPolicy(context: Context, allowCellular: Boolean): Boolean =
+            allowCellular || !isCellularNetworkActive(context)
 
         suspend fun loadOfflineVault(context: Context) = withContext(Dispatchers.IO) {
             OfflineVault.load(context)
@@ -240,6 +276,7 @@ class TorrentStreamService : Service() {
             withContext(Dispatchers.IO) {
                 synchronized(OfflineVault.lock) {
                     offlineJobs[mediaId to episodeNum]?.cancel()
+                    seedingJobs.remove(mediaId to episodeNum)?.cancel()
                     OfflineVault.delete(context, mediaId, episodeNum)
                 }
             }
@@ -431,7 +468,9 @@ class TorrentStreamService : Service() {
 
     private fun stopIfIdle() {
         val status = _streamStatus.value
-        if ((status.requestId == null || status.error != null) && offlineJobs.values.none { !it.isCompleted }) {
+        val noDownloads = offlineJobs.values.none { !it.isCompleted }
+        val noSeeds = seedingJobs.values.none { !it.isCompleted }
+        if ((status.requestId == null || status.error != null) && noDownloads && noSeeds) {
             stopSelfResult(latestStartId)
         }
     }
@@ -869,15 +908,24 @@ class TorrentStreamService : Service() {
                 }
 
                 try {
-                    publishEntry(entry)
-                    updateNotification("Preparing download: $animeTitle • Ep $episodeNum", progressPercent = 0)
+                    publishEntry(entry.copy(statusText = "Queued for download…"))
                     OfflineVault.preparedDirectory(context)
-                    val speedLimitKbps = MAnimePrefs(context).torrentMaxSpeed.first()
+                    offlineDownloadSemaphore.withPermit {
+                        ensureActive()
+                        val prefsStore = MAnimePrefs(context)
+                        if (!canDownloadWithNetworkPolicy(context, prefsStore.allowCellularDownload.first())) {
+                            throw OfflineDownloadException(
+                                "Cellular downloads are disabled. Connect to Wi-Fi or allow cellular downloads, then tap Retry."
+                            )
+                        }
+                        publishEntry(entry.copy(statusText = "Connecting to source…"))
+                        updateNotification("Preparing download: $animeTitle • Ep $episodeNum", progressPercent = 0)
+                        val speedLimitKbps = prefsStore.torrentMaxSpeed.first()
 
-                    var lastFailureMessage = "Could not connect to any download source. Try again."
-                    var succeeded = false
+                        var lastFailureMessage = "Could not connect to any download source. Try again."
+                        var succeeded = false
 
-                    for ((index, candidate) in candidates.withIndex()) {
+                        for ((index, candidate) in candidates.withIndex()) {
                         ensureActive()
                         val hasMoreCandidates = index < candidates.lastIndex
                         val sourceTag = if (candidates.size > 1) " (source ${index + 1}/${candidates.size})" else ""
@@ -941,6 +989,11 @@ class TorrentStreamService : Service() {
 
                                                     val now = SystemClock.elapsedRealtime()
                                                     if (now - lastUiUpdateMs >= 800L) {
+                                                        if (!canDownloadWithNetworkPolicy(context, prefsStore.allowCellularDownload.first())) {
+                                                            throw OfflineDownloadException(
+                                                                "Paused on cellular data. Connect to Wi-Fi or allow cellular downloads, then tap Retry."
+                                                            )
+                                                        }
                                                         val elapsedSec = ((now - windowStartMs) / 1000.0).coerceAtLeast(0.25)
                                                         val speedKbps = (((downloaded - windowStartBytes) / 1024.0) / elapsedSec).toInt().coerceAtLeast(0)
                                                         windowStartMs = now
@@ -1022,6 +1075,11 @@ class TorrentStreamService : Service() {
 
                                     while (isActive) {
                                         check(handle.isValid) { "Download handle expired" }
+                                        if (!canDownloadWithNetworkPolicy(context, prefsStore.allowCellularDownload.first())) {
+                                            throw OfflineDownloadException(
+                                                "Paused on cellular data. Connect to Wi-Fi or allow cellular downloads, then tap Retry."
+                                            )
+                                        }
                                         val status = handle.status()
                                         check(!status.errorCode().isError) { "Torrent download failed" }
                                         val done = status.totalWantedDone().coerceIn(0L, totalBytes)
@@ -1078,6 +1136,14 @@ class TorrentStreamService : Service() {
                                     runCatching { handle.pause() }
                                     finalizeStagingFile(stagingFile, totalBytes, candidate.audioType, candidate.quality)
                                     succeeded = true
+                                    startWifiSeedingIfEnabled(
+                                        key = key,
+                                        magnetUri = candidate.url,
+                                        tInfo = info,
+                                        targetIdx = targetIdx,
+                                        finalFile = finalFile,
+                                        totalBytes = totalBytes
+                                    )
                                 } finally {
                                     runCatching {
                                         if (handle.isValid) SessionHandle(torrentSession.swig()).removeTorrent(handle)
@@ -1102,6 +1168,7 @@ class TorrentStreamService : Service() {
                         throw OfflineDownloadException(lastFailureMessage)
                     }
                     updateNotification("Download complete: $animeTitle • Ep $episodeNum")
+                    }
                 } catch (e: CancellationException) {
                     synchronized(OfflineVault.lock) {
                         if (offlineJobs[key] === coroutineContext.job && OfflineVault.episodes.value.contains(entry) &&
@@ -1136,6 +1203,87 @@ class TorrentStreamService : Service() {
                 serviceScope.launch(Dispatchers.Main.immediate) { stopIfIdle() }
             }
             job.start()
+        }
+    }
+
+    private fun startWifiSeedingIfEnabled(
+        key: Pair<Int, Int>,
+        magnetUri: String,
+        tInfo: TorrentInfo,
+        targetIdx: Int,
+        finalFile: File,
+        totalBytes: Long
+    ) {
+        val context = applicationContext
+        seedingJobs.remove(key)?.cancel()
+        val job = serviceScope.launch {
+            val prefsStore = MAnimePrefs(context)
+            if (!prefsStore.seedDownloadOnWifi.first() || !isWifiOrEthernetActive(context) || !finalFile.isFile) {
+                return@launch
+            }
+            if (!wifiSeedSemaphore.tryAcquire()) return@launch
+            var seedSession: SessionManager? = null
+            var seedDir: File? = null
+            try {
+                if (!tInfo.isValid || targetIdx !in 0 until tInfo.numFiles()) return@launch
+                val dir = Files.createTempDirectory(cacheDir.toPath(), "wifi_seed_").toFile()
+                seedDir = dir
+                runCatching { File(dir, ".nomedia").createNewFile() }
+                val relPath = tInfo.files().filePath(targetIdx)
+                val targetSeedFile = File(dir, relPath).canonicalFile
+                if (!targetSeedFile.path.startsWith(dir.canonicalPath + File.separator)) return@launch
+                targetSeedFile.parentFile?.mkdirs()
+                // Zero-copy POSIX hardlink on app storage so seeding consumes 0 extra disk space!
+                val linked = runCatching {
+                    Files.createLink(targetSeedFile.toPath(), finalFile.toPath())
+                    true
+                }.getOrDefault(false)
+                if (!linked) return@launch
+
+                val session = SessionManager().also {
+                    seedSession = it
+                    it.start()
+                }
+                val params = AddTorrentParams.parseMagnetUri(magnetUri).apply {
+                    setTorrentInfo(tInfo)
+                    setSavePath(dir.absolutePath)
+                    filePriorities(Array(tInfo.numFiles()) { if (it == targetIdx) Priority.DEFAULT else Priority.IGNORE })
+                    setFlags(
+                        getFlags()
+                            .and_(TorrentFlags.PAUSED.inv())
+                            .and_(TorrentFlags.AUTO_MANAGED.inv())
+                            .and_(TorrentFlags.STOP_WHEN_READY.inv())
+                    )
+                }
+                val handle = addTorrent(session, params)
+                handle.resume()
+
+                val startedAt = SystemClock.elapsedRealtime()
+                val maxSeedWindowMs = 30L * 60L * 1_000L // Polite 30-minute Wi-Fi seed window or 1.0x share ratio
+                while (isActive) {
+                    if (!finalFile.isFile || !isWifiOrEthernetActive(context) || !prefsStore.seedDownloadOnWifi.first()) {
+                        break
+                    }
+                    if (!handle.isValid || handle.status().errorCode().isError) break
+                    val uploaded = handle.status().totalPayloadUpload()
+                    if (totalBytes > 0L && uploaded >= totalBytes) break
+                    if (SystemClock.elapsedRealtime() - startedAt >= maxSeedWindowMs) break
+                    delay(2_500)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+            } finally {
+                runCatching { seedSession?.pause() }
+                runCatching { seedSession?.stop() }
+                runCatching { seedDir?.deleteRecursively() }
+                wifiSeedSemaphore.release()
+            }
+        }
+        seedingJobs[key] = job
+        job.invokeOnCompletion {
+            seedingJobs.remove(key, job)
+            serviceScope.launch(Dispatchers.Main.immediate) { stopIfIdle() }
         }
     }
 
