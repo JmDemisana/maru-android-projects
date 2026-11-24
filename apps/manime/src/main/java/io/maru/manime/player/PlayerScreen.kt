@@ -644,7 +644,7 @@ private fun EpisodePlayerScreen(
                 preferredAudio = activeAudioMode,
                 preferredQuality = prefQual,
                 isMovie = media.format == "MOVIE",
-                altTitles = listOfNotNull(media.titleEnglish, media.titleRomaji, media.title),
+                altTitles = media.candidateTitlesForStream,
                 isStandalone = media.isStandaloneFeature,
                 isAdult = media.isAdult,
                 genres = media.genres,

@@ -167,15 +167,15 @@ fun ProfileScreen(
             defaultAniListTabs
         } else {
             val ordered = LinkedHashSet<String>()
-            val standardOrder = listOf("Watching", "Rewatching", "Planning", "Completed", "Paused", "Dropped")
-            for (std in standardOrder) {
-                if (std == "Rewatching" && allLists[std].isNullOrEmpty()) continue
-                ordered += std
+            if (allLists.containsKey("Watching")) {
+                ordered += "Watching"
             }
-            for (custom in allLists.keys) {
-                ordered += custom
+            for ((name, items) in allLists) {
+                if (name != "Watching" && (items.isNotEmpty() || name in setOf("Planning", "Paused", "Dropped"))) {
+                    ordered += name
+                }
             }
-            ordered.toList()
+            if (ordered.isEmpty()) defaultAniListTabs else ordered.toList()
         }
     }
     val availableCategories = remember(aniListTabNames) {

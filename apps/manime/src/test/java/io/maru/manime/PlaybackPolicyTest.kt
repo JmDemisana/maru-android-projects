@@ -3,6 +3,7 @@ package io.maru.manime
 import io.maru.manime.extensions.AnimeIdMappings
 import io.maru.manime.extensions.CrunchyEpisodeMeta
 import io.maru.manime.extensions.CrunchyrollStreamEngine
+import io.maru.manime.extensions.FallbackStreamResolvers
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
@@ -194,5 +195,87 @@ class PlaybackPolicyTest {
             activeUsername = "AnotherUser"
         )
         assertEquals(2, mergedForOtherAccount["Watching"]?.first()?.progress)
+    }
+
+    @Test fun splitCompletedListsArePreservedWithoutSquashing() {
+        val tvShow = AnimeMedia(
+            mediaId = 201,
+            title = "KissxSis (TV)",
+            titleEnglish = "KissxSis (TV)",
+            titleRomaji = "kissxsis (TV)",
+            titleNative = "キス×シス",
+            coverUrl = null, bannerUrl = null, accentColor = null, episodes = 12, format = "TV",
+            status = "FINISHED", season = null, seasonYear = 2010, averageScore = 70,
+            genres = listOf("Comedy", "Ecchi", "Romance"), description = null, siteUrl = null, isAdult = false,
+            nextEpisode = null, nextEpisodeAt = null, externalLinks = emptyList(), listEntryId = null,
+            listStatus = "COMPLETED", progress = 12, score = 8.0, notes = null, isPrivate = false, updatedAt = 200L
+        )
+        val movieShow = AnimeMedia(
+            mediaId = 202,
+            title = "Eromanga Sensei OVA",
+            titleEnglish = "Eromanga Sensei OVA",
+            titleRomaji = "Eromanga Sensei OVA",
+            titleNative = "エロマンガ先生 OVA",
+            coverUrl = null, bannerUrl = null, accentColor = null, episodes = 2, format = "OVA",
+            status = "FINISHED", season = null, seasonYear = 2019, averageScore = 72,
+            genres = listOf("Comedy", "Ecchi"), description = null, siteUrl = null, isAdult = false,
+            nextEpisode = null, nextEpisodeAt = null, externalLinks = emptyList(), listEntryId = null,
+            listStatus = "COMPLETED", progress = 2, score = 8.5, notes = null, isPrivate = false, updatedAt = 300L
+        )
+
+        val remoteLists = linkedMapOf(
+            "Watching" to listOf(tvShow.copy(mediaId = 203, listStatus = "CURRENT", progress = 1)),
+            "Completed TV" to listOf(tvShow),
+            "Completed OVA" to listOf(movieShow)
+        )
+
+        val merged = LocalLibraryStore.buildMergedLists(
+            remoteLists = remoteLists,
+            localMap = emptyMap(),
+            pending = emptyList(),
+            isLoggedIn = true,
+            activeUsername = "PpolHi"
+        )
+
+        assertTrue("Completed TV should exist", merged.containsKey("Completed TV"))
+        assertTrue("Completed OVA should exist", merged.containsKey("Completed OVA"))
+        assertFalse("Generic Completed list should not be synthesized", merged.containsKey("Completed"))
+        assertEquals(listOf(201), merged["Completed TV"]?.map { it.mediaId })
+        assertEquals(listOf(202), merged["Completed OVA"]?.map { it.mediaId })
+    }
+
+    @Test fun cleanAnimeTitleAndCandidateGeneration() {
+        assertEquals("kissxsis", cleanAnimeTitle("kissxsis (TV)"))
+        assertEquals("Eromanga Sensei", cleanAnimeTitle("Eromanga Sensei (OVA)"))
+        assertEquals("Pretty Guardian Sailor Moon Crystal", cleanAnimeTitle("Pretty Guardian Sailor Moon Crystal: Seasons 1-2"))
+
+        val media = AnimeMedia(
+            mediaId = 301,
+            title = "KissxSis (TV)",
+            titleEnglish = "KissxSis (TV)",
+            titleRomaji = "kissxsis (TV)",
+            titleNative = "キス×シス",
+            coverUrl = null, bannerUrl = null, accentColor = null, episodes = 12, format = "TV",
+            status = "FINISHED", season = null, seasonYear = 2010, averageScore = 70,
+            genres = listOf("Comedy", "Ecchi"), description = null, siteUrl = null, isAdult = false,
+            nextEpisode = null, nextEpisodeAt = null, externalLinks = emptyList(), listEntryId = null,
+            listStatus = null, progress = 0, score = null, notes = null, isPrivate = false, updatedAt = null
+        )
+
+        val candidates = media.candidateTitlesForStream
+        assertTrue("Should include romaji", candidates.contains("kissxsis (TV)"))
+        assertTrue("Should include native", candidates.contains("キス×シス"))
+        assertTrue("Should include cleaned title", candidates.contains("kissxsis"))
+    }
+
+    @Test fun eroticAnimeStreamTitleMatching() {
+        val candidates = listOf("KissxSis (TV)", "kissxsis", "キス×シス")
+        val release1 = "[Anonymous]_KissxSis_-_01_[H.264_MP3][894F19F6](english_subtitles).mkv"
+        val release2 = "[Seed-Raws][2008-2015] キス×シス kiss×sis KissXSis (無修正) - TV+OAD [BD][720p][AVC][MP4][simple version]"
+        val release3 = "[KKF-Kashikoi]_kissXsis_-_01~12_[BDRip_1920x1080_x264_AAC][Sub_Esp][MP4]"
+
+        assertTrue(FallbackStreamResolvers.matchesTitleAndEpisode(release1, candidates, 1, false))
+        assertTrue(FallbackStreamResolvers.matchesTitleAndEpisode(release2, candidates, 1, false))
+        assertTrue(FallbackStreamResolvers.matchesTitleAndEpisode(release3, candidates, 1, false))
     }
 }

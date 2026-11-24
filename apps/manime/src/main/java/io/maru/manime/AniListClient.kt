@@ -67,8 +67,25 @@ data class AnimeMedia(
     val hasEnglishDubCast: Boolean = false,
     val relationType: String? = null,
     val tags: List<MediaTag> = emptyList(),
-    val trailerYoutubeId: String? = null
+    val trailerYoutubeId: String? = null,
+    val titleNative: String? = null
 ) {
+    val candidateTitlesForStream: List<String>
+        get() = buildList {
+            titleRomaji?.takeIf { it.isNotBlank() }?.let { add(it) }
+            titleNative?.takeIf { it.isNotBlank() }?.let { add(it) }
+            titleEnglish?.takeIf { it.isNotBlank() }?.let { add(it) }
+            if (title.isNotBlank()) add(title)
+
+            val snapshot = toList()
+            for (t in snapshot) {
+                val cleaned = cleanAnimeTitle(t)
+                if (cleaned.isNotBlank() && cleaned != t) {
+                    add(cleaned)
+                }
+            }
+        }.distinct()
+
     val isReleasing: Boolean get() = status.equals("RELEASING", ignoreCase = true)
 
     val hasUncertainReleaseCount: Boolean get() = !status.equals("FINISHED", ignoreCase = true)
@@ -119,6 +136,16 @@ data class ExternalLink(
                                    url.contains("en_dub", ignoreCase = true)
         return isExplicitEnglishSite || isExplicitEnglishUrl
     }
+}
+
+internal fun cleanAnimeTitle(raw: String): String {
+    var s = raw.trim()
+    s = s.replace(Regex("(?i)\\s*\\((?:tv|ova|oad|ona|movie|special|specials|bd|preview|raw)\\)"), "")
+    s = s.replace(Regex("(?i)\\s*:\\s*seasons?\\s*\\d+(?:-\\d+)?"), "")
+    s = s.replace(Regex("(?i)\\s+seasons?\\s*\\d+(?:-\\d+)?"), "")
+    s = s.replace(Regex("(?i)\\s+\\d+(?:st|nd|rd|th)\\s+season"), "")
+    s = s.replace(Regex("[\\s!?.:~-]+$"), "")
+    return s.trim()
 }
 
 data class VoiceActor(
@@ -366,6 +393,7 @@ object AniListClient {
             title         = displayTitle,
             titleEnglish  = titleEng,
             titleRomaji   = titleRom,
+            titleNative   = titleNative,
             coverUrl      = cover?.optNullableString("large") ?: cover?.optNullableString("medium"),
             bannerUrl     = obj.optNullableString("bannerImage"),
             accentColor   = cover?.optNullableString("color"),
@@ -492,24 +520,27 @@ object AniListClient {
         val customListNames = mutableSetOf<String>()
         val collection = data.optJSONObject("MediaListCollection") ?: return emptyMap()
         val lists = collection.optJSONArray("lists") ?: return emptyMap()
+        val listOrder = mutableListOf<String>()
+
         for (i in 0 until lists.length()) {
             val list = lists.optJSONObject(i) ?: continue
-            val isCustom = list.optBoolean("isCustomList", false)
             val status = list.optNullableString("status")?.uppercase()
             val rawName = list.optString("name", "List").trim().ifEmpty { "List" }
-            val canonicalName = if (!isCustom && status != null) {
-                when (status) {
-                    "CURRENT" -> "Watching"
-                    "REPEATING" -> "Rewatching"
-                    "PLANNING" -> "Planning"
-                    "COMPLETED" -> "Completed"
-                    "PAUSED" -> "Paused"
-                    "DROPPED" -> "Dropped"
-                    else -> rawName
+            val canonicalName = when {
+                rawName.equals("Current", ignoreCase = true) || (status == "CURRENT" && rawName.equals("Watching", ignoreCase = true)) -> "Watching"
+                rawName.equals("Repeating", ignoreCase = true) || (status == "REPEATING" && rawName.equals("Rewatching", ignoreCase = true)) -> "Rewatching"
+                rawName.equals("Planning", ignoreCase = true) || (status == "PLANNING" && rawName.equals("Planning", ignoreCase = true)) -> "Planning"
+                rawName.equals("Completed", ignoreCase = true) || (status == "COMPLETED" && rawName.equals("Completed", ignoreCase = true)) -> "Completed"
+                rawName.equals("Paused", ignoreCase = true) || (status == "PAUSED" && rawName.equals("Paused", ignoreCase = true)) -> "Paused"
+                rawName.equals("Dropped", ignoreCase = true) || (status == "DROPPED" && rawName.equals("Dropped", ignoreCase = true)) -> "Dropped"
+                else -> {
+                    // Split completed lists (e.g. "Completed TV", "Completed Movie") or custom lists
+                    customListNames += rawName
+                    rawName
                 }
-            } else {
-                customListNames += rawName
-                rawName
+            }
+            if (canonicalName !in listOrder) {
+                listOrder += canonicalName
             }
             val entries = list.optJSONArray("entries") ?: continue
             val bucket = rawBuckets.getOrPut(canonicalName) { mutableListOf() }
@@ -524,10 +555,12 @@ object AniListClient {
             }
         }
         val ordered = linkedMapOf<String, List<AnimeMedia>>()
-        val standardOrder = listOf("Watching", "Rewatching", "Planning", "Completed", "Paused", "Dropped")
-        for (name in standardOrder) {
+        if ("Watching" in listOrder && rawBuckets.containsKey("Watching")) {
+            rawBuckets.remove("Watching")?.let { ordered["Watching"] = it }
+        }
+        for (name in listOrder) {
             val items = rawBuckets.remove(name) ?: continue
-            if (items.isNotEmpty() || name != "Rewatching") {
+            if (items.isNotEmpty() || name in setOf("Planning", "Paused", "Dropped") || name in customListNames) {
                 ordered[name] = items
             }
         }

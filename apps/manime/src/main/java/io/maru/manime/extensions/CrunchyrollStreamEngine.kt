@@ -1,6 +1,7 @@
 package io.maru.manime.extensions
 
 import io.maru.manime.StreamingEpisode
+import io.maru.manime.cleanAnimeTitle
 import io.maru.manime.readResponse
 import kotlinx.coroutines.*
 import kotlinx.coroutines.selects.select
@@ -573,7 +574,11 @@ object CrunchyrollStreamEngine {
     ): List<StreamLink> = coroutineScope {
         val mappings = getAnimeMappings(anilistId, animeTitle, includeEpisodeMetadata = false)
         val lookups = streamLookups(mappings, episodeNum, isMovie)
-        val candidateTitles = (listOf(animeTitle) + altTitles).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val candidateTitles = (listOf(animeTitle) + altTitles)
+            .flatMap { listOf(it, cleanAnimeTitle(it)) }
+            .map { it.trim() }
+            .filter { it.length >= 2 }
+            .distinct()
         val isEcchi = genres.any { it.equals("Ecchi", true) || it.equals("Hentai", true) }
         val runFallbackImmediately = lookups.isEmpty() || isAdult || isEcchi || isMusicOrConcert
 

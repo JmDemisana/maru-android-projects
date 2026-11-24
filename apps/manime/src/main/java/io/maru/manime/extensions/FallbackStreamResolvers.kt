@@ -1,6 +1,7 @@
 package io.maru.manime.extensions
 
 import io.maru.manime.ExternalLink
+import io.maru.manime.cleanAnimeTitle
 import io.maru.manime.readResponse
 import io.maru.manime.torrent.torrentEpisodeNumber
 import kotlinx.coroutines.CancellationException
@@ -82,62 +83,62 @@ internal object FallbackStreamResolvers {
         externalLinks: List<ExternalLink> = emptyList()
     ): List<StreamLink> = coroutineScope {
         val cleanTitles = titles
+            .flatMap { listOf(it, cleanAnimeTitle(it)) }
             .map { it.trim() }
             .filter { it.length >= 2 }
             .distinctBy { normalizeKey(it) }
-            .take(3)
+            .take(6)
         if (cleanTitles.isEmpty()) return@coroutineScope emptyList()
 
         val displayTitle = cleanTitles.first()
+        val isAdultOrEcchi = isAdult || isEcchi
         val tasks = buildList {
-            // 1. 18+ Adult / Hentai -> Sukebei Nyaa (Art - Anime c=1_1)
-            if (isAdult) {
-                for (t in cleanTitles.take(2)) {
+            // 1. 18+ Adult / Hentai & Uncensored Ecchi -> Sukebei Nyaa (Art - Anime c=1_1)
+            if (isAdultOrEcchi) {
+                for (t in cleanTitles.take(3)) {
+                    val cleanBase = cleanAnimeTitle(t).ifBlank { t }
                     add(async(Dispatchers.IO) {
                         searchNyaaRss(
                             bases = SUKEBEI_BASES,
                             category = "1_1",
-                            queryTitle = t,
+                            queryTitle = cleanBase,
                             allTitles = cleanTitles,
                             episodeNum = episodeNum,
                             isStandalone = isStandalone,
                             isAdultOrEcchi = true,
                             preferredAudio = preferredAudio,
                             preferredQuality = preferredQuality,
-                            sourceLabelPrefix = "Adult Vault"
+                            sourceLabelPrefix = if (isAdult) "Adult Vault" else "Uncensored Vault"
                         )
                     })
                 }
             }
 
-            // 2. Uncensored / Edgy Ecchi, OVAs, Concerts, or general fallback -> AnimeTosho JSON + Nyaa RSS
-            val nyaaCategory = if (isMusicOrConcert) "0_0" else "1_0"
-            for (t in cleanTitles.take(2)) {
-                add(async(Dispatchers.IO) {
-                    searchAnimeTosho(
-                        queryTitle = t,
-                        allTitles = cleanTitles,
-                        episodeNum = episodeNum,
-                        isStandalone = isStandalone || isMusicOrConcert,
-                        isAdultOrEcchi = isAdult || isEcchi,
-                        preferredAudio = preferredAudio,
-                        preferredQuality = preferredQuality
-                    )
-                })
-                add(async(Dispatchers.IO) {
-                    searchNyaaRss(
-                        bases = NYAA_BASES,
-                        category = nyaaCategory,
-                        queryTitle = t,
-                        allTitles = cleanTitles,
-                        episodeNum = episodeNum,
-                        isStandalone = isStandalone || isMusicOrConcert,
-                        isAdultOrEcchi = isAdult || isEcchi,
-                        preferredAudio = preferredAudio,
-                        preferredQuality = preferredQuality,
-                        sourceLabelPrefix = if (isMusicOrConcert) "Concert / MV Archive" else "Uncensored / Archive"
-                    )
-                })
+            // 2. Nyaa RSS (main anime index):
+            // Catches English-translated anime (c=1_2) and general anime (c=1_0), or all categories (c=0_0) for concerts
+            val nyaaCategories = when {
+                isMusicOrConcert -> listOf("0_0")
+                isAdultOrEcchi -> listOf("1_2", "1_0")
+                else -> listOf("1_2", "1_0")
+            }
+            for (t in cleanTitles.take(3)) {
+                val cleanBase = cleanAnimeTitle(t).ifBlank { t }
+                for (cat in nyaaCategories) {
+                    add(async(Dispatchers.IO) {
+                        searchNyaaRss(
+                            bases = NYAA_BASES,
+                            category = cat,
+                            queryTitle = cleanBase,
+                            allTitles = cleanTitles,
+                            episodeNum = episodeNum,
+                            isStandalone = isStandalone || isMusicOrConcert,
+                            isAdultOrEcchi = isAdultOrEcchi,
+                            preferredAudio = preferredAudio,
+                            preferredQuality = preferredQuality,
+                            sourceLabelPrefix = if (isMusicOrConcert) "Concert / MV Archive" else if (isAdultOrEcchi) "Ecchi / Archive" else "Archive"
+                        )
+                    })
+                }
             }
 
             // 3. Music Videos, Idol Concerts & Specials -> Internet Archive CDN + Official YouTube/Piped Direct Streams
@@ -170,82 +171,6 @@ internal object FallbackStreamResolvers {
     }
 
     /**
-     * Queries AnimeTosho's fast unblocked JSON API (`feed.animetosho.org/json`).
-     */
-    private suspend fun searchAnimeTosho(
-        queryTitle: String,
-        allTitles: List<String>,
-        episodeNum: Int,
-        isStandalone: Boolean,
-        isAdultOrEcchi: Boolean,
-        preferredAudio: String,
-        preferredQuality: String
-    ): List<StreamLink> = withContext(Dispatchers.IO) {
-        val searchStr = if (isStandalone) queryTitle else "$queryTitle ${episodeNum.toString().padStart(2, '0')}"
-        val encoded = URLEncoder.encode(searchStr, "UTF-8")
-        val req = Request.Builder()
-            .url("https://feed.animetosho.org/json?q=$encoded")
-            .header("User-Agent", StremioAddonClient.BROWSER_UA)
-            .build()
-
-        val raw = try {
-            client.newCall(req).readResponse { res -> if (res.isSuccessful) res.body?.string() else null }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            null
-        } ?: return@withContext emptyList()
-
-        val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return@withContext emptyList()
-        val results = mutableListOf<StreamLink>()
-
-        for (i in 0 until minOf(arr.length(), 30)) {
-            val item = arr.optJSONObject(i) ?: continue
-            val releaseTitle = item.optString("title", "").trim()
-            if (releaseTitle.isEmpty()) continue
-            if (isNonVideoRelease(releaseTitle)) continue
-            if (!matchesTitleAndEpisode(releaseTitle, allTitles, episodeNum, isStandalone)) continue
-
-            val hash = item.optString("info_hash", "").lowercase().trim()
-            val rawMagnet = item.optString("magnet_uri", "").trim()
-            if (hash.length != 40 && !rawMagnet.startsWith("magnet:", true)) continue
-
-            val seeds = if (item.has("seeders") && !item.isNull("seeders")) item.optInt("seeders", 0) else null
-            if (seeds != null && seeds <= 0) continue
-
-            val totalSize = item.optLong("total_size", 0L).takeIf { it > 0L }
-            val magnet = buildEnrichedMagnet(hash, rawMagnet, releaseTitle)
-            val audio = CrunchyrollStreamEngine.detectAudioType(releaseTitle)
-            val quality = detectFallbackQuality(releaseTitle)
-            val score = scoreFallbackRelease(
-                releaseTitle = releaseTitle,
-                audio = audio,
-                quality = quality,
-                seeders = seeds,
-                isAdultOrEcchi = isAdultOrEcchi,
-                preferredAudio = preferredAudio,
-                preferredQuality = preferredQuality
-            )
-
-            results += StreamLink(
-                url = magnet,
-                quality = quality,
-                sourceName = buildFallbackSourceLabel("AnimeTosho", releaseTitle, audio, quality),
-                isTorrent = true,
-                infoHash = hash.ifEmpty { null },
-                audioType = audio,
-                methodType = "ARCHIVE",
-                seeders = seeds,
-                filename = releaseTitle,
-                formatBadge = quality,
-                sizeBytes = totalSize,
-                score = score
-            )
-        }
-        results
-    }
-
-    /**
      * Queries Nyaa / Sukebei RSS XML feeds (with mirror fallback if primary domain fails).
      */
     private suspend fun searchNyaaRss(
@@ -260,9 +185,13 @@ internal object FallbackStreamResolvers {
         preferredQuality: String,
         sourceLabelPrefix: String
     ): List<StreamLink> = withContext(Dispatchers.IO) {
+        val baseQuery = cleanAnimeTitle(queryTitle).ifBlank { queryTitle }
         val queries = buildList {
-            if (!isStandalone) add("$queryTitle ${episodeNum.toString().padStart(2, '0')}")
-            add(queryTitle)
+            if (!isStandalone) {
+                add("$baseQuery ${episodeNum.toString().padStart(2, '0')}")
+                add("$baseQuery $episodeNum")
+            }
+            add(baseQuery)
         }.distinct()
 
         val found = mutableListOf<StreamLink>()
@@ -628,22 +557,38 @@ internal object FallbackStreamResolvers {
         val lower = releaseTitle.lowercase()
         val isBatchOrComplete = lower.contains("batch") ||
             lower.contains("complete") ||
+            lower.contains("collection") ||
+            lower.contains("bdbox") ||
+            lower.contains("bd-box") ||
+            lower.contains("bluray-box") ||
+            lower.contains("s01") ||
+            lower.contains("s1") ||
+            Regex("全\\s*\\d+\\s*話").containsMatchIn(releaseTitle) ||
             Regex("\\b0*1\\s*[-~]\\s*\\d{1,3}\\b").containsMatchIn(lower) ||
-            (episodeNum == 1 && (lower.contains("ova") || lower.contains("bd") || lower.contains("uncensored")))
+            Regex("(?i)vol\\.?\\s*0*1\\s*[-~]\\s*\\d{1,3}").containsMatchIn(lower) ||
+            (episodeNum == 1 && (lower.contains("ova") || lower.contains("oad") || lower.contains("bd") || lower.contains("uncensored")))
         return isBatchOrComplete
     }
 
-    private fun matchesAnyTitleWords(releaseTitle: String, candidateTitles: List<String>): Boolean {
-        val normalizedRelease = normalizeWords(releaseTitle)
-        if (normalizedRelease.isEmpty()) return false
+    internal fun matchesAnyTitleWords(releaseTitle: String, candidateTitles: List<String>): Boolean {
+        val normRelease = normalizeKey(releaseTitle)
+        val normalizedReleaseWords = normalizeWords(releaseTitle)
+        if (normRelease.isEmpty() && normalizedReleaseWords.isEmpty()) return false
+
         return candidateTitles.any { candidate ->
-            val words = normalizeWords(candidate).filter { it.length >= 3 || it.all(Char::isDigit) }
-            if (words.isEmpty()) {
-                normalizeKey(releaseTitle).contains(normalizeKey(candidate))
-            } else {
-                val hits = words.count { it in normalizedRelease }
-                hits >= maxOf(1, (words.size * 0.65).toInt())
+            val normCandidate = normalizeKey(candidate)
+            if (normCandidate.length >= 3 && normRelease.contains(normCandidate)) {
+                return@any true
             }
+
+            val words = normalizeWords(candidate).filter { it.length >= 3 || it.all(Char::isDigit) }
+            if (words.isNotEmpty() && normalizedReleaseWords.isNotEmpty()) {
+                val hits = words.count { it in normalizedReleaseWords }
+                if (hits >= maxOf(1, (words.size * 0.6).toInt())) {
+                    return@any true
+                }
+            }
+            false
         }
     }
 

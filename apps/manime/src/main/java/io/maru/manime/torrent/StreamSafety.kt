@@ -10,12 +10,13 @@ internal const val STREAM_READ_TIMEOUT_MS = 60_000
 private const val COPY_BUFFER_BYTES = 64 * 1024
 
 private val markedEpisode = Regex("(?i)(?<![a-z0-9])(?:s\\d{1,3}[ ._-]*)?e(?:p(?:isode)?)?[ ._-]*(\\d{1,4})(?:v\\d+)?(?=[^a-z0-9]|$)")
-private val releaseEpisode = Regex("(?i)(?:\\s-\\s*|_)(\\d{1,4})(?:v\\d+)?(?=[\\s._\\[()\\]-]|$)")
-private val numberedEpisode = Regex("(?i)^(\\d{1,4})(?:v\\d+)?$")
+private val volumeOrPartEpisode = Regex("(?i)(?<![a-z0-9])(?:vol(?:ume)?|part|#)[ ._-]*(\\d{1,3})(?:v\\d+)?(?=[^a-z0-9]|$)")
+private val releaseEpisode = Regex("(?i)(?:\\s-\\s*|_)(\\d{1,3})(?:v\\d+)?(?=[\\s._\\[()\\]-]|$)")
+private val numberedEpisode = Regex("(?i)^(\\d{1,3})(?:v\\d+)?$")
 
 internal fun torrentEpisodeNumber(fileName: String): Int? {
     val stem = fileName.substringBeforeLast('.')
-    val match = markedEpisode.find(stem) ?: releaseEpisode.find(stem) ?: numberedEpisode.matchEntire(stem)
+    val match = markedEpisode.find(stem) ?: volumeOrPartEpisode.find(stem) ?: releaseEpisode.find(stem) ?: numberedEpisode.matchEntire(stem)
     return match?.groupValues?.get(1)?.toIntOrNull()
 }
 

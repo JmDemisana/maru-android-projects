@@ -137,15 +137,50 @@ object LocalLibraryStore {
             }
         }
 
-        val grouped = groupMediaIntoLists(mergedById.values.toList()).toMutableMap()
-        // Preserve any custom AniList lists from remoteLists
-        val standardNames = setOf("Watching", "Rewatching", "Planning", "Completed", "Paused", "Dropped")
-        for ((name, items) in remoteLists) {
-            if (name !in standardNames && items.isNotEmpty()) {
-                grouped[name] = items.map { mergedById[it.mediaId] ?: it }
-            }
+        if (remoteLists.isEmpty()) {
+            return groupMediaIntoLists(mergedById.values.toList())
         }
-        return grouped
+
+        val result = LinkedHashMap<String, MutableList<AnimeMedia>>()
+        val placedMediaIds = mutableSetOf<Int>()
+
+        for ((listName, items) in remoteLists) {
+            val list = mutableListOf<AnimeMedia>()
+            for (item in items) {
+                val updated = mergedById[item.mediaId] ?: item
+                list.add(updated)
+                placedMediaIds.add(item.mediaId)
+            }
+            result[listName] = list
+        }
+
+        val unplaced = mergedById.values.filter { it.mediaId !in placedMediaIds }
+        for (item in unplaced) {
+            val targetList = when (item.listStatus?.uppercase()) {
+                "CURRENT" -> if (result.containsKey("Watching")) "Watching" else result.keys.firstOrNull() ?: "Watching"
+                "REPEATING" -> if (result.containsKey("Rewatching")) "Rewatching" else "Watching"
+                "PLANNING" -> if (result.containsKey("Planning")) "Planning" else "Watching"
+                "PAUSED" -> if (result.containsKey("Paused")) "Paused" else "Watching"
+                "DROPPED" -> if (result.containsKey("Dropped")) "Dropped" else "Watching"
+                "COMPLETED" -> {
+                    val fmt = item.format?.uppercase()
+                    val matchingList = when (fmt) {
+                        "TV", "TV_SHORT" -> result.keys.firstOrNull { it.contains("TV", ignoreCase = true) && it.contains("Completed", ignoreCase = true) }
+                        "MOVIE" -> result.keys.firstOrNull { it.contains("Movie", ignoreCase = true) && it.contains("Completed", ignoreCase = true) }
+                        "OVA", "OAD" -> result.keys.firstOrNull { it.contains("OVA", ignoreCase = true) && it.contains("Completed", ignoreCase = true) }
+                        "ONA" -> result.keys.firstOrNull { it.contains("ONA", ignoreCase = true) && it.contains("Completed", ignoreCase = true) }
+                        "MUSIC" -> result.keys.firstOrNull { it.contains("Music", ignoreCase = true) && it.contains("Completed", ignoreCase = true) }
+                        "SPECIAL" -> result.keys.firstOrNull { it.contains("Special", ignoreCase = true) && it.contains("Completed", ignoreCase = true) }
+                        else -> null
+                    }
+                    matchingList ?: result.keys.firstOrNull { it.contains("Completed", ignoreCase = true) } ?: "Completed"
+                }
+                else -> "Watching"
+            }
+            result.getOrPut(targetList) { mutableListOf() }.add(item)
+        }
+
+        return result
     }
 
     fun groupMediaIntoLists(entries: List<AnimeMedia>): Map<String, List<AnimeMedia>> {
@@ -481,6 +516,7 @@ object LocalLibraryStore {
                 put("title", m.title)
                 put("titleEnglish", m.titleEnglish ?: "")
                 put("titleRomaji", m.titleRomaji ?: "")
+                put("titleNative", m.titleNative ?: "")
                 put("coverUrl", m.coverUrl ?: "")
                 put("bannerUrl", m.bannerUrl ?: "")
                 put("episodes", m.episodes ?: 0)
@@ -517,6 +553,7 @@ object LocalLibraryStore {
                 title = title,
                 titleEnglish = o.optString("titleEnglish").takeIf { it.isNotBlank() },
                 titleRomaji = o.optString("titleRomaji").takeIf { it.isNotBlank() },
+                titleNative = o.optString("titleNative").takeIf { it.isNotBlank() },
                 coverUrl = o.optString("coverUrl").takeIf { it.isNotBlank() },
                 bannerUrl = o.optString("bannerUrl").takeIf { it.isNotBlank() },
                 accentColor = null,

@@ -225,7 +225,7 @@ fun AnimeDetailScreen(
                     preferredAudio = audioMode,
                     preferredQuality = prefs.preferredQuality.first(),
                     isMovie = anime.format == "MOVIE",
-                    altTitles = listOfNotNull(anime.titleEnglish, anime.titleRomaji, anime.title),
+                    altTitles = anime.candidateTitlesForStream,
                     isStandalone = anime.isStandaloneFeature,
                     isAdult = anime.isAdult,
                     genres = anime.genres,
