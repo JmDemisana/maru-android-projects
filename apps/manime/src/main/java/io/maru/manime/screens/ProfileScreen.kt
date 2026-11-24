@@ -292,7 +292,7 @@ fun ProfileScreen(
                     verticalArrangement = Arrangement.Bottom,
                     modifier = Modifier
                         .heightIn(min = 48.dp)
-                        .width(IntrinsicSize.Min)
+                        .width(IntrinsicSize.Max)
                         .selectable(selected = isSelected, role = Role.Tab) {
                             selectedCategory = category
                             selectedOfflineSeriesId = null
@@ -304,7 +304,9 @@ fun ProfileScreen(
                         fontSize = 13.sp,
                         fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.SemiBold,
                         color = textColor,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
                     )
                     Box(
                         modifier = Modifier

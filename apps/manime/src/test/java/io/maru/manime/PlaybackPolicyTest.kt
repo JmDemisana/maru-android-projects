@@ -67,12 +67,29 @@ class PlaybackPolicyTest {
     }
 
     @Test fun contentAdvisoryMatchesCrunchyrollMaturityDescriptors() {
+        // Sailor Moon Crystal: Mahou Shoujo transformation silhouettes have Nudity (isAdult=true on AniList tag),
+        // which must NEVER mark Sailor Moon as 18+ or Nudity!
+        val sailorMoon = deriveContentAdvisory(
+            isAdult = false,
+            genres = listOf("Action", "Fantasy", "Mahou Shoujo", "Romance"),
+            tags = listOf(
+                MediaTag("Mahou Shoujo", rank = 92),
+                MediaTag("Henshin", rank = 80),
+                MediaTag("Nudity", rank = 56, isAdult = true),
+                MediaTag("Suicide", rank = 52)
+            )
+        )
+        assertEquals("14+", sailorMoon.ageRating)
+        assertFalse(sailorMoon.isMature)
+        assertEquals(listOf("Fantasy Violence"), sailorMoon.warnings)
+
+        // Genuine 18+ mature horror/gore or adult entry
         val mature = deriveContentAdvisory(
             isAdult = false,
-            genres = listOf("Action", "Drama"),
+            genres = listOf("Action", "Horror", "Psychological"),
             tags = listOf(
-                MediaTag("Gore", rank = 78),
-                MediaTag("Drugs", rank = 65)
+                MediaTag("Gore", rank = 88),
+                MediaTag("Drugs", rank = 75)
             )
         )
         assertEquals("18+", mature.ageRating)
@@ -81,10 +98,11 @@ class PlaybackPolicyTest {
         assertTrue("Gore" in mature.warnings)
         assertTrue("Drugs" in mature.warnings)
 
+        // Standard Ecchi (e.g. Eromanga Sensei / kissxsis) -> 16+, not 18+
         val ecchi = deriveContentAdvisory(
             isAdult = false,
             genres = listOf("Comedy", "Ecchi"),
-            tags = emptyList()
+            tags = listOf(MediaTag("Large Breasts", rank = 72, isAdult = true))
         )
         assertEquals("16+", ecchi.ageRating)
         assertEquals(listOf("Sexual Themes"), ecchi.warnings)

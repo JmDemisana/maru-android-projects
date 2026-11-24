@@ -16,6 +16,7 @@ import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -73,6 +74,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.SubtitleView
 import io.maru.manime.*
 import io.maru.manime.extensions.AniSkipInterval
 import io.maru.manime.extensions.CrunchyrollStreamEngine
@@ -280,6 +282,15 @@ private fun EpisodePlayerScreen(
     val rememberPosition by prefs.rememberPosition.collectAsState(initial = true)
     val autoSkipIntro by prefs.autoSkipIntro.collectAsState(initial = false)
     val swipeGesturesEnabled by prefs.swipeGesturesEnabled.collectAsState(initial = true)
+    val subtitleBlackFill by prefs.subtitleBlackFill.collectAsState(initial = true)
+    val subtitleSize by prefs.subtitleSize.collectAsState(initial = "MEDIUM")
+
+    var advisoryMedia by remember(media.mediaId) { mutableStateOf(media) }
+    var showOpeningAdvisory by remember { mutableStateOf(false) }
+    var hasShownOpeningAdvisory by remember { mutableStateOf(false) }
+    val openingAdvisory = remember(advisoryMedia.isAdult, advisoryMedia.genres, advisoryMedia.tags) {
+        advisoryMedia.contentAdvisory
+    }
 
     val latestRememberPosition by rememberUpdatedState(rememberPosition)
     val latestWatchedCallback by rememberUpdatedState(onEpisodeWatched)
@@ -481,6 +492,15 @@ private fun EpisodePlayerScreen(
     }
 
     LaunchedEffect(media.mediaId, episodeNum) {
+        if (media.genres.isEmpty() && media.tags.isEmpty()) {
+            launch {
+                runCatching {
+                    AniListClient.getMediaDetail(media.mediaId, token.ifBlank { null })
+                }.onSuccess { detailed ->
+                    advisoryMedia = detailed
+                }
+            }
+        }
         if (offlineOnly) return@LaunchedEffect
         launch {
             try {
@@ -933,6 +953,15 @@ private fun EpisodePlayerScreen(
         }
     }
 
+    LaunchedEffect(hasRenderedFrame, isCasting) {
+        if ((hasRenderedFrame || isCasting) && !hasShownOpeningAdvisory) {
+            hasShownOpeningAdvisory = true
+            showOpeningAdvisory = true
+            delay(3800)
+            showOpeningAdvisory = false
+        }
+    }
+
     LaunchedEffect(gestureHideTick) {
         if (gestureHideTick > 0) {
             delay(900)
@@ -1068,25 +1097,17 @@ private fun EpisodePlayerScreen(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
-                    subtitleView?.apply {
-                        setApplyEmbeddedStyles(true)
-                        setApplyEmbeddedFontSizes(true)
-                        setBottomPaddingFraction(0.06f)
-                        setStyle(
-                            CaptionStyleCompat(
-                                android.graphics.Color.WHITE,
-                                android.graphics.Color.TRANSPARENT,
-                                android.graphics.Color.TRANSPARENT,
-                                CaptionStyleCompat.EDGE_TYPE_OUTLINE,
-                                android.graphics.Color.BLACK,
-                                Typeface.DEFAULT_BOLD
-                            )
-                        )
+                    subtitleView?.let { subView ->
+                        subView.setBottomPaddingFraction(0.06f)
+                        applySubtitleAppearance(subView, subtitleBlackFill, subtitleSize)
                     }
                 }
             },
             update = { view ->
                 if (view.resizeMode != videoResizeMode) view.resizeMode = videoResizeMode
+                view.subtitleView?.let { subView ->
+                    applySubtitleAppearance(subView, subtitleBlackFill, subtitleSize)
+                }
             },
             modifier = Modifier.fillMaxSize()
         )
@@ -1512,6 +1533,25 @@ private fun EpisodePlayerScreen(
             }
         }
 
+        // Netflix / Crunchyroll Opening Content Warning Toast (first ~4 seconds of video playback!)
+        val advisoryTopPad by animateDpAsState(
+            targetValue = if (controlsShowing) 64.dp else 20.dp,
+            animationSpec = tween(200),
+            label = "advisory_top_pad"
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing),
+            contentAlignment = Alignment.TopStart
+        ) {
+            PlayerOpeningAdvisory(
+                advisory = openingAdvisory,
+                visible = showOpeningAdvisory && !isInPipMode && !showFullSettingsPage && resolveError == null,
+                modifier = Modifier.padding(start = 20.dp, top = advisoryTopPad)
+            )
+        }
+
         // Brightness / Volume Swipe HUD Pill at Top Center
         Box(
             modifier = Modifier
@@ -1744,8 +1784,49 @@ private fun EpisodePlayerScreen(
                                 val subGroups = playbackTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
                                 val subsCurrentlyOff = subtitlesEnabled == false ||
                                     exoPlayer.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                     Text("Subtitles", color = CrunchyOrange, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+
+                                    GlassFeatureRow(
+                                        label = "Black fill behind subtitles",
+                                        subtitle = "Adds Crunchyroll-style dark background box behind subtitle lines",
+                                        checked = subtitleBlackFill,
+                                        onCheckedChange = { enabled ->
+                                            scope.launch { prefs.setSubtitleBlackFill(enabled) }
+                                        }
+                                    )
+
+                                    Text("Subtitle size", color = MaruTextStrong, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        listOf(
+                                            "SMALL" to "Small",
+                                            "MEDIUM" to "Normal",
+                                            "LARGE" to "Large",
+                                            "EXTRA_LARGE" to "XL"
+                                        ).forEach { (sizeKey, sizeLabel) ->
+                                            val sel = subtitleSize == sizeKey
+                                            Surface(
+                                                onClick = {
+                                                    scope.launch { prefs.setSubtitleSize(sizeKey) }
+                                                },
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = if (sel) CrunchyOrange else CrunchyCardBg,
+                                                border = BorderStroke(1.dp, if (sel) CrunchyOrange else CrunchyBorder),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Box(modifier = Modifier.padding(vertical = 9.dp), contentAlignment = Alignment.Center) {
+                                                    Text(
+                                                        text = sizeLabel,
+                                                        fontSize = 12.sp,
+                                                        fontWeight = FontWeight.ExtraBold,
+                                                        color = if (sel) Color.Black else Color.White,
+                                                        maxLines = 1,
+                                                        softWrap = false
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
 
                                     Surface(
                                         onClick = {
@@ -1895,6 +1976,47 @@ private fun EpisodePlayerScreen(
                 onDismiss = { showCastDialog = false }
             )
         }
+    }
+}
+
+@OptIn(UnstableApi::class)
+private fun applySubtitleAppearance(
+    subtitleView: SubtitleView,
+    blackFill: Boolean,
+    sizeKey: String
+) {
+    val scale = when (sizeKey) {
+        "SMALL" -> 0.80f
+        "LARGE" -> 1.25f
+        "EXTRA_LARGE" -> 1.50f
+        else -> 1.00f
+    }
+    subtitleView.setApplyEmbeddedFontSizes(false)
+    subtitleView.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * scale)
+    if (blackFill) {
+        subtitleView.setApplyEmbeddedStyles(false)
+        subtitleView.setStyle(
+            CaptionStyleCompat(
+                android.graphics.Color.WHITE,
+                android.graphics.Color.argb(204, 0, 0, 0),
+                android.graphics.Color.TRANSPARENT,
+                CaptionStyleCompat.EDGE_TYPE_NONE,
+                android.graphics.Color.BLACK,
+                Typeface.DEFAULT_BOLD
+            )
+        )
+    } else {
+        subtitleView.setApplyEmbeddedStyles(true)
+        subtitleView.setStyle(
+            CaptionStyleCompat(
+                android.graphics.Color.WHITE,
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+                CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                android.graphics.Color.BLACK,
+                Typeface.DEFAULT_BOLD
+            )
+        )
     }
 }
 

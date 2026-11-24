@@ -694,8 +694,6 @@ fun AnimeDetailScreen(
                                 lineHeight = 16.sp
                             )
 
-                            CrunchyAdvisoryRow(advisory = advisory, compact = true)
-
                             if (currentMedia.listStatus != null) {
                                 val scoreStr = currentMedia.score?.let { formatScoreDisplay(it, userScoreFormat) }
                                 Text(
@@ -989,6 +987,8 @@ fun AnimeDetailScreen(
                                     fontSize = 13.5.sp,
                                     fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.SemiBold,
                                     color = tabColor,
+                                    maxLines = 1,
+                                    softWrap = false,
                                     modifier = Modifier.padding(bottom = 10.dp)
                                 )
                                 Box(

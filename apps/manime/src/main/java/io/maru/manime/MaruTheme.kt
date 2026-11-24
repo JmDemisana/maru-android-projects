@@ -418,24 +418,6 @@ fun PosterCard(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
-            if (media.contentAdvisory.ageRating == "18+") {
-                Surface(
-                    shape = RoundedCornerShape(2.dp),
-                    color = Color(0xD9181920),
-                    border = BorderStroke(0.5.dp, Color(0xFFE05260)),
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(6.dp)
-                ) {
-                    Text(
-                        text = "18+",
-                        fontSize = 9.5.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFFFFB3BA),
-                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-                    )
-                }
-            }
         }
 
         Spacer(modifier = Modifier.height(8.dp))

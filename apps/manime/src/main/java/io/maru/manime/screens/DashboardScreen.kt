@@ -191,23 +191,17 @@ fun DashboardScreen(
                                         lineHeight = 25.sp
                                     )
 
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        CrunchyAdvisoryRow(advisory = hero.contentAdvisory, compact = true)
-                                        Text(
-                                            text = buildString {
-                                                append(if (heroIsDubbed) "Dub | Sub" else "Subtitled")
-                                                if (hero.averageScore != null && hero.averageScore > 0) {
-                                                    append("  •  ★ ${hero.averageScore}%")
-                                                }
-                                            },
-                                            fontSize = 11.5.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = if (heroIsDubbed) CrunchyTeal else MaruTextMuted
-                                        )
-                                    }
+                                    Text(
+                                        text = buildString {
+                                            append(if (heroIsDubbed) "Dub | Sub" else "Subtitled")
+                                            if (hero.averageScore != null && hero.averageScore > 0) {
+                                                append("  •  ★ ${hero.averageScore}%")
+                                            }
+                                        },
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (heroIsDubbed) CrunchyTeal else MaruTextMuted
+                                    )
 
                                     if (cleanHeroDesc.isNotBlank()) {
                                         Text(

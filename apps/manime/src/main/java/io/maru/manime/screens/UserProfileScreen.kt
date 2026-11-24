@@ -341,6 +341,8 @@ fun UserProfileScreen(
                                             fontWeight = FontWeight.Bold,
                                             fontSize = 11.5.sp,
                                             color = if (isSelected) CrunchyOrange else Color.White,
+                                            maxLines = 1,
+                                            softWrap = false,
                                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                                         )
                                     }

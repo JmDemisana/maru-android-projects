@@ -45,6 +45,10 @@ fun SettingsScreen(
     onToggleAutoSkipIntro: (Boolean) -> Unit = {},
     swipeGesturesEnabled: Boolean = true,
     onToggleSwipeGestures: (Boolean) -> Unit = {},
+    subtitleBlackFill: Boolean = true,
+    onToggleSubtitleBlackFill: (Boolean) -> Unit = {},
+    subtitleSize: String = "MEDIUM",
+    onSelectSubtitleSize: (String) -> Unit = {},
     reportProgress: Boolean,
     onToggleReportProgress: (Boolean) -> Unit,
     rememberPosition: Boolean,
@@ -371,6 +375,34 @@ fun SettingsScreen(
                         checked = swipeGesturesEnabled,
                         onCheckedChange = onToggleSwipeGestures
                     )
+
+                    HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
+
+                    GlassFeatureRow(
+                        label = "Black fill behind subtitles",
+                        subtitle = "Crunchyroll-style dark background box behind subtitle lines",
+                        checked = subtitleBlackFill,
+                        onCheckedChange = onToggleSubtitleBlackFill
+                    )
+
+                    Text("Subtitle size", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = MaruTextStrong)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectableGroup(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(
+                            "SMALL" to "Small",
+                            "MEDIUM" to "Normal",
+                            "LARGE" to "Large",
+                            "EXTRA_LARGE" to "XL"
+                        ).forEach { (key, label) ->
+                            SettingChoice(label, subtitleSize == key, Modifier.weight(1f)) {
+                                onSelectSubtitleSize(key)
+                            }
+                        }
+                    }
 
                     HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
 

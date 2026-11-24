@@ -23,8 +23,13 @@ data class ContentAdvisory(
 }
 
 /**
- * Computes Crunchyroll-style age rating and content descriptors (e.g. "18+  Violence, Drugs")
- * from AniList genres, community content tags, and adult flags without leaking plot spoilers.
+ * Computes Netflix / Crunchyroll-style TV maturity rating and content descriptors
+ * shown during the opening seconds of video playback.
+ *
+ * Note: AniList marks community tags like "Nudity" (magical girl silhouette transformations)
+ * or "Large Breasts" with `tag.isAdult = true` even on PG/14+ shows like Sailor Moon!
+ * Never treat `tag.isAdult` alone as 18+; only `media.isAdult == true` or genuinely extreme
+ * R-18+ content escalates to "18+".
  */
 internal fun deriveContentAdvisory(
     isAdult: Boolean,
@@ -32,85 +37,101 @@ internal fun deriveContentAdvisory(
     tags: List<MediaTag>
 ): ContentAdvisory {
     val genreSet = genres.mapTo(mutableSetOf()) { it.trim().lowercase() }
-    val activeTags = tags.filter { it.rank >= 42 || it.isAdult }
-    val tagNames = activeTags.associate { it.name.trim().lowercase() to it.rank }
+    val tagNames = tags
+        .filter { !it.isMediaSpoiler && it.rank >= 50 }
+        .associate { it.name.trim().lowercase() to it.rank }
 
-    fun hasTag(vararg candidates: String, minRank: Int = 45): Boolean =
+    fun hasTag(vararg candidates: String, minRank: Int = 55): Boolean =
         candidates.any { key -> (tagNames[key.lowercase()] ?: 0) >= minRank }
+
+    val isMagicalGirl = "mahou shoujo" in genreSet || hasTag("mahou shoujo", "henshin", minRank = 50)
+    val isEcchiGenre = "ecchi" in genreSet || "hentai" in genreSet
 
     val warnings = linkedSetOf<String>()
     var severity = 0 // 0 = PG, 1 = 14+, 2 = 16+, 3 = 18+
 
-    if (isAdult || activeTags.any { it.isAdult && it.rank >= 50 }) {
-        severity = maxOf(severity, 3)
+    if (isAdult || "hentai" in genreSet) {
+        severity = 3
     }
 
-    // 1. Gore & Graphic / Fantasy Violence
-    if (hasTag("gore", "body horror", "torture", "mutilation", "cannibalism", minRank = 48)) {
+    // 1. Gore, Graphic Violence, or Fantasy / Action Violence
+    val goreRank = maxOf(
+        tagNames["gore"] ?: 0,
+        tagNames["torture"] ?: 0,
+        tagNames["mutilation"] ?: 0,
+        tagNames["cannibalism"] ?: 0,
+        tagNames["body horror"] ?: 0
+    )
+    if (goreRank >= 62) {
         warnings += "Violence"
         warnings += "Gore"
-        val goreRank = maxOf(
-            tagNames["gore"] ?: 0,
-            tagNames["torture"] ?: 0,
-            tagNames["mutilation"] ?: 0,
-            tagNames["cannibalism"] ?: 0
+        val extremeMatureGore = goreRank >= 84 && (
+            "horror" in genreSet || "psychological" in genreSet || "thriller" in genreSet ||
+                hasTag("seinen", minRank = 60)
         )
-        severity = maxOf(severity, if (goreRank >= 72) 3 else 2)
+        severity = maxOf(severity, if (extremeMatureGore) 3 else 2)
     } else if (
         "action" in genreSet ||
         hasTag(
-            "violence", "swordplay", "guns", "military", "war", "terrorism",
+            "swordplay", "guns", "military", "war", "terrorism",
             "assassins", "death game", "battle royale", "yakuza", "gangs", "crime", "martial arts",
-            minRank = 50
+            minRank = 58
         )
     ) {
-        warnings += "Violence"
-        val heavyViolence = hasTag("death game", "terrorism", "yakuza", "gangs", "crime", "war", minRank = 60)
-        severity = maxOf(severity, if (heavyViolence) 2 else 1)
+        val isFantasyAction = isMagicalGirl || (
+            ("fantasy" in genreSet || hasTag("magic", "super power", minRank = 55)) &&
+                !hasTag("crime", "yakuza", "gangs", "terrorism", "death game", "war", minRank = 62)
+        )
+        warnings += if (isFantasyAction) "Fantasy Violence" else "Violence"
+        val grittyViolence = hasTag("death game", "terrorism", "yakuza", "gangs", "crime", minRank = 68)
+        severity = maxOf(severity, if (grittyViolence) 2 else 1)
     }
 
-    // 2. Drugs, Alcohol, Smoking & Gambling
-    if (hasTag("drugs", minRank = 42)) {
-        warnings += "Drugs"
-        severity = maxOf(severity, 3)
-    }
-    if (hasTag("alcohol", "smoking", minRank = 50)) {
-        warnings += "Alcohol & Tobacco"
-        severity = maxOf(severity, 1)
-    }
-    if (hasTag("gambling", minRank = 55)) {
-        warnings += "Gambling"
-        severity = maxOf(severity, 2)
-    }
-
-    // 3. Nudity & Sexual Content / Suggestive Themes
-    if (isAdult || hasTag("nudity", "sexual content", "prostitution", "netorare", minRank = 48)) {
-        if (hasTag("nudity", minRank = 48)) warnings += "Nudity"
+    // 2. Sexual Content / Suggestive Themes (ignoring magical girl transformation silhouettes!)
+    if (isAdult || "hentai" in genreSet) {
+        if (hasTag("nudity", minRank = 50)) warnings += "Nudity"
+        warnings += "Sexual Content"
+        severity = 3
+    } else if (isEcchiGenre && hasTag("nudity", "sexual content", "prostitution", "netorare", minRank = 78)) {
+        warnings += "Nudity"
         warnings += "Sexual Content"
         severity = maxOf(severity, 3)
-    } else if (
-        "ecchi" in genreSet ||
-        hasTag("large breasts", "ensembles", "erotic piercings", "virginity", "voyeurism", minRank = 55)
-    ) {
+    } else if (isEcchiGenre) {
+        if (!isMagicalGirl && hasTag("nudity", minRank = 65)) warnings += "Nudity"
+        warnings += "Sexual Themes"
+        severity = maxOf(severity, 2)
+    } else if (!isMagicalGirl && hasTag("sexual content", "prostitution", "voyeurism", minRank = 70)) {
         warnings += "Sexual Themes"
         severity = maxOf(severity, 2)
     }
 
-    // 4. Self-Harm, Abuse & Psychological / Horror Themes
-    if (hasTag("suicide", "self-harm", minRank = 50)) {
-        warnings += "Self-Harm"
-        severity = maxOf(severity, 3)
+    // 3. Substances & Gambling
+    if (hasTag("drugs", minRank = 68)) {
+        warnings += "Drugs"
+        val extremeCrimeDrugs = (tagNames["drugs"] ?: 0) >= 84 &&
+            ("thriller" in genreSet || "psychological" in genreSet || hasTag("crime", minRank = 65))
+        severity = maxOf(severity, if (extremeCrimeDrugs) 3 else 2)
     }
-    if (hasTag("slavery", "human trafficking", "bullying", "revenge", "denpa", minRank = 58)) {
-        warnings += "Mature Themes"
+    if (hasTag("alcohol", "smoking", minRank = 65)) {
+        warnings += "Alcohol & Tobacco"
+        severity = maxOf(severity, 1)
+    }
+    if (hasTag("gambling", minRank = 65)) {
+        warnings += "Gambling"
         severity = maxOf(severity, 2)
     }
-    if ("horror" in genreSet || hasTag("cosmic horror", "ghost", "zombies", "demons", minRank = 60)) {
+
+    // 4. Mature / Psychological / Frightening Themes
+    if (hasTag("suicide", "self-harm", minRank = 70)) {
+        warnings += "Self-Harm"
+        severity = maxOf(severity, 2)
+    }
+    if ("horror" in genreSet || hasTag("cosmic horror", "zombies", minRank = 68)) {
         warnings += "Frightening Scenes"
         severity = maxOf(severity, if ("horror" in genreSet) 2 else 1)
-    } else if ("psychological" in genreSet || "thriller" in genreSet) {
+    } else if ("psychological" in genreSet || "thriller" in genreSet || hasTag("slavery", "human trafficking", "bullying", minRank = 68)) {
         warnings += "Mature Themes"
-        severity = maxOf(severity, 2)
+        severity = maxOf(severity, if (isMagicalGirl) 1 else 2)
     }
 
     val rating = when (severity) {

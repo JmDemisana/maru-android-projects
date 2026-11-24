@@ -145,9 +145,11 @@ fun SearchScreen(
                 onValueChange = { query = it },
                 placeholder = {
                     Text(
-                        text = if (searchUsers) "Search AniList usernames…" else "Search anime series, movies, or browse below…",
+                        text = if (searchUsers) "Search AniList users…" else "Search anime…",
                         color = MaruTextMuted,
-                        fontSize = 13.5.sp
+                        fontSize = 13.5.sp,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 },
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = CrunchyOrange) },
@@ -179,7 +181,7 @@ fun SearchScreen(
                     .padding(top = 8.dp)
             )
 
-            // Search Mode + Dubbed Filter Chips (only show Anime/Users toggle when typing or in Users mode)
+            // Search Mode (Anime vs AniList Users) + Dubbed Filter Chips (always visible!)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -187,18 +189,16 @@ fun SearchScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (term.isNotEmpty() || searchUsers) {
-                    CrunchyChip(
-                        label = "Anime",
-                        selected = !searchUsers,
-                        onClick = { searchUsers = false }
-                    )
-                    CrunchyChip(
-                        label = "AniList Users",
-                        selected = searchUsers,
-                        onClick = { searchUsers = true }
-                    )
-                }
+                CrunchyChip(
+                    label = "Anime",
+                    selected = !searchUsers,
+                    onClick = { searchUsers = false }
+                )
+                CrunchyChip(
+                    label = "AniList Users",
+                    selected = searchUsers,
+                    onClick = { searchUsers = true }
+                )
                 if (!searchUsers) {
                     CrunchyChip(
                         label = "Dubbed Only",
@@ -415,6 +415,8 @@ private fun CrunchyChip(
             fontSize = 12.sp,
             fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.SemiBold,
             color = if (selected) Color.Black else Color.White,
+            maxLines = 1,
+            softWrap = false,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
         )
     }

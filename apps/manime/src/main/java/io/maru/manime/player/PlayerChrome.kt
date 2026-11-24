@@ -38,6 +38,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.maru.manime.ContentAdvisory
 import io.maru.manime.CrunchyBorder
 import io.maru.manime.CrunchyGold
 import io.maru.manime.CrunchyOrange
@@ -713,6 +714,66 @@ internal fun PlayerUpNext(
             }
             IconButton(onClick = onDismiss) {
                 Icon(Icons.Default.Close, contentDescription = "Cancel autoplay", tint = Color.White)
+            }
+        }
+    }
+}
+
+@Composable
+internal fun PlayerOpeningAdvisory(
+    advisory: ContentAdvisory,
+    visible: Boolean,
+    modifier: Modifier = Modifier
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = slideInHorizontally(tween(260)) { -it / 2 } + fadeIn(tween(220)),
+        exit = fadeOut(tween(320)),
+        modifier = modifier
+    ) {
+        val barColor = when (advisory.ageRating) {
+            "18+" -> Color(0xFFE53935)
+            "16+", "14+" -> CrunchyOrange
+            else -> CrunchyTeal
+        }
+        Surface(
+            color = Color(0xCC090A0D),
+            shape = RoundedCornerShape(topEnd = 6.dp, bottomEnd = 6.dp, topStart = 2.dp, bottomStart = 2.dp)
+        ) {
+            Row(
+                modifier = Modifier.height(IntrinsicSize.Min),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(4.dp)
+                        .fillMaxHeight()
+                        .background(barColor)
+                )
+                Column(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Text(
+                        text = "RATED ${advisory.ageRating}",
+                        color = Color.White,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 13.5.sp,
+                        letterSpacing = 0.6.sp,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                    if (advisory.warnings.isNotEmpty()) {
+                        Text(
+                            text = advisory.warningsText,
+                            color = Color(0xFFD5D8E2),
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 11.5.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
             }
         }
     }
