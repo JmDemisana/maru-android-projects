@@ -575,9 +575,14 @@ internal object FallbackStreamResolvers {
             lower.contains("bluray-box") ||
             lower.contains("s01") ||
             lower.contains("s1") ||
+            lower.contains("tv+oad") ||
+            lower.contains("tv+ova") ||
+            lower.contains("tv + oad") ||
+            lower.contains("tv + ova") ||
             Regex("全\\s*\\d+\\s*話").containsMatchIn(releaseTitle) ||
             Regex("(?<![0-9])0*1\\s*[-~]\\s*\\d{1,3}(?![0-9])").containsMatchIn(lower) ||
-            Regex("(?i)vol\\.?\\s*0*1\\s*[-~]\\s*\\d{1,3}").containsMatchIn(lower)
+            Regex("(?i)vol\\.?\\s*0*1\\s*[-~]\\s*\\d{1,3}").containsMatchIn(lower) ||
+            Regex("\\[\\d{4}[-~]\\d{4}\\]").containsMatchIn(lower)
         return isBatchOrComplete
     }
 
