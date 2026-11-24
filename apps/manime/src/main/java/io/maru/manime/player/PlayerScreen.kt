@@ -79,12 +79,13 @@ import io.maru.manime.*
 import io.maru.manime.extensions.AniSkipInterval
 import io.maru.manime.extensions.CrunchyrollStreamEngine
 import io.maru.manime.extensions.ExternalSubtitleItem
-import io.maru.manime.extensions.HstreamResolver
+import io.maru.manime.extensions.AdultStreamFallback
 import io.maru.manime.extensions.StreamLink
 import io.maru.manime.extensions.SubtitleTrack
 import io.maru.manime.extensions.playbackIdentity
 import io.maru.manime.torrent.STREAM_READ_TIMEOUT_MS
 import io.maru.manime.torrent.TorrentStreamService
+import io.maru.manime.torrent.canPlayWithRating
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -614,9 +615,9 @@ private fun EpisodePlayerScreen(
 
     var streamReload by remember { mutableIntStateOf(0) }
     val isExplicitAdult = isExplicitAdultAnime(media.isAdult, media.genres)
-    var triedHstream by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
-    val canTryHstream = isExplicitAdult && !triedHstream &&
-        HstreamResolver.supports(media.mediaId, episodeNum, media.candidateTitlesForStream)
+    var triedAdultFallback by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
+    val canTryAdultFallback = isExplicitAdult && !triedAdultFallback &&
+        AdultStreamFallback.supports(media.mediaId, episodeNum, media.candidateTitlesForStream)
     LaunchedEffect(streamReload) {
         try {
             isResolvingStreams = true
@@ -624,7 +625,7 @@ private fun EpisodePlayerScreen(
             waitingForAlternative = null
             selectedStream = null
             attemptedSources.clear()
-            triedHstream = false
+            triedAdultFallback = false
             resetPlayback()
             rankedStreams = emptyList()
             val loadSpeed = async {
@@ -638,11 +639,14 @@ private fun EpisodePlayerScreen(
             val offlineEntry = if (skipOffline) null else {
                 TorrentStreamService.getCompletedOfflineEpisode(context, media.mediaId, episodeNum)
             }
+            val offlineNeedsVerifiedSource = offlineEntry?.let { entry ->
+                !entry.canPlayWithRating(isExplicitAdult, media.hasKnownAdultRating)
+            } ?: false
             val resolvedSpeed = loadSpeed.await()
             playbackSpeed = resolvedSpeed
             exoPlayer.playbackParameters = PlaybackParameters(resolvedSpeed)
             if (savedPositionMs == null) savedPositionMs = loadPosition.await() ?: 0L
-            if (offlineEntry != null) {
+            if (offlineEntry != null && !offlineNeedsVerifiedSource) {
                 isOfflinePlayback = true
                 isResolvingStreams = false
                 activeQuality = offlineEntry.quality
@@ -659,7 +663,11 @@ private fun EpisodePlayerScreen(
             }
             if (offlineOnly) {
                 isPlayerBuffering = false
-                resolveError = "This episode is unavailable offline. Download it again to play it here."
+                resolveError = if (offlineNeedsVerifiedSource) {
+                    "Download this episode again from a verified source to watch it offline."
+                } else {
+                    "This episode is unavailable offline. Download it again to play it here."
+                }
                 return@LaunchedEffect
             }
 
@@ -707,7 +715,7 @@ private fun EpisodePlayerScreen(
             )
             startFallback?.cancel()
             rankedStreams = streams
-            triedHstream = streams.any { it.sourceName == HstreamResolver.SOURCE_NAME } ||
+            triedAdultFallback = AdultStreamFallback.containsSource(streams) ||
                 streams.none { !it.isTorrent || it.seeders != 0 }
             isResolvingStreams = false
             if (selectedStream == null || waitingForAlternative != null) {
@@ -749,18 +757,18 @@ private fun EpisodePlayerScreen(
     }
 
     LaunchedEffect(resolveError, streamReload) {
-        if (resolveError == null || selectedStream == null || isOfflinePlayback || offlineOnly || !canTryHstream) {
+        if (resolveError == null || selectedStream == null || isOfflinePlayback || offlineOnly || !canTryAdultFallback) {
             return@LaunchedEffect
         }
-        triedHstream = true
-        val sources = HstreamResolver.resolve(media.mediaId, episodeNum, media.candidateTitlesForStream)
+        triedAdultFallback = true
+        val sources = AdultStreamFallback.resolve(media.mediaId, episodeNum, media.candidateTitlesForStream)
         if (sources.isNotEmpty()) {
             rankedStreams = (rankedStreams + sources).distinctBy { it.playbackIdentity }
             playStream(sources.first())
         }
     }
 
-    val hasFallback = canTryHstream || rankedStreams.any { it.playbackIdentity !in attemptedSources }
+    val hasFallback = canTryAdultFallback || rankedStreams.any { it.playbackIdentity !in attemptedSources }
     LaunchedEffect(playbackAttempt, hasRenderedFrame, hasFallback) {
         val source = selectedStream ?: return@LaunchedEffect
         val attempt = playbackAttempt

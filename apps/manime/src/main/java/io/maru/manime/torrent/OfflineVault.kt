@@ -30,8 +30,12 @@ data class OfflineEpisodeEntry(
     val connectedPeers: Int = 0,
     val statusText: String? = null,
     val retryCandidatesJson: String? = null,
-    val isAdultContent: Boolean? = null
+    val isAdultContent: Boolean? = null,
+    val verifiedAdultEpisode: Boolean = false
 )
+
+internal fun OfflineEpisodeEntry.canPlayWithRating(isAdult: Boolean, hasKnownAdultRating: Boolean): Boolean =
+    verifiedAdultEpisode || (!isAdult && isAdultContent != true && (hasKnownAdultRating || isAdultContent == false))
 
 internal object OfflineVault {
     val lock = Any()
@@ -142,6 +146,7 @@ internal object OfflineVault {
                 put("isCompleted", entry.isCompleted)
                 put("addedAt", entry.addedAt)
                 entry.isAdultContent?.let { put("isAdultContent", it) }
+                if (entry.verifiedAdultEpisode) put("verifiedAdultEpisode", true)
             })
         }
         val index = index(context)
@@ -187,7 +192,8 @@ internal fun readOfflineIndex(vaultDir: File, json: String): List<OfflineEpisode
             progressPercent = 100,
             isCompleted = true,
             addedAt = saved.optLong("addedAt", file.lastModified()),
-            isAdultContent = saved.opt("isAdultContent") as? Boolean
+            isAdultContent = saved.opt("isAdultContent") as? Boolean,
+            verifiedAdultEpisode = saved.optBoolean("verifiedAdultEpisode")
         )
     }.distinctBy { it.mediaId to it.episodeNumber }
 }

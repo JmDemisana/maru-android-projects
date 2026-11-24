@@ -79,8 +79,7 @@ internal object FallbackStreamResolvers {
         preferredAudio: String,
         preferredQuality: String,
         trailerYoutubeId: String? = null,
-        externalLinks: List<ExternalLink> = emptyList(),
-        isAdult: Boolean = false
+        externalLinks: List<ExternalLink> = emptyList()
     ): List<StreamLink> = coroutineScope {
         val cleanTitles = titles
             .flatMap { listOf(it, cleanAnimeTitle(it)) }
@@ -90,11 +89,10 @@ internal object FallbackStreamResolvers {
             .take(8)
         if (cleanTitles.isEmpty()) return@coroutineScope emptyList()
 
-        val isAdultOrEcchi = isAdult || isEcchi
         val displayTitle = cleanTitles.first()
         val tasks = buildList {
-            // 1. Uncensored Adult / Ecchi -> Sukebei Nyaa (Art - Anime c=1_1) using Romanized titles first
-            if (isAdultOrEcchi) {
+            // 1. Uncensored Ecchi -> Sukebei Nyaa (Art - Anime c=1_1) using Romanized titles first
+            if (isEcchi) {
                 for (t in cleanTitles.take(4)) {
                     val cleanBase = cleanAnimeTitle(t).ifBlank { t }
                     add(async(Dispatchers.IO) {
@@ -105,7 +103,7 @@ internal object FallbackStreamResolvers {
                             allTitles = cleanTitles,
                             episodeNum = episodeNum,
                             isStandalone = isStandalone,
-                            isAdultOrEcchi = true,
+                            isEcchi = true,
                             preferredAudio = preferredAudio,
                             preferredQuality = preferredQuality,
                             sourceLabelPrefix = "Uncensored Vault"
@@ -116,29 +114,24 @@ internal object FallbackStreamResolvers {
 
             // 2. Nyaa RSS (main anime index):
             // Catches English-translated anime (c=1_2) and general anime (c=1_0), or all categories (c=0_0) for concerts
-            if (!isAdult) {
-                val nyaaCategories = when {
-                    isMusicOrConcert -> listOf("0_0")
-                    else -> listOf("1_2", "1_0")
-                }
-                for (t in cleanTitles.take(3)) {
-                    val cleanBase = cleanAnimeTitle(t).ifBlank { t }
-                    for (cat in nyaaCategories) {
-                        add(async(Dispatchers.IO) {
-                            searchNyaaRss(
-                                bases = NYAA_BASES,
-                                category = cat,
-                                queryTitle = cleanBase,
-                                allTitles = cleanTitles,
-                                episodeNum = episodeNum,
-                                isStandalone = isStandalone || isMusicOrConcert,
-                                isAdultOrEcchi = isEcchi,
-                                preferredAudio = preferredAudio,
-                                preferredQuality = preferredQuality,
-                                sourceLabelPrefix = if (isMusicOrConcert) "Concert / MV Archive" else if (isEcchi) "Ecchi / Archive" else "Archive"
-                            )
-                        })
-                    }
+            val nyaaCategories = if (isMusicOrConcert) listOf("0_0") else listOf("1_2", "1_0")
+            for (t in cleanTitles.take(3)) {
+                val cleanBase = cleanAnimeTitle(t).ifBlank { t }
+                for (cat in nyaaCategories) {
+                    add(async(Dispatchers.IO) {
+                        searchNyaaRss(
+                            bases = NYAA_BASES,
+                            category = cat,
+                            queryTitle = cleanBase,
+                            allTitles = cleanTitles,
+                            episodeNum = episodeNum,
+                            isStandalone = isStandalone || isMusicOrConcert,
+                            isEcchi = isEcchi,
+                            preferredAudio = preferredAudio,
+                            preferredQuality = preferredQuality,
+                            sourceLabelPrefix = if (isMusicOrConcert) "Concert / MV Archive" else if (isEcchi) "Ecchi / Archive" else "Archive"
+                        )
+                    })
                 }
             }
 
@@ -178,7 +171,7 @@ internal object FallbackStreamResolvers {
         allTitles: List<String>,
         episodeNum: Int,
         isStandalone: Boolean,
-        isAdultOrEcchi: Boolean,
+        isEcchi: Boolean,
         preferredAudio: String,
         preferredQuality: String,
         sourceLabelPrefix: String
@@ -233,7 +226,7 @@ internal object FallbackStreamResolvers {
                     audio = audio,
                     quality = quality,
                     seeders = seeds,
-                    isAdultOrEcchi = isAdultOrEcchi,
+                    isEcchi = isEcchi,
                     preferredAudio = preferredAudio,
                     preferredQuality = preferredQuality
                 )
@@ -647,7 +640,7 @@ internal object FallbackStreamResolvers {
         audio: String,
         quality: String,
         seeders: Int?,
-        isAdultOrEcchi: Boolean,
+        isEcchi: Boolean,
         preferredAudio: String,
         preferredQuality: String
     ): Int {
@@ -661,7 +654,7 @@ internal object FallbackStreamResolvers {
             s >= 3 -> 120
             else -> 40
         }
-        if (isAdultOrEcchi && (lower.contains("uncen") || lower.contains("at-x") || lower.contains("bd") || lower.contains("bluray"))) {
+        if (isEcchi && (lower.contains("uncen") || lower.contains("at-x") || lower.contains("bd") || lower.contains("bluray"))) {
             score += 220
         }
         if (preferredAudio.equals("DUB", true) && (audio == "DUB" || audio == "DUAL_AUDIO")) {

@@ -1,9 +1,11 @@
 package io.maru.manime.extensions
 
-import io.maru.manime.cleanAnimeTitle
 import io.maru.manime.readResponse
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.Cookie
 import okhttp3.CookieJar
@@ -18,7 +20,8 @@ import org.json.JSONObject
 import org.jsoup.Jsoup
 import java.io.IOException
 import java.net.URLDecoder
-import java.net.URLEncoder
+import java.text.Normalizer
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -31,10 +34,6 @@ internal object HstreamResolver {
         .callTimeout(8, TimeUnit.SECONDS)
         .followRedirects(false)
         .build()
-    private val searchClient = OkHttpClient.Builder()
-        .callTimeout(8, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .build()
     private val mediaHosts = setOf(
         "imoto-str.ane-h.xyz", "chibi-str.imoto-h.xyz", "koneko-str.musume-h.xyz",
         "shinobu-str.rorikon-h.xyz", "oppai-str.shoujo-h.org"
@@ -42,23 +41,22 @@ internal object HstreamResolver {
     private val assetPath = Regex("[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*")
     private val slugEpisodeRegex = Regex("^/hentai/([a-z0-9]+(?:-[a-z0-9]+)*)-(\\d{1,3})/?$", RegexOption.IGNORE_CASE)
     private val videoEpisodeSuffixRegex = Regex("^(.*?)\\s+Episode\\s+(\\d{1,3})$", RegexOption.IGNORE_CASE)
+    private val cardEpisodeSuffix = Regex("\\s*(?:-|Episode)\\s*\\d{1,3}$", RegexOption.IGNORE_CASE)
+    private val animationSuffix = Regex("\\s+the\\s+animation$", RegexOption.IGNORE_CASE)
+    private val separators = Regex("[^\\p{L}\\p{N}]+")
 
-    private data class Series(val slug: String, val title: String, val episodes: Int? = null)
+    private data class Series(val slug: String, val title: String, val episodes: Int)
 
     private val verifiedByAniListId = mapOf(
-        10851 to Series("euphoria", "Euphoria", 6)
+        10851 to Series("euphoria", "Euphoria", 6),
+        6893 to Series("oni-chichi", "Oni Chichi", 2),
+        9308 to Series("oni-chichi-s2", "Oni Chichi 2", 2)
     )
     private val discoveredSlugByAniListId = ConcurrentHashMap<Int, String>()
 
-    // Edition / sequel markers that must NOT appear on only one side of a title match
-    private val EDITION_MARKERS = setOf(
-        "2", "3", "4", "ii", "iii", "iv", "special", "specials", "ova2",
-        "revenge", "reborn", "harem", "zero", "encore", "after", "returns", "second", "third", "new"
-    )
-
     fun supports(anilistId: Int, episode: Int, candidateTitles: List<String> = emptyList()): Boolean {
         if (episode <= 0) return false
-        verifiedByAniListId[anilistId]?.let { return it.episodes == null || episode in 1..it.episodes }
+        verifiedByAniListId[anilistId]?.let { return episode in 1..it.episodes }
         return discoveredSlugByAniListId.containsKey(anilistId) || candidateTitles.any { it.isNotBlank() }
     }
 
@@ -71,190 +69,70 @@ internal object HstreamResolver {
 
         val pinned = verifiedByAniListId[anilistId]
         if (pinned != null) {
-            if (pinned.episodes != null && episode !in 1..pinned.episodes) return@withContext emptyList()
-            val resolved = resolveEpisodeSlug(pinned.slug, episode, listOf(pinned.title) + candidateTitles)
-            if (resolved.isNotEmpty()) return@withContext resolved
+            if (episode !in 1..pinned.episodes) return@withContext emptyList()
+            return@withContext resolveEpisodeSlug(pinned.slug, episode, listOf(pinned.title))
         }
 
-        val normalizedCandidates = candidateTitles
-            .map { it.trim() }
-            .filter { it.length >= 2 }
-            .distinct()
-        if (normalizedCandidates.isEmpty()) return@withContext emptyList()
+        if (candidateTitles.none { it.isNotBlank() }) return@withContext emptyList()
 
         discoveredSlugByAniListId[anilistId]?.let { cachedSlug ->
-            val fromCached = resolveEpisodeSlug(cachedSlug, episode, normalizedCandidates)
+            val fromCached = resolveEpisodeSlug(cachedSlug, episode, candidateTitles)
             if (fromCached.isNotEmpty()) return@withContext fromCached
+            discoveredSlugByAniListId.remove(anilistId, cachedSlug)
         }
 
-        val slugCandidates = LinkedHashSet<String>()
-        // 1. Direct Romanized slug candidates (fastest, 0 search round-trip when exact!)
-        for (title in normalizedCandidates.take(4)) {
-            toHstreamSlug(title)?.let { slugCandidates += it }
-            val strippedAnim = title.replace(Regex("(?i)\\s+the\\s+animation$"), "").trim()
-            if (strippedAnim != title) toHstreamSlug(strippedAnim)?.let { slugCandidates += it }
-        }
-
-        for (slug in slugCandidates.take(4)) {
-            val streams = resolveEpisodeSlug(slug, episode, normalizedCandidates)
-            if (streams.isNotEmpty()) {
-                discoveredSlugByAniListId[anilistId] = slug
-                return@withContext streams
-            }
-        }
-
-        // 2. Dynamic Hstream search using Romanized / base titles first
-        val searchedSlugs = searchCandidateSlugs(normalizedCandidates, episode)
-        for (slug in searchedSlugs) {
-            if (slug in slugCandidates) continue
-            val streams = resolveEpisodeSlug(slug, episode, normalizedCandidates)
-            if (streams.isNotEmpty()) {
-                discoveredSlugByAniListId[anilistId] = slug
-                return@withContext streams
-            }
-        }
-
-        emptyList()
+        val slug = searchCandidateSlugs(candidateTitles, episode).singleOrNull() ?: return@withContext emptyList()
+        val streams = resolveEpisodeSlug(slug, episode, candidateTitles)
+        if (streams.isNotEmpty()) discoveredSlugByAniListId[anilistId] = slug
+        streams
     }
 
-    private suspend fun searchCandidateSlugs(candidateTitles: List<String>, targetEpisode: Int): List<String> {
-        val queries = buildSearchQueries(candidateTitles)
-        val matchedSlugs = LinkedHashSet<String>()
-        for (query in queries.take(4)) {
-            try {
-                val encoded = URLEncoder.encode(query, "UTF-8")
-                val searchUrl = site.newBuilder()
-                    .addPathSegment("search")
-                    .addQueryParameter("search", query)
-                    .build()
-                val req = Request.Builder()
-                    .url(searchUrl)
-                    .header("User-Agent", StremioAddonClient.BROWSER_UA)
-                    .build()
-                val html = searchClient.newCall(req).readResponse { res ->
-                    if (res.isSuccessful) res.body?.string() else null
-                } ?: continue
-
-                val doc = Jsoup.parse(html, site.toString())
-                val exactEpSlugs = mutableListOf<String>()
-                val otherEpSlugs = mutableListOf<String>()
-
-                for (anchor in doc.select("a[href*='/hentai/']")) {
-                    val href = anchor.attr("href").trim()
-                    val parsedUrl = href.toHttpUrlOrNull() ?: site.resolve(href) ?: continue
-                    if (!parsedUrl.host.equals(site.host, ignoreCase = true)) continue
-                    val match = slugEpisodeRegex.matchEntire(parsedUrl.encodedPath) ?: continue
-                    val seriesSlug = match.groupValues[1].lowercase()
-                    val epNum = match.groupValues[2].toIntOrNull() ?: continue
-                    val cardText = anchor.text()
-                    // Pre-filter by slug or card title similarity to our candidate titles
-                    val slugAsTitle = seriesSlug.replace('-', ' ')
-                    if (matchesHstreamSeriesTitle(slugAsTitle, candidateTitles) ||
-                        (cardText.isNotBlank() && matchesHstreamSeriesTitle(extractCardSeriesTitle(cardText), candidateTitles))
-                    ) {
-                        if (epNum == targetEpisode) exactEpSlugs += seriesSlug else otherEpSlugs += seriesSlug
-                    }
-                }
-                matchedSlugs.addAll(exactEpSlugs)
-                matchedSlugs.addAll(otherEpSlugs)
-                if (matchedSlugs.isNotEmpty()) break
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-            }
+    private suspend fun searchCandidateSlugs(candidateTitles: List<String>, targetEpisode: Int): List<String> =
+        coroutineScope {
+            buildSearchQueries(candidateTitles).take(4).map { query ->
+                async { searchEpisodeSlugs(query, candidateTitles, targetEpisode) }
+            }.awaitAll().flatten().distinct()
         }
-        return matchedSlugs.take(5)
-    }
 
-    internal fun buildSearchQueries(candidateTitles: List<String>): List<String> {
-        val out = LinkedHashSet<String>()
-        for (raw in candidateTitles) {
-            // Keep ASCII/Latin Romanized & English queries (Hstream search indexes Romaji/Latin text, not Kanji)
-            if (raw.none { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' }) continue
-            val clean = cleanAnimeTitle(raw)
-                .replace(Regex("[^A-Za-z0-9!?'\\s-]"), " ")
-                .replace(Regex("\\s+"), " ")
-                .trim()
-            if (clean.length >= 2) out += clean
-            val beforeColon = raw.split(':', '～', '~').firstOrNull()?.let(::cleanAnimeTitle)
-                ?.replace(Regex("[^A-Za-z0-9!?'\\s-]"), " ")
-                ?.replace(Regex("\\s+"), " ")
-                ?.trim()
-            if (beforeColon != null && beforeColon.length >= 4) out += beforeColon
+    private suspend fun searchEpisodeSlugs(query: String, aliases: List<String>, episode: Int): List<String> {
+        val url = site.newBuilder().addPathSegment("search").addQueryParameter("search", query).build()
+        val request = Request.Builder().url(url).header("User-Agent", StremioAddonClient.BROWSER_UA).build()
+        val html = try {
+            client.fetch(request)
+        } catch (_: IOException) {
+            null
+        } ?: return emptyList()
+        return Jsoup.parse(html, site.toString()).select("a[href*='/hentai/']").mapNotNull { anchor ->
+            val episodeUrl = site.resolve(anchor.attr("href")) ?: return@mapNotNull null
+            if (episodeUrl.host != site.host || !episodeUrl.isHttps) return@mapNotNull null
+            val match = slugEpisodeRegex.matchEntire(episodeUrl.encodedPath) ?: return@mapNotNull null
+            if (match.groupValues[2].toIntOrNull() != episode) return@mapNotNull null
+            val slug = match.groupValues[1].lowercase(Locale.ROOT)
+            val imageLabel = anchor.selectFirst("img[alt]")?.attr("alt").orEmpty()
+            val title = cardEpisodeSuffix.replace(imageLabel, "").trim()
+            slug.takeIf { matchesHstreamSeriesTitle(title, aliases) || matchesHstreamSeriesTitle(slug, aliases) }
         }
-        return out.toList()
     }
 
-    private fun extractCardSeriesTitle(cardText: String): String {
-        val lines = cardText.lines().map { it.trim() }.filter { it.isNotEmpty() }
-        val epLine = lines.firstOrNull { Regex("-\\s*\\d{1,3}$").containsMatchIn(it) } ?: cardText
-        return epLine.replace(Regex("\\s*-\\s*\\d{1,3}$"), "").trim()
-    }
-
-    internal fun toHstreamSlug(title: String): String? {
-        if (title.none { it in 'A'..'Z' || it in 'a'..'z' }) return null
-        val slug = title
-            .replace('×', 'x')
-            .replace('✕', 'x')
-            .lowercase()
-            .replace(Regex("['’`♥♡★☆♪♫]"), "")
-            .replace(Regex("[^a-z0-9]+"), "-")
-            .trim('-')
-        return slug.takeIf { it.length >= 2 }
-    }
+    internal fun buildSearchQueries(candidateTitles: List<String>): List<String> =
+        candidateTitles.map { normalizeTitleWords(it).replace(animationSuffix, "").trim() }
+            .filter { it.length >= 2 }
+            .distinctBy { it.lowercase(Locale.ROOT) }
 
     internal fun matchesHstreamSeriesTitle(hstreamSeriesTitle: String, candidateTitles: List<String>): Boolean {
-        val normTarget = normalizeSeriesKey(hstreamSeriesTitle)
-        val targetTokens = tokenizeSeries(hstreamSeriesTitle)
-        if (normTarget.isEmpty() || targetTokens.isEmpty()) return false
-        val targetEditions = targetTokens.intersect(EDITION_MARKERS)
-
-        return candidateTitles.any { candidate ->
-            val normCand = normalizeSeriesKey(candidate)
-            val candTokens = tokenizeSeries(candidate)
-            if (normCand.isEmpty() || candTokens.isEmpty()) return@any false
-
-            val candEditions = candTokens.intersect(EDITION_MARKERS)
-            // Guard against sequel/edition cross-matching (e.g. "Oni Chichi" != "Oni Chichi 2" / "Oni Chichi Harem")
-            if (targetEditions != candEditions) return@any false
-
-            if (normTarget == normCand) return@any true
-
-            // Allow subtitle omissions when main Romaji title matches cleanly (e.g. "Eroge! H mo Game mo..." vs "Eroge!")
-            val meaningfulCand = candTokens.filter { it.length >= 3 && it !in GENERIC_WORDS }
-            val meaningfulTarget = targetTokens.filter { it.length >= 3 && it !in GENERIC_WORDS }
-            if (meaningfulCand.isEmpty() || meaningfulTarget.isEmpty()) return@any false
-
-            val overlap = meaningfulCand.count { it in meaningfulTarget }
-            val smallerSize = minOf(meaningfulCand.size, meaningfulTarget.size)
-            val largerSize = maxOf(meaningfulCand.size, meaningfulTarget.size)
-
-            if (smallerSize >= 2 && overlap == smallerSize) {
-                // Ensure the shorter title is the leading prefix of the longer title
-                normTarget.startsWith(normCand) || normCand.startsWith(normTarget)
-            } else {
-                largerSize >= 3 && overlap >= maxOf(2, (largerSize * 0.8).toInt())
-            }
-        }
+        val title = normalizeSeriesKey(hstreamSeriesTitle)
+        return title.isNotEmpty() && candidateTitles.any { normalizeSeriesKey(it) == title }
     }
 
-    private val GENERIC_WORDS = setOf("the", "animation", "ova", "oad", "ona", "tv", "and", "series")
+    private fun normalizeSeriesKey(title: String): String =
+        normalizeTitleWords(title).replace(animationSuffix, "").replace(" ", "").lowercase(Locale.ROOT)
 
-    private fun normalizeSeriesKey(raw: String): String =
-        raw.replace('×', 'x')
+    private fun normalizeTitleWords(title: String): String =
+        Normalizer.normalize(title, Normalizer.Form.NFKC)
+            .replace('×', 'x')
             .replace('✕', 'x')
-            .lowercase()
-            .replace(Regex("\\bthe\\s+animation\\b"), "")
-            .replace(Regex("[^a-z0-9]+"), "")
-
-    private fun tokenizeSeries(raw: String): Set<String> =
-        raw.replace('×', 'x')
-            .replace('✕', 'x')
-            .lowercase()
-            .replace(Regex("\\bthe\\s+animation\\b"), " ")
-            .split(Regex("[^a-z0-9]+"))
-            .filter { it.isNotBlank() }
-            .toSet()
+            .replace(separators, " ")
+            .trim()
 
     private suspend fun resolveEpisodeSlug(
         seriesSlug: String,
@@ -310,7 +188,8 @@ internal object HstreamResolver {
                     methodType = "DIRECT",
                     headers = videoHeaders,
                     subtitles = listOf(SubtitleTrack(base.newBuilder().addPathSegment("eng.ass").build().toString(), "en")),
-                    score = 780
+                    score = 780,
+                    verifiedAdultEpisode = true
                 )
             }.distinctBy { it.url }
         } catch (e: CancellationException) {

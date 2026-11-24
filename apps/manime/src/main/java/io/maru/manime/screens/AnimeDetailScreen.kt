@@ -242,7 +242,8 @@ fun AnimeDetailScreen(
             trailerYoutubeId = anime.trailerYoutubeId,
             externalLinks = anime.externalLinks
         )
-        val candidates = selectDownloadCandidates(streams, audioMode)
+        val isExplicitAdult = isExplicitAdultAnime(anime.isAdult, anime.genres)
+        val candidates = selectDownloadCandidates(streams, audioMode, requireVerifiedAdultEpisode = isExplicitAdult)
         if (candidates.isEmpty()) {
             if (!silentToast) {
                 val audioLabel = if (audioMode == "DUB") "English dub" else "playable"
@@ -264,8 +265,7 @@ fun AnimeDetailScreen(
             audioType = primary.audioType,
             quality = primary.quality,
             candidates = candidates,
-            isAdultContent = isExplicitAdultAnime(anime.isAdult, anime.genres)
-                .takeIf { anime.hasKnownAdultRating }
+            isAdultContent = isExplicitAdult.takeIf { anime.hasKnownAdultRating }
         )
         if (!silentToast) {
             val label = if (anime.isStandaloneFeature) anime.title else "Episode $episodeNum"

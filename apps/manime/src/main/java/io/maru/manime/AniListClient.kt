@@ -107,19 +107,16 @@ data class AnimeMedia(
     val addedToListSortKey: Long
         get() = createdAt?.takeIf { it > 0 } ?: updatedAt?.takeIf { it > 0 } ?: listEntryId?.toLong() ?: 0L
 
-    /**
-     * Ordered candidate titles for stream providers (Stremio/Kitsu, Hstream, Sukebei/Nyaa, Cloudstream, Aniyomi).
-     * Providers overwhelmingly index anime and hentai by Romanized title rather than Western localized titles,
-     * so `titleRomaji` and its cleaned/prefix variants always lead before synonyms, native, and English titles.
-     */
+    /** Romaji leads provider searches. Explicit adult titles retain their full catalog aliases. */
     val candidateTitlesForStream: List<String>
-        get() = buildProviderCandidateTitles(
-            titleRomaji = titleRomaji,
-            titleNative = titleNative,
-            titleEnglish = titleEnglish,
-            displayTitle = title,
-            synonyms = synonyms
-        )
+        get() = if (isExplicitAdultAnime(isAdult, genres)) {
+            (listOfNotNull(titleRomaji, titleEnglish, titleNative, title) + synonyms)
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .distinctBy { it.lowercase(java.util.Locale.ROOT) }
+        } else {
+            buildProviderCandidateTitles(titleRomaji, titleNative, titleEnglish, title, synonyms)
+        }
 
     val isReleasing: Boolean get() = status.equals("RELEASING", ignoreCase = true)
 

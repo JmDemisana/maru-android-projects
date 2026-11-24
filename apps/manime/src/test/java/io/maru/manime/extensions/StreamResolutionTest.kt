@@ -145,8 +145,9 @@ class StreamResolutionTest {
 
         val candidates = media.candidateTitlesForStream
         assertEquals("Itadaki! Seieki♥", candidates.first())
-        assertTrue(candidates.indexOf("Itadaki! Seieki") < candidates.indexOf("Vampire Vixen"))
-        assertEquals("itadaki-seieki", HstreamResolver.toHstreamSlug("Itadaki! Seieki♥"))
+        assertTrue("Vampire Vixen" in candidates)
+        assertTrue("いただきっ！セーエキ♥" in candidates)
+        assertFalse("Itadaki! Seieki" in candidates)
         assertTrue(HstreamResolver.matchesHstreamSeriesTitle("Itadaki! Seieki♥", candidates))
         assertFalse(HstreamResolver.matchesHstreamSeriesTitle("Itadaki! Seieki Special", candidates))
 
@@ -157,6 +158,12 @@ class StreamResolutionTest {
         assertTrue(HstreamResolver.matchesHstreamSeriesTitle("Oni Chichi", oniChichiCandidates))
         assertFalse(HstreamResolver.matchesHstreamSeriesTitle("Oni Chichi 2", oniChichiCandidates))
         assertFalse(HstreamResolver.matchesHstreamSeriesTitle("Oni Chichi Harem", oniChichiCandidates))
+        assertFalse(HstreamResolver.matchesHstreamSeriesTitle("Oni Chichi Re-birth", oniChichiCandidates))
+        assertFalse(HstreamResolver.matchesHstreamSeriesTitle("Oni Chichi Rebuild", oniChichiCandidates))
+        assertTrue(HstreamResolver.matchesHstreamSeriesTitle("Otome Domain", listOf("Otome＊Domain THE ANIMATION")))
+        assertEquals(listOf("Oni Chichi", "Demon Father", "鬼父"), HstreamResolver.buildSearchQueries(oniChichiCandidates + "鬼父"))
+        assertTrue(AdultStreamFallback.supports(99441, 1, emptyList()))
+        assertFalse(AdultStreamFallback.supports(99441, 2, listOf("Otome Domain")))
     }
 
     @Test fun combinedAndSplitAniListKitsuSeasonLookupsAvoidSeasonOneCollision() {

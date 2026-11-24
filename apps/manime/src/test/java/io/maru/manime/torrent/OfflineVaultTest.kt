@@ -1,7 +1,9 @@
 package io.maru.manime.torrent
 
+import io.maru.manime.extensions.StreamLink
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -48,5 +50,38 @@ class OfflineVaultTest {
         })
 
         assertTrue(readOfflineIndex(vaultDir, index.toString()).isEmpty())
+    }
+
+    @Test
+    fun adultOfflinePlaybackRequiresVerifiedSourceProvenance() {
+        val vaultDir = folder.newFolder()
+        File(vaultDir, "ep_10_1.nanami").writeText("file")
+        File(vaultDir, "ep_10_2.nanami").writeText("file")
+        val (legacy, verified) = readOfflineIndex(vaultDir, """
+            [
+              {"mediaId":10,"episodeNumber":1,"isCompleted":true,"sizeBytes":4,"isAdultContent":true},
+              {"mediaId":10,"episodeNumber":2,"isCompleted":true,"sizeBytes":4,"isAdultContent":true,"verifiedAdultEpisode":true}
+            ]
+        """.trimIndent())
+
+        assertFalse(legacy.canPlayWithRating(isAdult = true, hasKnownAdultRating = true))
+        assertFalse(legacy.copy(isAdultContent = null).canPlayWithRating(isAdult = false, hasKnownAdultRating = false))
+        assertTrue(legacy.copy(isAdultContent = null).canPlayWithRating(isAdult = false, hasKnownAdultRating = true))
+        assertTrue(verified.canPlayWithRating(isAdult = true, hasKnownAdultRating = true))
+        assertTrue(File(legacy.vaultFilePath).exists())
+    }
+
+    @Test
+    fun adultDownloadsKeepVerificationOnTheChosenProgressiveCandidate() {
+        val unverified = StreamLink("https://example.com/other.mp4", "1080p", "Direct")
+        val verified = unverified.copy(url = "https://example.com/episode.mp4", verifiedAdultEpisode = true)
+        val manifest = verified.copy(url = "https://example.com/episode.mpd")
+
+        val candidates = selectDownloadCandidates(
+            listOf(unverified, manifest, verified), "SUB", requireVerifiedAdultEpisode = true
+        )
+
+        assertEquals(listOf(verified.url), candidates.map { it.url })
+        assertTrue(decodeOfflineCandidates(encodeOfflineCandidates(candidates)).single().verifiedAdultEpisode)
     }
 }

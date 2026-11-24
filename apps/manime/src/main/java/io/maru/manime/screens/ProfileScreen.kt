@@ -49,8 +49,10 @@ import io.maru.manime.torrent.OfflineEpisodeEntry
 import io.maru.manime.torrent.TorrentStreamService
 import io.maru.manime.torrent.selectDownloadCandidates
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private fun OfflineEpisodeEntry.toAnimeSummary() = AnimeMedia(
     mediaId = mediaId,
@@ -277,16 +279,39 @@ fun ProfileScreen(
         scope.launch {
             retryingDownloads[key] = true
             try {
+                val currentMedia = try {
+                    withContext(Dispatchers.IO) {
+                        AniListClient.getMediaDetail(item.mediaId, anilistToken.ifBlank { null })
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                }
+                if (item.isAdultContent == null && currentMedia?.hasKnownAdultRating != true) {
+                    Toast.makeText(context, "Could not verify this title. Try again when online.", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                val isExplicitAdult = item.isAdultContent == true || currentMedia?.let {
+                    isExplicitAdultAnime(it.isAdult, it.genres)
+                } == true
                 val prefQual = prefs?.preferredQuality?.first() ?: item.quality
                 val streams = CrunchyrollStreamEngine.resolveRankedStreams(
                     anilistId = item.mediaId,
-                    animeTitle = item.animeTitle,
+                    animeTitle = currentMedia?.title ?: item.animeTitle,
                     episodeNum = item.episodeNumber,
                     preferredAudio = item.audioType.takeIf { it == "DUB" || it == "SUB" } ?: "SUB",
                     preferredQuality = prefQual,
-                    isAdult = item.isAdultContent == true
+                    isMovie = currentMedia?.format == "MOVIE",
+                    altTitles = currentMedia?.candidateTitlesForStream.orEmpty(),
+                    isStandalone = currentMedia?.isStandaloneFeature == true,
+                    isAdult = isExplicitAdult,
+                    genres = currentMedia?.genres.orEmpty(),
+                    isMusicOrConcert = currentMedia?.isMusicOrConcert == true,
+                    trailerYoutubeId = currentMedia?.trailerYoutubeId,
+                    externalLinks = currentMedia?.externalLinks.orEmpty()
                 )
-                val candidates = selectDownloadCandidates(streams, item.audioType)
+                val candidates = selectDownloadCandidates(streams, item.audioType, requireVerifiedAdultEpisode = isExplicitAdult)
                 if (candidates.isEmpty()) {
                     Toast.makeText(context, "No active download sources found right now.", Toast.LENGTH_SHORT).show()
                 } else {
@@ -304,7 +329,7 @@ fun ProfileScreen(
                         audioType = primary.audioType,
                         quality = primary.quality,
                         candidates = candidates,
-                        isAdultContent = item.isAdultContent
+                        isAdultContent = isExplicitAdult
                     )
                 }
             } catch (e: CancellationException) {

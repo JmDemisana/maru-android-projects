@@ -36,7 +36,8 @@ data class StreamLink(
     val headers: Map<String, String> = emptyMap(),
     val subtitles: List<SubtitleTrack> = emptyList(),
     val sizeBytes: Long? = null,
-    val score: Int = 0
+    val score: Int = 0,
+    val verifiedAdultEpisode: Boolean = false
 )
 
 internal val StreamLink.playbackIdentity: Pair<String, Int?>

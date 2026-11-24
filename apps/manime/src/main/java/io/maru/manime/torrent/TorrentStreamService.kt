@@ -71,13 +71,15 @@ data class OfflineDownloadCandidate(
     val fileIdx: Int? = null,
     val audioType: String = "SUB",
     val quality: String = "1080p",
-    val headers: Map<String, String> = emptyMap()
+    val headers: Map<String, String> = emptyMap(),
+    val verifiedAdultEpisode: Boolean = false
 )
 
 internal fun selectDownloadCandidates(
     streams: List<StreamLink>,
     preferredAudio: String,
-    maxCandidates: Int = 5
+    maxCandidates: Int = 5,
+    requireVerifiedAdultEpisode: Boolean = false
 ): List<OfflineDownloadCandidate> {
     fun isDownloadableHttp(url: String): Boolean {
         val clean = url.substringBefore('?').substringBefore('#').lowercase()
@@ -85,10 +87,13 @@ internal fun selectDownloadCandidates(
             !clean.endsWith(".m3u8") && !clean.endsWith(".mpd")
     }
 
-    val matchingAudio = streams.filter {
+    val eligibleStreams = if (requireVerifiedAdultEpisode) {
+        streams.filter { it.verifiedAdultEpisode && !it.isTorrent }
+    } else streams
+    val matchingAudio = eligibleStreams.filter {
         it.audioType == preferredAudio || it.audioType == "DUAL_AUDIO"
     }
-    val orderedPool = (matchingAudio + streams).distinctBy { (it.infoHash ?: it.url) to it.fileIdx }
+    val orderedPool = (matchingAudio + eligibleStreams).distinctBy { (it.infoHash ?: it.url) to it.fileIdx }
 
     return orderedPool.mapNotNull { s ->
         when {
@@ -98,7 +103,8 @@ internal fun selectDownloadCandidates(
                 fileIdx = null,
                 audioType = s.audioType,
                 quality = s.quality,
-                headers = s.headers
+                headers = s.headers,
+                verifiedAdultEpisode = s.verifiedAdultEpisode
             )
             s.isTorrent && s.url.startsWith("magnet:", ignoreCase = true) && (s.seeders == null || s.seeders > 0) ->
                 OfflineDownloadCandidate(
@@ -125,6 +131,7 @@ internal fun encodeOfflineCandidates(candidates: List<OfflineDownloadCandidate>)
             put("audioType", c.audioType)
             put("quality", c.quality)
             put("headers", headersObj)
+            if (c.verifiedAdultEpisode) put("verifiedAdultEpisode", true)
         })
     }
     return arr.toString()
@@ -155,7 +162,8 @@ internal fun decodeOfflineCandidates(rawJson: String?): List<OfflineDownloadCand
                         fileIdx = if (obj.has("fileIdx") && !obj.isNull("fileIdx")) obj.optInt("fileIdx", -1).takeIf { it >= 0 } else null,
                         audioType = obj.optString("audioType", "SUB"),
                         quality = obj.optString("quality", "1080p"),
-                        headers = headers
+                        headers = headers,
+                        verifiedAdultEpisode = obj.optBoolean("verifiedAdultEpisode")
                     )
                 )
             }
@@ -866,7 +874,7 @@ class TorrentStreamService : Service() {
                     }
                 }
 
-                fun commitFile(source: File, totalBytes: Long, chosenAudio: String, chosenQuality: String): Boolean =
+                fun commitFile(source: File, totalBytes: Long, candidate: OfflineDownloadCandidate): Boolean =
                     synchronized(OfflineVault.lock) {
                         ensureActive()
                         if (finalFile.exists() && !finalFile.delete()) return@synchronized false
@@ -874,8 +882,9 @@ class TorrentStreamService : Service() {
                         try {
                             publishEntry(
                                 entry.copy(
-                                    audioType = chosenAudio,
-                                    quality = chosenQuality,
+                                    audioType = candidate.audioType,
+                                    quality = candidate.quality,
+                                    verifiedAdultEpisode = candidate.verifiedAdultEpisode && !candidate.isTorrent,
                                     sizeBytes = totalBytes,
                                     downloadedBytes = totalBytes,
                                     progressPercent = 100,
@@ -893,12 +902,12 @@ class TorrentStreamService : Service() {
                         true
                     }
 
-                fun finalizeStagingFile(stagingFile: File, totalBytes: Long, chosenAudio: String, chosenQuality: String) {
-                    if (!commitFile(stagingFile, totalBytes, chosenAudio, chosenQuality)) {
+                fun finalizeStagingFile(stagingFile: File, totalBytes: Long, candidate: OfflineDownloadCandidate) {
+                    if (!commitFile(stagingFile, totalBytes, candidate)) {
                         val copy = File.createTempFile("episode_", ".tmp", finalFile.parentFile)
                         try {
                             stagingFile.copyTo(copy, overwrite = true)
-                            check(copy.length() == totalBytes && commitFile(copy, totalBytes, chosenAudio, chosenQuality)) {
+                            check(copy.length() == totalBytes && commitFile(copy, totalBytes, candidate)) {
                                 "Could not save the offline file"
                             }
                         } finally {
@@ -1023,7 +1032,7 @@ class TorrentStreamService : Service() {
                                         if (downloaded < 512 * 1024L || (expectedTotal > 0L && downloaded != expectedTotal)) {
                                             throw OfflineDownloadException("Direct download ended early.")
                                         }
-                                        finalizeStagingFile(stagingFile, downloaded, candidate.audioType, candidate.quality)
+                                        finalizeStagingFile(stagingFile, downloaded, candidate)
                                         succeeded = true
                                     }
                                 } finally {
@@ -1134,7 +1143,7 @@ class TorrentStreamService : Service() {
 
                                     ensureActive()
                                     runCatching { handle.pause() }
-                                    finalizeStagingFile(stagingFile, totalBytes, candidate.audioType, candidate.quality)
+                                    finalizeStagingFile(stagingFile, totalBytes, candidate)
                                     succeeded = true
                                     startWifiSeedingIfEnabled(
                                         key = key,

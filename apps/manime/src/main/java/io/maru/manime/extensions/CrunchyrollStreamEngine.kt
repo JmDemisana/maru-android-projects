@@ -11,10 +11,12 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.net.URLEncoder
+import java.text.Normalizer
 import java.time.LocalDate
 import java.time.format.DateTimeParseException
 import java.util.concurrent.ConcurrentHashMap
@@ -110,7 +112,9 @@ object CrunchyrollStreamEngine {
         "https://opensubtitles.strem.io"
     )
 
-    private val mappingCache = ConcurrentHashMap<Int, Pair<Long, AnimeIdMappings>>()
+    private data class MappingCacheKey(val anilistId: Int, val isAdult: Boolean)
+
+    private val mappingCache = ConcurrentHashMap<MappingCacheKey, Pair<Long, AnimeIdMappings>>()
     private val mappingLocks = Array(64) { Mutex() }
     private val dubStatusCache = ConcurrentHashMap<Pair<Int, Int>, Pair<Long, StreamDubStatus>>()
     private val mappingCacheNanos = TimeUnit.MINUTES.toNanos(30)
@@ -183,12 +187,13 @@ object CrunchyrollStreamEngine {
             .filter { it.isNotEmpty() }
             .distinct()
         val primaryFallback = prioritizedTitles.firstOrNull().orEmpty()
+        val cacheKey = MappingCacheKey(anilistId, isAdult)
         val lock = mappingLocks[anilistId and (mappingLocks.size - 1)]
-        val mappings = cachedMappings(anilistId, primaryFallback) ?: lock.withLock {
-            cachedMappings(anilistId, primaryFallback)
+        val mappings = cachedMappings(cacheKey, primaryFallback) ?: lock.withLock {
+            cachedMappings(cacheKey, primaryFallback)
                 ?: fetchAnimeMappings(anilistId, prioritizedTitles, isAdult).also {
                     if (it.hasSourceIds() || primaryFallback.isNotBlank()) {
-                        mappingCache[anilistId] = System.nanoTime() to it
+                        mappingCache[cacheKey] = System.nanoTime() to it
                     }
                 }
         }
@@ -200,7 +205,7 @@ object CrunchyrollStreamEngine {
         val episodes = fetchKitsuEpisodes(kitsuId, mappings.inferredSeasonNumber, mappings.prequelEpisodeOffset)
         if (episodes.isEmpty()) return@withContext mappings
         val enriched = mappings.copy(episodes = episodes.sortedBy { it.episodeNumber })
-        mappingCache.computeIfPresent(anilistId) { _, cached ->
+        mappingCache.computeIfPresent(cacheKey) { _, cached ->
             if (cached.second === mappings) cached.first to enriched else cached
         }
         enriched
@@ -208,8 +213,8 @@ object CrunchyrollStreamEngine {
 
     private fun AnimeIdMappings.hasSourceIds(): Boolean = kitsuId != null || imdbId != null || combinedRootKitsuId != null
 
-    private fun cachedMappings(anilistId: Int, fallbackTitle: String): AnimeIdMappings? {
-        mappingCache[anilistId]?.let { (cachedAt, mappings) ->
+    private fun cachedMappings(cacheKey: MappingCacheKey, fallbackTitle: String): AnimeIdMappings? {
+        mappingCache[cacheKey]?.let { (cachedAt, mappings) ->
             val maxAge = if (mappings.hasSourceIds() || mappings.episodes.isNotEmpty()) {
                 mappingCacheNanos
             } else if (fallbackTitle.isNotBlank()) {
@@ -380,7 +385,7 @@ object CrunchyrollStreamEngine {
     }
 
     private suspend fun fetchAniZipKitsuIdOnly(anilistId: Int): String? {
-        mappingCache[anilistId]?.second?.kitsuId?.let { return it }
+        mappingCache[MappingCacheKey(anilistId, false)]?.second?.kitsuId?.let { return it }
         return try {
             val req = Request.Builder()
                 .url("https://api.ani.zip/mappings?anilist_id=$anilistId")
@@ -764,13 +769,12 @@ object CrunchyrollStreamEngine {
         externalLinks: List<io.maru.manime.ExternalLink> = emptyList(),
         onStreamsUpdated: (List<StreamLink>) -> Unit = {}
     ): List<StreamLink> = coroutineScope {
-        // Prioritize `altTitles` (which begins with Romanized `titleRomaji` & synonyms) BEFORE Western `animeTitle`!
-        val candidateTitles = (altTitles + listOf(animeTitle))
-            .flatMap { listOf(it, cleanAnimeTitle(it)) }
+        val isExplicitAdult = isExplicitAdultAnime(isAdult, genres)
+        val rawTitles = altTitles + animeTitle
+        val candidateTitles = (if (isExplicitAdult) rawTitles else rawTitles.flatMap { listOf(it, cleanAnimeTitle(it)) })
             .map { it.trim() }
             .filter { it.length >= 2 }
             .distinct()
-        val isExplicitAdult = isExplicitAdultAnime(isAdult, genres)
         val isEcchi = genres.any { it.equals("Ecchi", true) }
         val mappings = getAnimeMappings(
             anilistId = anilistId,
@@ -787,6 +791,7 @@ object CrunchyrollStreamEngine {
             ?: 1
         val expectedAbsoluteEp = expectedEpisodeMeta?.absoluteEpisodeNumber
             ?: (mappings.prequelEpisodeOffset + episodeNum).takeIf { mappings.prequelEpisodeOffset > 0 }
+        val isVerifiedStandalone = isMovie || (isStandalone && mappings.episodeCount == 1)
         val runFallbackImmediately = !isExplicitAdult && (lookups.isEmpty() || isEcchi || isMusicOrConcert)
 
         val displayName = URLEncoder.encode("$animeTitle - Episode $episodeNum", "UTF-8")
@@ -802,7 +807,18 @@ object CrunchyrollStreamEngine {
                             val rawStreams = client.getStreams(type, id)
                             for (s in rawStreams) {
                                 val fileLine = s.filename ?: s.title?.substringAfterLast('\n') ?: ""
-                                if (!isMovie && isMismatchedSeasonFile(fileLine, expectedSeason, expectedAbsoluteEp)) {
+                                if (isExplicitAdult) {
+                                    val directUrl = s.url?.toHttpUrlOrNull()
+                                    if (directUrl?.isHttps != true) continue
+                                    if (!matchesAdultEpisodeLabel(
+                                            label = fileLine,
+                                            candidateTitles = candidateTitles,
+                                            episode = episodeNum,
+                                            expectedSeason = expectedSeason,
+                                            expectedAbsoluteEpisode = expectedAbsoluteEp,
+                                            isVerifiedStandalone = isVerifiedStandalone
+                                        )) continue
+                                } else if (!isMovie && isMismatchedSeasonFile(fileLine, expectedSeason, expectedAbsoluteEp)) {
                                     continue
                                 }
                                 val combinedText = listOfNotNull(s.name, s.title, s.filename).joinToString(" ")
@@ -834,7 +850,8 @@ object CrunchyrollStreamEngine {
                                             headers = s.headers,
                                             subtitles = s.subtitles,
                                             sizeBytes = s.sizeBytes,
-                                            score = score + 80
+                                            score = score + 80,
+                                            verifiedAdultEpisode = isExplicitAdult
                                         )
                                     )
                                 } else if (!s.infoHash.isNullOrBlank()) {
@@ -883,44 +900,20 @@ object CrunchyrollStreamEngine {
                         preferredAudio = preferredAudio,
                         preferredQuality = preferredQuality,
                         trailerYoutubeId = trailerYoutubeId,
-                        externalLinks = externalLinks,
-                        isAdult = false
+                        externalLinks = externalLinks
                     )
                 }
             )
         }
 
         val initial = if (jobs.isEmpty()) emptyList() else collectRankedStreams(jobs, onStreamsUpdated)
-        val needsFallback = initial.isEmpty() || initial.all { it.isTorrent && it.seeders == 0 }
         if (isExplicitAdult) {
-            if (!needsFallback) return@coroutineScope initial
-            val adultRoutes = listOf(
-                async(Dispatchers.IO) { HstreamResolver.resolve(anilistId, episodeNum, candidateTitles) },
-                async(Dispatchers.IO) {
-                    FallbackStreamResolvers.resolveFallbackStreams(
-                        titles = candidateTitles,
-                        episodeNum = episodeNum,
-                        isStandalone = isStandalone,
-                        isEcchi = true,
-                        isMusicOrConcert = false,
-                        preferredAudio = preferredAudio,
-                        preferredQuality = preferredQuality,
-                        isAdult = true
-                    )
-                }
-            )
-            val adultResolved = collectRankedStreams(adultRoutes) { partial ->
-                if (partial.isNotEmpty()) {
-                    onStreamsUpdated((partial + initial).distinctBy { it.playbackIdentity }.sortedByDescending { it.score })
-                }
-            }
-            if (adultResolved.isEmpty()) return@coroutineScope initial
-            val options = (adultResolved + initial)
-                .distinctBy { it.playbackIdentity }
-                .sortedByDescending { it.score }
-            onStreamsUpdated(options)
-            return@coroutineScope options
+            if (initial.isNotEmpty()) return@coroutineScope initial
+            val adultFallback = AdultStreamFallback.resolve(anilistId, episodeNum, candidateTitles)
+            if (adultFallback.isNotEmpty()) onStreamsUpdated(adultFallback)
+            return@coroutineScope adultFallback
         }
+        val needsFallback = initial.isEmpty() || initial.all { it.isTorrent && it.seeders == 0 }
         if (!runFallbackImmediately && needsFallback) {
             val fallback = FallbackStreamResolvers.resolveFallbackStreams(
                 titles = candidateTitles,
@@ -931,8 +924,7 @@ object CrunchyrollStreamEngine {
                 preferredAudio = preferredAudio,
                 preferredQuality = preferredQuality,
                 trailerYoutubeId = trailerYoutubeId,
-                externalLinks = externalLinks,
-                isAdult = false
+                externalLinks = externalLinks
             )
             if (fallback.isNotEmpty()) {
                 val merged = (initial + fallback)
@@ -1010,6 +1002,58 @@ object CrunchyrollStreamEngine {
     private val explicitFileSeasonEpRegex = Regex(
         "(?i)(?:\\bs0*(\\d{1,2})\\s*e0*(\\d{1,3})\\b|\\bseason\\s*0*(\\d{1,2})(?!\\s*[-~]\\s*(?:s?0*\\d))\\s*(?:/|[-_:]|\\be|ep\\.?\\s*)\\s*0*(\\d{1,3})\\b)"
     )
+
+    private val adultFileExtension = Regex("""(?i)\.(?:mkv|mp4|m4v|webm|mov|m3u8|mpd)$""")
+    private val adultReleaseGroup = Regex(
+        """(?i)^\[(?![^\]]*\b(?:tv|ova|oad|ona|movie|specials?|season|cut|uncensored|censored|\d{4})\b)[^\]]+]\s*"""
+    )
+    private const val TECHNICAL_TAG =
+        """(?:\d{3,4}[pi]|4k|web[- ]?dl|web[- ]?rip|bd(?:rip)?|blu[- ]?ray|avc|hevc|[hx]\.?26[45]|aac|flac|opus|\d{1,2}[- ]?bit|mp4|mkv|[0-9a-f]{8})"""
+    private val adultTechnicalSuffix = Regex(
+        """(?i)(?:\s*(?:\[$TECHNICAL_TAG(?:[ ._-]+$TECHNICAL_TAG)*]|\($TECHNICAL_TAG(?:[ ._-]+$TECHNICAL_TAG)*\)))+$"""
+    )
+    private val adultSeasonEpisode = Regex("""(?i)^(.+?)[\s._-]+s(\d{1,2})[\s._]*e(\d{1,4})(?:v\d+)?$""")
+    private val adultEpisode = Regex("""(?i)^(.+?)(?:\s+-\s+|[\s._]+e(?:p(?:isode)?)?[\s._]*)(\d{1,4})(?:v\d+)?$""")
+    private val adultTitleSeparators = Regex("""[^\p{L}\p{M}\p{N}]+""")
+
+    private fun adultTitleKey(title: String): String =
+        Normalizer.normalize(title, Normalizer.Form.NFKC)
+            .replace('×', 'x').replace('✕', 'x').lowercase()
+            .replace(adultTitleSeparators, " ").trim()
+
+    internal fun matchesAdultEpisodeLabel(
+        label: String,
+        candidateTitles: List<String>,
+        episode: Int,
+        expectedSeason: Int,
+        expectedAbsoluteEpisode: Int?,
+        isVerifiedStandalone: Boolean
+    ): Boolean {
+        if (episode <= 0) return false
+        val aliases = candidateTitles.map(::adultTitleKey).filter(String::isNotEmpty).toSet()
+        val fileLabel = label.trim().substringAfterLast('/').substringAfterLast('\\')
+            .replace(adultFileExtension, "")
+            .replace(adultReleaseGroup, "")
+            .replace(adultTechnicalSuffix, "")
+            .trim()
+        if (isVerifiedStandalone && episode == 1 && adultTitleKey(fileLabel) in aliases) return true
+
+        adultSeasonEpisode.matchEntire(fileLabel)?.let { match ->
+            val (title, seasonText, episodeText) = match.destructured
+            val fileSeason = seasonText.toInt()
+            val fileEpisode = episodeText.toInt()
+            return adultTitleKey(title) in aliases &&
+                ((fileSeason == expectedSeason && fileEpisode == episode) ||
+                    (fileSeason == 1 && fileEpisode == expectedAbsoluteEpisode))
+        }
+
+        val (title, episodeText) = adultEpisode.matchEntire(fileLabel)?.destructured ?: return false
+        val fileEpisode = episodeText.toInt()
+        return adultTitleKey(title) in aliases &&
+            (fileEpisode == expectedAbsoluteEpisode ||
+                (fileEpisode == episode &&
+                    (expectedSeason == 1 || extractExplicitSeasonFromTitle(title) == expectedSeason)))
+    }
 
     internal fun isMismatchedSeasonFile(
         fileLine: String,
