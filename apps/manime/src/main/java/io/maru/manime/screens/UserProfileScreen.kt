@@ -1,5 +1,6 @@
 ﻿package io.maru.manime.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -29,14 +30,15 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
 import io.maru.manime.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -48,10 +50,14 @@ fun UserProfileScreen(
     onAnimeClick: (AnimeMedia) -> Unit,
     onUserClick: (String) -> Unit
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
     var profile by remember(username, anilistToken) { mutableStateOf<AniListProfile?>(null) }
     var isLoading by remember(username, anilistToken) { mutableStateOf(true) }
     var profileLoadFailed by remember(username, anilistToken) { mutableStateOf(false) }
     var retryProfile by remember { mutableIntStateOf(0) }
+    var isTogglingFollow by remember { mutableStateOf(false) }
 
     var selectedTab by rememberSaveable(username) { mutableIntStateOf(0) }
     var following by remember(username, anilistToken) { mutableStateOf<List<AniListProfile>?>(null) }
@@ -81,8 +87,7 @@ fun UserProfileScreen(
     LaunchedEffect(profile?.id, selectedTab, anilistToken, retryPeople) {
         val userId = profile?.id ?: return@LaunchedEffect
         val tab = selectedTab
-        if (tab == 0 || (tab == 1 && following != null) ||
-            (tab == 2 && followers != null)) return@LaunchedEffect
+        if (tab == 0 || (tab == 1 && following != null) || (tab == 2 && followers != null)) return@LaunchedEffect
         peopleLoadFailed = false
         try {
             val list = withContext(Dispatchers.IO) {
@@ -100,29 +105,47 @@ fun UserProfileScreen(
     }
 
     if (isLoading) {
-        Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(CrunchyBgBlack)
+                .windowInsetsPadding(WindowInsets.safeDrawing),
+            contentAlignment = Alignment.Center
+        ) {
             IconButton(onClick = onBack, modifier = Modifier.align(Alignment.TopStart).padding(8.dp)) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
             }
-            CircularProgressIndicator(color = MaruAccentPink)
+            CircularProgressIndicator(color = CrunchyOrange)
         }
     } else if (profile == null) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(CrunchyBgBlack),
+            contentAlignment = Alignment.Center
+        ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
                     if (profileLoadFailed) "Couldn't load this AniList profile." else "User not found or profile is private.",
                     color = MaruTextMuted
                 )
-                if (profileLoadFailed) TextButton(onClick = { retryProfile++ }) { Text("Try again") }
-                Button(onClick = onBack, colors = ButtonDefaults.buttonColors(containerColor = MaruAccentPink)) {
-                    Text("Go Back")
+                if (profileLoadFailed) {
+                    TextButton(onClick = { retryProfile++ }) {
+                        Text("Try again", color = CrunchyOrange)
+                    }
+                }
+                Button(
+                    onClick = onBack,
+                    colors = ButtonDefaults.buttonColors(containerColor = CrunchyOrange, contentColor = Color.Black)
+                ) {
+                    Text("Go Back", fontWeight = FontWeight.ExtraBold)
                 }
             }
         }
     } else {
         val u = profile!!
         val availableCategories = remember(u.userLists) {
-            if (u.userLists.isEmpty()) listOf("Watching", "Completed", "Planning")
+            if (u.userLists.isEmpty()) listOf("Watching", "Planning", "Completed")
             else u.userLists.keys.toList()
         }
         var selectedCategory by rememberSaveable(availableCategories) { mutableStateOf(availableCategories.firstOrNull() ?: "Watching") }
@@ -130,30 +153,39 @@ fun UserProfileScreen(
             u.userLists[selectedCategory].orEmpty().distinctBy { it.mediaId }
         }
 
+        LaunchedEffect(currentCategoryList) {
+            if (currentCategoryList.isNotEmpty()) {
+                KnownDubRegistry.verifyCandidatesInBackground(context, currentCategoryList, maxProbes = 8)
+            }
+        }
+
         val compact = LocalConfiguration.current.screenHeightDp < 430
-        Column(modifier = Modifier.fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))) {
-            // Header with banner & avatar
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(CrunchyBgBlack)
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
+        ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(if (compact) 154.dp else 200.dp)
+                    .heightIn(min = if (compact) 164.dp else 208.dp)
             ) {
                 if (u.banner != null) {
-                    AsyncImage(
+                    CrossfadeImage(
                         model = u.banner,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.matchParentSize()
                     )
                 }
 
                 Box(
                     modifier = Modifier
-                        .fillMaxSize()
+                        .matchParentSize()
                         .background(
                             Brush.verticalGradient(
-                                listOf(Color(0x77050507), Color(0xBB0E0A1A), Color(0xFF0E0A1A))
+                                listOf(Color(0x66000000), Color(0xBB000000), CrunchyBgBlack)
                             )
                         )
                 )
@@ -163,60 +195,92 @@ fun UserProfileScreen(
                     modifier = Modifier
                         .statusBarsPadding()
                         .padding(8.dp)
-                        .background(Color(0x880E0A1A), CircleShape)
-                        .border(BorderStroke(1.dp, MaruGlassBorderSoft), CircleShape)
+                        .background(Color(0x99000000), CircleShape)
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = MaruTextStrong)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                 }
 
                 Row(
                     modifier = Modifier
                         .align(Alignment.BottomStart)
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                        .padding(start = 16.dp, end = 16.dp, top = 56.dp, bottom = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     if (u.avatar != null) {
-                        AsyncImage(
+                        CrossfadeImage(
                             model = u.avatar,
                             contentDescription = u.name,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
                                 .size(64.dp)
                                 .clip(CircleShape)
-                                .border(BorderStroke(2.dp, MaruAccentPink), CircleShape)
+                                .border(BorderStroke(2.dp, CrunchyOrange), CircleShape)
                         )
                     } else {
-                        Surface(shape = CircleShape, color = MaruGlassSubtleBg, modifier = Modifier.size(64.dp)) {
+                        Surface(shape = CircleShape, color = CrunchyCardBg, modifier = Modifier.size(64.dp)) {
                             Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.Person, contentDescription = null, tint = MaruAccentPink, modifier = Modifier.size(32.dp))
+                                Icon(Icons.Default.Person, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(32.dp))
                             }
                         }
                     }
 
-                    Column(modifier = Modifier.weight(1f)) {
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
                             text = u.name,
                             fontSize = 18.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = MaruTextStrong
+                            color = Color.White
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text("${u.animeCount} anime", fontSize = 11.5.sp, color = MaruTextMuted)
                             val daysWatched = (u.minutesWatched / 1440.0)
-                            Text(String.format("%.1f days", daysWatched), fontSize = 11.5.sp, color = MaruAccentBlue)
+                            Text(String.format("%.1f days", daysWatched), fontSize = 11.5.sp, color = CrunchyTeal)
                             if (u.meanScore > 0) {
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-    Icon(Icons.Default.Star, contentDescription = null, tint = MaruAccentYellow, modifier = Modifier.size(12.dp))
-    Text("${u.meanScore.toInt()}%", fontSize = 11.5.sp, color = MaruAccentYellow, fontWeight = FontWeight.Bold)
-}
+                                    Icon(Icons.Default.Star, contentDescription = null, tint = CrunchyGold, modifier = Modifier.size(12.dp))
+                                    Text("${u.meanScore.toInt()}%", fontSize = 11.5.sp, color = CrunchyGold, fontWeight = FontWeight.Bold)
+                                }
                             }
+                        }
+                    }
+
+                    if (anilistToken.isNotBlank()) {
+                        Surface(
+                            onClick = {
+                                if (isTogglingFollow) return@Surface
+                                isTogglingFollow = true
+                                scope.launch {
+                                    try {
+                                        val next = withContext(Dispatchers.IO) {
+                                            AniListClient.toggleFollow(u.id, anilistToken)
+                                        }
+                                        profile = u.copy(isFollowing = next)
+                                    } catch (e: CancellationException) {
+                                        throw e
+                                    } catch (_: Exception) {
+                                        Toast.makeText(context, "Could not update follow status.", Toast.LENGTH_SHORT).show()
+                                    } finally {
+                                        isTogglingFollow = false
+                                    }
+                                }
+                            },
+                            shape = RoundedCornerShape(4.dp),
+                            color = if (u.isFollowing) CrunchyCardBg else CrunchyOrange,
+                            border = BorderStroke(1.dp, CrunchyOrange)
+                        ) {
+                            Text(
+                                text = if (u.isFollowing) "Following" else "Follow",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (u.isFollowing) CrunchyOrange else Color.Black,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                            )
                         }
                     }
                 }
             }
 
-            // Sub Navigation Tab Bar: [Watchlist] [Following] [Followers]
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -228,31 +292,32 @@ fun UserProfileScreen(
                     val isSelected = selectedTab == idx
                     Surface(
                         shape = MaruPillShape,
-                        color = if (isSelected) MaruAccentPink.copy(alpha = 0.25f) else MaruGlassSubtleBg,
-                        border = BorderStroke(1.dp, if (isSelected) MaruAccentPink else MaruGlassBorderSoft),
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                        color = if (isSelected) CrunchyOrange else CrunchyCardBg,
+                        border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else CrunchyBorder),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 44.dp)
                             .selectable(selected = isSelected, role = Role.Tab) { selectedTab = idx }
                     ) {
                         Box(modifier = Modifier.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
                             Text(
                                 text = title,
-                                fontSize = 10.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isSelected) MaruAccentPink else MaruTextMuted
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (isSelected) Color.Black else Color.White
                             )
                         }
                     }
                 }
             }
 
-            HorizontalDivider(color = MaruGlassBorderSoft, thickness = 1.dp)
+            HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
 
             when (selectedTab) {
                 0 -> {
-                    // Watchlist Tab with Sticky Categories!
                     if (availableCategories.isNotEmpty()) {
                         Surface(
-                            color = Color(0xDD0E0A1A),
+                            color = CrunchyBgBlack,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Row(
@@ -260,23 +325,22 @@ fun UserProfileScreen(
                                     .fillMaxWidth()
                                     .horizontalScroll(rememberScrollState())
                                     .padding(horizontal = 14.dp, vertical = 8.dp),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 availableCategories.forEach { category ->
                                     val isSelected = selectedCategory.equals(category, ignoreCase = true)
+                                    val count = u.userLists[category]?.size ?: 0
                                     Surface(
                                         onClick = { selectedCategory = category },
                                         shape = MaruPillShape,
-                                        color = if (isSelected) MaruAccentPurple.copy(alpha = 0.25f) else MaruGlassSubtleBg,
-                                        border = BorderStroke(1.dp, if (isSelected) MaruAccentPurple else MaruGlassBorderSoft)
+                                        color = if (isSelected) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
+                                        border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else CrunchyBorder)
                                     ) {
                                         Text(
-                                            text = category.uppercase(),
-                                            style = MaterialTheme.typography.labelSmall.copy(
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 10.5.sp
-                                            ),
-                                            color = if (isSelected) MaruAccentPurple else MaruTextMuted,
+                                            text = if (count > 0) "$category ($count)" else category,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.5.sp,
+                                            color = if (isSelected) CrunchyOrange else Color.White,
                                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                                         )
                                     }
@@ -287,7 +351,7 @@ fun UserProfileScreen(
 
                     if (currentCategoryList.isEmpty()) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("No anime in this category.", color = MaruTextMuted, fontSize = 13.sp)
+                            Text("No anime in this list.", color = MaruTextMuted, fontSize = 13.sp)
                         }
                     } else {
                         LazyVerticalGrid(
@@ -297,7 +361,7 @@ fun UserProfileScreen(
                                 .padding(horizontal = 14.dp),
                             contentPadding = PaddingValues(top = 8.dp, bottom = 36.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(14.dp)
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
                             items(currentCategoryList, key = { it.mediaId }) { mediaItem ->
                                 PosterCard(
@@ -315,17 +379,22 @@ fun UserProfileScreen(
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text("Couldn't load this list.", color = MaruTextMuted)
-                                TextButton(onClick = { retryPeople++ }) { Text("Try again") }
+                                TextButton(onClick = { retryPeople++ }) {
+                                    Text("Try again", color = CrunchyOrange)
+                                }
                             }
                         }
                     } else if (people == null) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(color = MaruAccentPink)
+                            CircularProgressIndicator(color = CrunchyOrange)
                         }
                     } else if (people.isEmpty()) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text(if (selectedTab == 1) "Not following anyone." else "No followers found.",
-                                color = MaruTextMuted, fontSize = 13.sp)
+                            Text(
+                                if (selectedTab == 1) "Not following anyone." else "No followers found.",
+                                color = MaruTextMuted,
+                                fontSize = 13.sp
+                            )
                         }
                     } else {
                         LazyColumn(
@@ -352,7 +421,7 @@ fun UserCardRow(
     GlassCard(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick() }
+            .pressableClick(onClick = onClick)
     ) {
         Row(
             modifier = Modifier
@@ -362,19 +431,19 @@ fun UserCardRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             if (user.avatar != null) {
-                AsyncImage(
+                CrossfadeImage(
                     model = user.avatar,
                     contentDescription = user.name,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
-                        .border(BorderStroke(1.dp, MaruAccentPink), CircleShape)
+                        .border(BorderStroke(1.dp, CrunchyOrange), CircleShape)
                 )
             } else {
-                Surface(shape = CircleShape, color = MaruGlassSubtleBg, modifier = Modifier.size(44.dp)) {
+                Surface(shape = CircleShape, color = CrunchySurface, modifier = Modifier.size(44.dp)) {
                     Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.Person, contentDescription = null, tint = MaruAccentPink)
+                        Icon(Icons.Default.Person, contentDescription = null, tint = CrunchyOrange)
                     }
                 }
             }
@@ -390,15 +459,14 @@ fun UserCardRow(
                     Text("${user.animeCount} anime", fontSize = 11.sp, color = MaruTextMuted)
                     if (user.meanScore > 0) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-    Icon(Icons.Default.Star, contentDescription = null, tint = MaruAccentYellow, modifier = Modifier.size(11.dp))
-    Text("${user.meanScore.toInt()}%", fontSize = 11.sp, color = MaruAccentYellow, fontWeight = FontWeight.Bold)
-}
+                            Icon(Icons.Default.Star, contentDescription = null, tint = CrunchyGold, modifier = Modifier.size(11.dp))
+                            Text("${user.meanScore.toInt()}%", fontSize = 11.sp, color = CrunchyGold, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
 
-            Icon(Icons.Default.ChevronRight, contentDescription = "View", tint = MaruAccentPink)
+            Icon(Icons.Default.ChevronRight, contentDescription = "View", tint = CrunchyOrange)
         }
     }
 }
-

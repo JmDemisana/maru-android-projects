@@ -65,4 +65,116 @@ class PlaybackPolicyTest {
         assertEquals(0, nativeScoreToRaw(0.0, "POINT_3"))
         assertEquals(92, nativeScoreToRaw(92.0, "POINT_100"))
     }
+
+    @Test fun contentAdvisoryMatchesCrunchyrollMaturityDescriptors() {
+        val mature = deriveContentAdvisory(
+            isAdult = false,
+            genres = listOf("Action", "Drama"),
+            tags = listOf(
+                MediaTag("Gore", rank = 78),
+                MediaTag("Drugs", rank = 65)
+            )
+        )
+        assertEquals("18+", mature.ageRating)
+        assertTrue(mature.isMature)
+        assertTrue("Violence" in mature.warnings)
+        assertTrue("Gore" in mature.warnings)
+        assertTrue("Drugs" in mature.warnings)
+
+        val ecchi = deriveContentAdvisory(
+            isAdult = false,
+            genres = listOf("Comedy", "Ecchi"),
+            tags = emptyList()
+        )
+        assertEquals("16+", ecchi.ageRating)
+        assertEquals(listOf("Sexual Themes"), ecchi.warnings)
+
+        val wholesome = deriveContentAdvisory(
+            isAdult = false,
+            genres = listOf("Music", "Slice of Life"),
+            tags = listOf(MediaTag("Idol", rank = 90))
+        )
+        assertEquals("PG", wholesome.ageRating)
+        assertTrue(wholesome.warnings.isEmpty())
+    }
+
+    @Test fun multiAccountJsonRoundTripsAndDeduplicatesUsernames() {
+        val encoded = encodeAccountsJson(
+            listOf(
+                SavedAniListAccount(10, "MaruSenpai", "https://img/1.png", "POINT_10_DECIMAL", "tok_1"),
+                SavedAniListAccount(10, "marusenpai", null, "POINT_100", "tok_dup"),
+                SavedAniListAccount(22, "NanamiAlt", null, "POINT_5", "tok_2")
+            )
+        )
+        val parsed = parseAccountsJson(encoded)
+        assertEquals(2, parsed.size)
+        assertEquals("MaruSenpai", parsed[0].username)
+        assertEquals("POINT_10_DECIMAL", parsed[0].scoreFormat)
+        assertEquals("NanamiAlt", parsed[1].username)
+    }
+
+    @Test fun guestWatchlistAndAccountScopedOfflineQueueMergeCleanly() {
+        fun sampleAnime(id: Int, title: String, status: String?, progress: Int, episodes: Int? = 12) = AnimeMedia(
+            mediaId = id,
+            title = title,
+            titleEnglish = title,
+            titleRomaji = title,
+            coverUrl = null,
+            bannerUrl = null,
+            accentColor = null,
+            episodes = episodes,
+            format = "TV",
+            status = "FINISHED",
+            season = null,
+            seasonYear = 2026,
+            averageScore = 84,
+            genres = listOf("Music"),
+            description = null,
+            siteUrl = null,
+            isAdult = false,
+            nextEpisode = null,
+            nextEpisodeAt = null,
+            externalLinks = emptyList(),
+            listEntryId = 1,
+            listStatus = status,
+            progress = progress,
+            score = null,
+            notes = null,
+            isPrivate = false,
+            updatedAt = 100L
+        )
+
+        val localShow = sampleAnime(101, "Guest Show", "CURRENT", 3)
+        val guestMerged = LocalLibraryStore.buildMergedLists(
+            remoteLists = emptyMap(),
+            localMap = mapOf(101 to localShow),
+            pending = emptyList(),
+            isLoggedIn = false
+        )
+        assertEquals(listOf(101), guestMerged["Watching"]?.map { it.mediaId })
+
+        val queueJson = """[{"mediaId":101,"title":"Guest Show","status":"CURRENT","progress":4,"isWatchedAutoBump":true,"accountUsername":"MaruSenpai","queuedAt":500000}]"""
+        val parsedQueue = LocalLibraryStore.parseQueueJson(queueJson)
+        assertEquals(1, parsedQueue.size)
+        assertEquals("MaruSenpai", parsedQueue.first().accountUsername)
+
+        val remoteShow = sampleAnime(101, "Guest Show", "CURRENT", 2)
+        val mergedForOwner = LocalLibraryStore.buildMergedLists(
+            remoteLists = mapOf("Watching" to listOf(remoteShow)),
+            localMap = mapOf(101 to localShow),
+            pending = parsedQueue,
+            isLoggedIn = true,
+            activeUsername = "marusenpai"
+        )
+        assertEquals(4, mergedForOwner["Watching"]?.first()?.progress)
+
+        val mergedForOtherAccount = LocalLibraryStore.buildMergedLists(
+            remoteLists = mapOf("Watching" to listOf(remoteShow)),
+            localMap = mapOf(101 to localShow),
+            pending = parsedQueue,
+            isLoggedIn = true,
+            activeUsername = "AnotherUser"
+        )
+        assertEquals(2, mergedForOtherAccount["Watching"]?.first()?.progress)
+    }
 }

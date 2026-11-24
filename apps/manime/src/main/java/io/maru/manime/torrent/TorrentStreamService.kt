@@ -12,12 +12,19 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.maru.manime.MAnimePrefs
+import io.maru.manime.extensions.StreamLink
+import io.maru.manime.extensions.StremioAddonClient
+import io.maru.manime.readResponse
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONArray
+import org.json.JSONObject
 import org.libtorrent4j.Priority
 import org.libtorrent4j.AddTorrentParams
 import org.libtorrent4j.ErrorCode
@@ -28,13 +35,17 @@ import org.libtorrent4j.TorrentHandle
 import org.libtorrent4j.TorrentInfo
 import org.libtorrent4j.swig.error_code
 import java.io.File
+import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.NetworkInterface
 import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 data class ActiveStreamStatus(
@@ -50,6 +61,106 @@ data class ActiveStreamStatus(
     val phase: String = "starting"
 )
 
+data class OfflineDownloadCandidate(
+    val url: String,
+    val isTorrent: Boolean,
+    val fileIdx: Int? = null,
+    val audioType: String = "SUB",
+    val quality: String = "1080p",
+    val headers: Map<String, String> = emptyMap()
+)
+
+internal fun selectDownloadCandidates(
+    streams: List<StreamLink>,
+    preferredAudio: String,
+    maxCandidates: Int = 5
+): List<OfflineDownloadCandidate> {
+    fun isDownloadableHttp(url: String): Boolean {
+        val clean = url.substringBefore('?').substringBefore('#').lowercase()
+        return (url.startsWith("http://", true) || url.startsWith("https://", true)) &&
+            !clean.endsWith(".m3u8") && !clean.endsWith(".mpd")
+    }
+
+    val matchingAudio = streams.filter {
+        it.audioType == preferredAudio || it.audioType == "DUAL_AUDIO"
+    }
+    val orderedPool = (matchingAudio + streams).distinctBy { (it.infoHash ?: it.url) to it.fileIdx }
+
+    return orderedPool.mapNotNull { s ->
+        when {
+            !s.isTorrent && isDownloadableHttp(s.url) -> OfflineDownloadCandidate(
+                url = s.url,
+                isTorrent = false,
+                fileIdx = null,
+                audioType = s.audioType,
+                quality = s.quality,
+                headers = s.headers
+            )
+            s.isTorrent && s.url.startsWith("magnet:", ignoreCase = true) && (s.seeders == null || s.seeders > 0) ->
+                OfflineDownloadCandidate(
+                    url = s.url,
+                    isTorrent = true,
+                    fileIdx = s.fileIdx,
+                    audioType = s.audioType,
+                    quality = s.quality
+                )
+            else -> null
+        }
+    }.take(maxCandidates)
+}
+
+internal fun encodeOfflineCandidates(candidates: List<OfflineDownloadCandidate>): String {
+    val arr = JSONArray()
+    for (c in candidates) {
+        val headersObj = JSONObject()
+        for ((k, v) in c.headers) headersObj.put(k, v)
+        arr.put(JSONObject().apply {
+            put("url", c.url)
+            put("isTorrent", c.isTorrent)
+            if (c.fileIdx != null) put("fileIdx", c.fileIdx)
+            put("audioType", c.audioType)
+            put("quality", c.quality)
+            put("headers", headersObj)
+        })
+    }
+    return arr.toString()
+}
+
+internal fun decodeOfflineCandidates(rawJson: String?): List<OfflineDownloadCandidate> {
+    if (rawJson.isNullOrBlank()) return emptyList()
+    return try {
+        val arr = JSONArray(rawJson)
+        buildList {
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val url = obj.optString("url", "").trim()
+                if (url.isEmpty()) continue
+                val headersObj = obj.optJSONObject("headers")
+                val headers = buildMap {
+                    if (headersObj != null) {
+                        for (k in headersObj.keys()) {
+                            val v = headersObj.optString(k, "").trim()
+                            if (v.isNotEmpty()) put(k, v)
+                        }
+                    }
+                }
+                add(
+                    OfflineDownloadCandidate(
+                        url = url,
+                        isTorrent = obj.optBoolean("isTorrent", url.startsWith("magnet:", true)),
+                        fileIdx = if (obj.has("fileIdx") && !obj.isNull("fileIdx")) obj.optInt("fileIdx", -1).takeIf { it >= 0 } else null,
+                        audioType = obj.optString("audioType", "SUB"),
+                        quality = obj.optString("quality", "1080p"),
+                        headers = headers
+                    )
+                )
+            }
+        }
+    } catch (_: Exception) {
+        emptyList()
+    }
+}
+
 private class OfflineDownloadException(message: String) : Exception(message)
 
 class TorrentStreamService : Service() {
@@ -57,6 +168,8 @@ class TorrentStreamService : Service() {
     companion object {
         const val ACTION_START_STREAM = "io.maru.manime.action.START_STREAM"
         const val ACTION_DOWNLOAD_OFFLINE = "io.maru.manime.action.DOWNLOAD_OFFLINE"
+        const val ACTION_SERVE_OFFLINE_CAST = "io.maru.manime.action.SERVE_OFFLINE_CAST"
+        const val EXTRA_OFFLINE_FILE_PATH = "extra_offline_file_path"
 
         const val EXTRA_MAGNET = "extra_magnet"
         private const val EXTRA_REQUEST_ID = "extra_request_id"
@@ -69,12 +182,45 @@ class TorrentStreamService : Service() {
         const val EXTRA_THUMB_URL = "extra_thumb_url"
         const val EXTRA_AUDIO_TYPE = "extra_audio_type"
         const val EXTRA_QUALITY = "extra_quality"
+        const val EXTRA_CANDIDATES_JSON = "extra_candidates_json"
 
         const val NOTIFICATION_ID = 9002
         const val CHANNEL_ID = "nanami_anime_stream_channel"
 
         private val _streamStatus = MutableStateFlow(ActiveStreamStatus())
         val streamStatus: StateFlow<ActiveStreamStatus> = _streamStatus.asStateFlow()
+
+        private val _offlineCastUrl = MutableStateFlow<String?>(null)
+        val offlineCastUrl: StateFlow<String?> = _offlineCastUrl.asStateFlow()
+
+        fun findLanIpv4Address(): String? {
+            return try {
+                val interfaces = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+                interfaces
+                    .filter { it.isUp && !it.isLoopback && !it.name.startsWith("tun") && !it.name.startsWith("rmnet") }
+                    .flatMap { it.inetAddresses.toList() }
+                    .filterIsInstance<Inet4Address>()
+                    .firstOrNull { it.isSiteLocalAddress }
+                    ?.hostAddress
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        fun startOfflineCastServer(context: Context, file: File) {
+            _offlineCastUrl.value = null
+            val intent = Intent(context, TorrentStreamService::class.java).apply {
+                action = ACTION_SERVE_OFFLINE_CAST
+                putExtra(EXTRA_OFFLINE_FILE_PATH, file.absolutePath)
+            }
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            }
+        }
 
         val offlineEpisodes = OfflineVault.episodes
         private val offlineJobs = ConcurrentHashMap<Pair<Int, Int>, Job>()
@@ -146,26 +292,88 @@ class TorrentStreamService : Service() {
             coverUrl: String?,
             thumbnailUrl: String?,
             audioType: String,
-            quality: String
+            quality: String,
+            candidates: List<OfflineDownloadCandidate> = emptyList()
         ) {
+            val effectiveCandidates = candidates.ifEmpty {
+                listOf(
+                    OfflineDownloadCandidate(
+                        url = magnetUri,
+                        isTorrent = magnetUri.startsWith("magnet:", ignoreCase = true),
+                        fileIdx = fileIdx,
+                        audioType = audioType,
+                        quality = quality
+                    )
+                )
+            }
+            val encodedCandidates = encodeOfflineCandidates(effectiveCandidates)
+            val primary = effectiveCandidates.first()
             val intent = Intent(context, TorrentStreamService::class.java).apply {
                 action = ACTION_DOWNLOAD_OFFLINE
-                putExtra(EXTRA_MAGNET, magnetUri)
-                putExtra(EXTRA_FILE_IDX, fileIdx ?: -1)
+                putExtra(EXTRA_MAGNET, primary.url)
+                putExtra(EXTRA_FILE_IDX, primary.fileIdx ?: -1)
                 putExtra(EXTRA_MEDIA_ID, mediaId)
                 putExtra(EXTRA_ANIME_TITLE, animeTitle)
                 putExtra(EXTRA_EPISODE_NUM, episodeNum)
                 putExtra(EXTRA_EPISODE_TITLE, episodeTitle)
                 putExtra(EXTRA_COVER_URL, coverUrl ?: "")
                 putExtra(EXTRA_THUMB_URL, thumbnailUrl ?: "")
-                putExtra(EXTRA_AUDIO_TYPE, audioType)
-                putExtra(EXTRA_QUALITY, quality)
+                putExtra(EXTRA_AUDIO_TYPE, primary.audioType)
+                putExtra(EXTRA_QUALITY, primary.quality)
+                putExtra(EXTRA_CANDIDATES_JSON, encodedCandidates)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                Log.w("TorrentStreamService", "Could not start offline download service", e)
+                val finalFile = OfflineVault.episodeFile(context, mediaId, episodeNum)
+                OfflineVault.update(
+                    context,
+                    OfflineEpisodeEntry(
+                        mediaId = mediaId,
+                        animeTitle = animeTitle,
+                        episodeNumber = episodeNum,
+                        episodeTitle = episodeTitle,
+                        coverUrl = coverUrl,
+                        thumbnailUrl = thumbnailUrl,
+                        audioType = primary.audioType,
+                        quality = primary.quality,
+                        vaultFilePath = finalFile.absolutePath,
+                        sizeBytes = 0,
+                        downloadedBytes = 0,
+                        progressPercent = 0,
+                        isCompleted = false,
+                        addedAt = System.currentTimeMillis(),
+                        failure = "Background download service was blocked. Open the app and tap Retry.",
+                        retryCandidatesJson = encodedCandidates
+                    )
+                )
             }
+        }
+
+        fun retryOfflineDownload(context: Context, entry: OfflineEpisodeEntry): Boolean {
+            val candidates = decodeOfflineCandidates(entry.retryCandidatesJson)
+            if (candidates.isEmpty()) return false
+            val first = candidates.first()
+            startOfflineDownload(
+                context = context,
+                magnetUri = first.url,
+                fileIdx = first.fileIdx,
+                mediaId = entry.mediaId,
+                animeTitle = entry.animeTitle,
+                episodeNum = entry.episodeNumber,
+                episodeTitle = entry.episodeTitle,
+                coverUrl = entry.coverUrl,
+                thumbnailUrl = entry.thumbnailUrl,
+                audioType = entry.audioType,
+                quality = entry.quality,
+                candidates = candidates
+            )
+            return true
         }
 
         fun stopStream(requestId: String) {
@@ -176,6 +384,12 @@ class TorrentStreamService : Service() {
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val downloadHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(35, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
     private val socketLock = Any()
     private var serverSocket: ServerSocket? = null
     private val clientSockets = ConcurrentHashMap.newKeySet<Socket>()
@@ -188,6 +402,7 @@ class TorrentStreamService : Service() {
         val demand: PieceDemand = PieceDemand()
     )
     private val activeSession = AtomicReference<StreamSession?>()
+    private val activeOfflineCast = AtomicReference<Pair<String, File>?>()
 
     override fun onCreate() {
         super.onCreate()
@@ -245,6 +460,7 @@ class TorrentStreamService : Service() {
                 val thumbUrl = intent.getStringExtra(EXTRA_THUMB_URL)?.takeIf { it.isNotBlank() }
                 val audioType = intent.getStringExtra(EXTRA_AUDIO_TYPE) ?: "SUB"
                 val quality = intent.getStringExtra(EXTRA_QUALITY) ?: "1080p"
+                val candidatesJson = intent.getStringExtra(EXTRA_CANDIDATES_JSON)
 
                 launchOfflineDownload(
                     magnetUri = magnet,
@@ -256,8 +472,29 @@ class TorrentStreamService : Service() {
                     coverUrl = coverUrl,
                     thumbnailUrl = thumbUrl,
                     audioType = audioType,
-                    quality = quality
+                    quality = quality,
+                    candidatesJson = candidatesJson
                 )
+            }
+            ACTION_SERVE_OFFLINE_CAST -> {
+                val rawPath = intent.getStringExtra(EXTRA_OFFLINE_FILE_PATH)
+                val file = rawPath?.let(::File)
+                val vaultDir = OfflineVault.preparedDirectory(applicationContext)
+                if (file != null && file.isFile && file.canonicalPath.startsWith(vaultDir.canonicalPath + File.separator)) {
+                    serviceScope.launch {
+                        runCatching {
+                            val token = UUID.randomUUID().toString()
+                            val port = localHttpServerPort()
+                            activeOfflineCast.set(token to file)
+                            val lanIp = findLanIpv4Address()
+                            if (lanIp != null) {
+                                _offlineCastUrl.value = "http://$lanIp:$port/$token/offline.mp4"
+                            }
+                        }
+                    }
+                } else {
+                    stopIfIdle()
+                }
             }
             else -> stopIfIdle()
         }
@@ -331,7 +568,7 @@ class TorrentStreamService : Service() {
         return addTorrent(session, params).also { it.resume() }
     }
 
-    private suspend fun awaitMetadata(handle: TorrentHandle): TorrentInfo = withTimeout(25_000L) {
+    private suspend fun awaitMetadata(handle: TorrentHandle, timeoutMs: Long = 25_000L): TorrentInfo = withTimeout(timeoutMs) {
         var info: TorrentInfo? = null
         while (info == null) {
             check(!handle.status().errorCode().isError) { "Could not fetch torrent metadata" }
@@ -359,7 +596,7 @@ class TorrentStreamService : Service() {
         val lastPiece = ((stream.fileOffset + stream.size - 1) / stream.pieceLength).toInt()
         for (piece in firstPiece..minOf(lastPiece, firstPiece + lookAhead)) {
             if (stream.handle.havePiece(piece)) continue
-            val delayMs = (piece - firstPiece) * 400
+            val delayMs = (piece - firstPiece) * 250
             stream.demand.request(piece, delayMs) {
                 stream.handle.setPieceDeadline(piece, delayMs)
             }
@@ -398,6 +635,7 @@ class TorrentStreamService : Service() {
                 val session = SessionManager().also { nativeSession = it; it.start() }
                 val prefs = MAnimePrefs(applicationContext)
                 check(saveDir.mkdirs() || saveDir.isDirectory) { "Could not create streaming cache" }
+                runCatching { File(saveDir, ".nomedia").createNewFile() }
 
                 phase = "metadata"
                 updateStreamStatus(requestId) { status ->
@@ -522,18 +760,31 @@ class TorrentStreamService : Service() {
         coverUrl: String?,
         thumbnailUrl: String?,
         audioType: String,
-        quality: String
+        quality: String,
+        candidatesJson: String? = null
     ) {
         val key = mediaId to episodeNum
         val context = applicationContext
+        val decoded = decodeOfflineCandidates(candidatesJson)
+        val candidates = decoded.ifEmpty {
+            listOf(
+                OfflineDownloadCandidate(
+                    url = magnetUri,
+                    isTorrent = magnetUri.startsWith("magnet:", ignoreCase = true),
+                    fileIdx = preferredFileIdx,
+                    audioType = audioType,
+                    quality = quality
+                )
+            )
+        }
+        val persistedCandidatesJson = encodeOfflineCandidates(candidates)
+
         synchronized(OfflineVault.lock) {
             if (offlineJobs[key]?.isActive == true) return
             val job = serviceScope.launch(start = CoroutineStart.LAZY) {
                 if (OfflineVault.getCompleted(context, mediaId, episodeNum) != null) return@launch
 
                 var session: SessionManager? = null
-                var stagingDir: File? = null
-                var pendingCopy: File? = null
                 val finalFile = OfflineVault.episodeFile(context, mediaId, episodeNum)
                 var entry = OfflineEpisodeEntry(
                     mediaId = mediaId,
@@ -549,7 +800,9 @@ class TorrentStreamService : Service() {
                     downloadedBytes = 0,
                     progressPercent = 0,
                     isCompleted = false,
-                    addedAt = System.currentTimeMillis()
+                    addedAt = System.currentTimeMillis(),
+                    statusText = "Connecting to source…",
+                    retryCandidatesJson = persistedCandidatesJson
                 )
 
                 fun publishEntry(next: OfflineEpisodeEntry) {
@@ -560,92 +813,294 @@ class TorrentStreamService : Service() {
                     }
                 }
 
-                fun commitFile(source: File, totalBytes: Long): Boolean = synchronized(OfflineVault.lock) {
-                    ensureActive()
-                    if (!source.renameTo(finalFile)) return@synchronized false
-                    try {
-                        publishEntry(entry.copy(
-                            sizeBytes = totalBytes,
-                            downloadedBytes = totalBytes,
-                            progressPercent = 100,
-                            isCompleted = true
-                        ))
-                    } catch (e: Exception) {
-                        finalFile.delete()
-                        throw e
+                fun commitFile(source: File, totalBytes: Long, chosenAudio: String, chosenQuality: String): Boolean =
+                    synchronized(OfflineVault.lock) {
+                        ensureActive()
+                        if (finalFile.exists() && !finalFile.delete()) return@synchronized false
+                        if (!source.renameTo(finalFile)) return@synchronized false
+                        try {
+                            publishEntry(
+                                entry.copy(
+                                    audioType = chosenAudio,
+                                    quality = chosenQuality,
+                                    sizeBytes = totalBytes,
+                                    downloadedBytes = totalBytes,
+                                    progressPercent = 100,
+                                    isCompleted = true,
+                                    failure = null,
+                                    downloadSpeedKbps = 0,
+                                    connectedPeers = 0,
+                                    statusText = null
+                                )
+                            )
+                        } catch (e: Exception) {
+                            finalFile.delete()
+                            throw e
+                        }
+                        true
                     }
-                    true
+
+                fun finalizeStagingFile(stagingFile: File, totalBytes: Long, chosenAudio: String, chosenQuality: String) {
+                    if (!commitFile(stagingFile, totalBytes, chosenAudio, chosenQuality)) {
+                        val copy = File.createTempFile("episode_", ".tmp", finalFile.parentFile)
+                        try {
+                            stagingFile.copyTo(copy, overwrite = true)
+                            check(copy.length() == totalBytes && commitFile(copy, totalBytes, chosenAudio, chosenQuality)) {
+                                "Could not save the offline file"
+                            }
+                        } finally {
+                            copy.delete()
+                        }
+                    }
                 }
 
                 try {
                     publishEntry(entry)
-                    updateNotification("Preparing download: $animeTitle • Ep $episodeNum")
+                    updateNotification("Preparing download: $animeTitle • Ep $episodeNum", progressPercent = 0)
                     OfflineVault.preparedDirectory(context)
-                    val tempDir = Files.createTempDirectory(cacheDir.toPath(), "offline_staging_").toFile()
-                    stagingDir = tempDir
+                    val speedLimitKbps = MAnimePrefs(context).torrentMaxSpeed.first()
 
-                    val torrentSession = SessionManager().also { session = it; it.start() }
-                    applyDownloadLimit(torrentSession, MAnimePrefs(context).torrentMaxSpeed.first())
-                    val rawMeta = runInterruptible { torrentSession.fetchMagnet(magnetUri, 30, tempDir) }
-                        ?: throw OfflineDownloadException("Could not connect to the download source.")
-                    val info = TorrentInfo.bdecode(rawMeta)
-                    val targetIdx = pickVideoFileIndex(info, preferredFileIdx, episodeNum)
-                    val files = info.files()
-                    val totalBytes = files.fileSize(targetIdx)
-                    val stagingFile = File(tempDir, files.filePath(targetIdx)).canonicalFile
-                    check(totalBytes > 0 && stagingFile.path.startsWith(tempDir.canonicalPath + File.separator))
-                    if (tempDir.usableSpace < totalBytes) {
-                        throw OfflineDownloadException("There is not enough storage for this episode.")
+                    var lastFailureMessage = "Could not connect to any download source. Try again."
+                    var succeeded = false
+
+                    for ((index, candidate) in candidates.withIndex()) {
+                        ensureActive()
+                        val hasMoreCandidates = index < candidates.lastIndex
+                        val sourceTag = if (candidates.size > 1) " (source ${index + 1}/${candidates.size})" else ""
+                        val tempDir = Files.createTempDirectory(cacheDir.toPath(), "offline_staging_").toFile()
+                        runCatching { File(tempDir, ".nomedia").createNewFile() }
+
+                        try {
+                            publishEntry(
+                                entry.copy(
+                                    audioType = candidate.audioType,
+                                    quality = candidate.quality,
+                                    progressPercent = 0,
+                                    downloadedBytes = 0,
+                                    downloadSpeedKbps = 0,
+                                    connectedPeers = 0,
+                                    failure = null,
+                                    statusText = "Connecting$sourceTag…"
+                                )
+                            )
+
+                            if (!candidate.isTorrent) {
+                                val stagingFile = File(tempDir, "direct_ep_${episodeNum}.nanami.tmp")
+                                val reqBuilder = Request.Builder()
+                                    .url(candidate.url)
+                                    .header("User-Agent", StremioAddonClient.BROWSER_UA)
+                                for ((hk, hv) in candidate.headers) reqBuilder.header(hk, hv)
+
+                                val call = downloadHttpClient.newCall(reqBuilder.build())
+                                val cancelHandle = coroutineContext.job.invokeOnCompletion {
+                                    if (it is CancellationException) call.cancel()
+                                }
+                                try {
+                                    call.execute().use { response ->
+                                        if (!response.isSuccessful) {
+                                            throw OfflineDownloadException("Direct source returned HTTP ${response.code}.")
+                                        }
+                                        val contentType = response.header("Content-Type").orEmpty().lowercase()
+                                        if (contentType.contains("text/html") || contentType.contains("application/json")) {
+                                            throw OfflineDownloadException("Direct source did not return a video file.")
+                                        }
+                                        val body = response.body ?: throw OfflineDownloadException("Direct source was empty.")
+                                        val expectedTotal = body.contentLength().takeIf { it > 0L } ?: 0L
+                                        if (expectedTotal > 0L && tempDir.usableSpace < expectedTotal) {
+                                            throw OfflineDownloadException("There is not enough storage for this episode.")
+                                        }
+
+                                        val buffer = ByteArray(64 * 1024)
+                                        var downloaded = 0L
+                                        var windowStartMs = SystemClock.elapsedRealtime()
+                                        var windowStartBytes = 0L
+                                        var lastUiUpdateMs = 0L
+
+                                        body.byteStream().use { input ->
+                                            FileOutputStream(stagingFile).use { out ->
+                                                while (true) {
+                                                    ensureActive()
+                                                    val read = input.read(buffer)
+                                                    if (read == -1) break
+                                                    out.write(buffer, 0, read)
+                                                    downloaded += read
+
+                                                    val now = SystemClock.elapsedRealtime()
+                                                    if (now - lastUiUpdateMs >= 800L) {
+                                                        val elapsedSec = ((now - windowStartMs) / 1000.0).coerceAtLeast(0.25)
+                                                        val speedKbps = (((downloaded - windowStartBytes) / 1024.0) / elapsedSec).toInt().coerceAtLeast(0)
+                                                        windowStartMs = now
+                                                        windowStartBytes = downloaded
+                                                        lastUiUpdateMs = now
+
+                                                        val pct = if (expectedTotal > 0L) {
+                                                            ((downloaded.toDouble() / expectedTotal) * 100).toInt().coerceIn(1, 99)
+                                                        } else 50
+                                                        val speedLabel = formatSpeed(speedKbps)
+                                                        publishEntry(
+                                                            entry.copy(
+                                                                sizeBytes = expectedTotal.coerceAtLeast(downloaded),
+                                                                downloadedBytes = downloaded,
+                                                                progressPercent = pct,
+                                                                downloadSpeedKbps = speedKbps,
+                                                                statusText = if (expectedTotal > 0L) "Downloading $pct% • $speedLabel" else "Downloading • $speedLabel"
+                                                            )
+                                                        )
+                                                        updateNotification("Downloading $animeTitle Ep $episodeNum ($pct%)", progressPercent = pct)
+                                                    }
+                                                }
+                                                out.fd.sync()
+                                            }
+                                        }
+
+                                        if (downloaded < 512 * 1024L || (expectedTotal > 0L && downloaded != expectedTotal)) {
+                                            throw OfflineDownloadException("Direct download ended early.")
+                                        }
+                                        finalizeStagingFile(stagingFile, downloaded, candidate.audioType, candidate.quality)
+                                        succeeded = true
+                                    }
+                                } finally {
+                                    cancelHandle.dispose()
+                                }
+                            } else {
+                                val torrentSession = session ?: SessionManager().also {
+                                    session = it
+                                    it.start()
+                                    applyDownloadLimit(it, speedLimitKbps)
+                                }
+
+                                val handle = addLiveTorrent(torrentSession, candidate.url, tempDir)
+                                try {
+                                    publishEntry(entry.copy(statusText = "Fetching episode metadata$sourceTag…"))
+                                    val info = try {
+                                        awaitMetadata(handle, timeoutMs = if (hasMoreCandidates) 30_000L else 50_000L)
+                                    } catch (_: TimeoutCancellationException) {
+                                        throw OfflineDownloadException("Timed out connecting to peers.")
+                                    }
+
+                                    val targetIdx = pickVideoFileIndex(info, candidate.fileIdx, episodeNum)
+                                    val files = info.files()
+                                    val totalBytes = files.fileSize(targetIdx)
+                                    val stagingFile = File(tempDir, files.filePath(targetIdx)).canonicalFile
+                                    check(totalBytes > 0 && stagingFile.path.startsWith(tempDir.canonicalPath + File.separator))
+                                    if (tempDir.usableSpace < totalBytes) {
+                                        // Storage full cannot be fixed by trying another source; abort immediately.
+                                        lastFailureMessage = "There is not enough storage for this episode."
+                                        break
+                                    }
+
+                                    selectLiveFile(handle, info.numFiles(), targetIdx)
+                                    // Unset UPLOAD_MODE and SEQUENTIAL_DOWNLOAD so rarest-first swarm downloading runs at max speed!
+                                    handle.unsetFlags(
+                                        TorrentFlags.AUTO_MANAGED
+                                            .or_(TorrentFlags.UPLOAD_MODE)
+                                            .or_(TorrentFlags.STOP_WHEN_READY)
+                                            .or_(TorrentFlags.SEQUENTIAL_DOWNLOAD)
+                                    )
+                                    handle.resume()
+
+                                    val fileOffset = files.fileOffset(targetIdx)
+                                    val pieceLength = info.pieceLength()
+                                    val pieceCount = info.numPieces()
+                                    val startedTransferAt = SystemClock.elapsedRealtime()
+                                    var lastProgress = startedTransferAt
+                                    var mostDownloaded = 0L
+
+                                    while (isActive) {
+                                        check(handle.isValid) { "Download handle expired" }
+                                        val status = handle.status()
+                                        check(!status.errorCode().isError) { "Torrent download failed" }
+                                        val done = status.totalWantedDone().coerceIn(0L, totalBytes)
+                                        val speedKbps = (status.downloadPayloadRate() / 1024).coerceAtLeast(0)
+                                        val peers = status.numPeers()
+
+                                        if (done >= totalBytes &&
+                                            verifiedFileRange(0, totalBytes, totalBytes, fileOffset, pieceLength, pieceCount, handle::havePiece) &&
+                                            stagingFile.isFile && stagingFile.length() == totalBytes
+                                        ) {
+                                            break
+                                        }
+
+                                        val now = SystemClock.elapsedRealtime()
+                                        if (done > mostDownloaded) {
+                                            mostDownloaded = done
+                                            lastProgress = now
+                                        }
+
+                                        // Fail over quickly if 0 bytes arrived on this torrent and another source is waiting!
+                                        val zeroByteTimeoutMs = if (hasMoreCandidates) 35_000L else 75_000L
+                                        val stallTimeoutMs = if (hasMoreCandidates) 75_000L else 150_000L
+                                        if (mostDownloaded == 0L && now - startedTransferAt > zeroByteTimeoutMs) {
+                                            throw OfflineDownloadException("No active peers responded for this source.")
+                                        }
+                                        if (now - lastProgress > stallTimeoutMs) {
+                                            throw OfflineDownloadException("The download stalled. Try again when more peers are online.")
+                                        }
+
+                                        val percent = if (done > 0L) {
+                                            (done.toDouble() / totalBytes * 100).toInt().coerceIn(1, 99)
+                                        } else 0
+                                        val statusMsg = when {
+                                            percent == 0 && peers > 0 -> "Connected ($peers peers)$sourceTag…"
+                                            percent == 0 -> "Finding peers$sourceTag…"
+                                            speedKbps > 0 -> "Downloading $percent% • ${formatSpeed(speedKbps)}"
+                                            else -> "Downloading $percent% ($peers peers)"
+                                        }
+                                        publishEntry(
+                                            entry.copy(
+                                                sizeBytes = totalBytes,
+                                                downloadedBytes = done,
+                                                progressPercent = percent,
+                                                downloadSpeedKbps = speedKbps,
+                                                connectedPeers = peers,
+                                                statusText = statusMsg
+                                            )
+                                        )
+                                        updateNotification("Downloading $animeTitle Ep $episodeNum ($percent%)", progressPercent = percent)
+                                        delay(1_000)
+                                    }
+
+                                    ensureActive()
+                                    runCatching { handle.pause() }
+                                    finalizeStagingFile(stagingFile, totalBytes, candidate.audioType, candidate.quality)
+                                    succeeded = true
+                                } finally {
+                                    runCatching {
+                                        if (handle.isValid) SessionHandle(torrentSession.swig()).removeTorrent(handle)
+                                    }
+                                }
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            if (e !is Exception && e !is LinkageError) throw e
+                            Log.w("TorrentStreamService", "Candidate ${index + 1}/${candidates.size} failed", e)
+                            lastFailureMessage = (e as? OfflineDownloadException)?.message
+                                ?: "Source ${index + 1} failed. Retrying…"
+                        } finally {
+                            tempDir.deleteRecursively()
+                        }
+
+                        if (succeeded) break
                     }
 
-                    val handle = addVideoDownload(torrentSession, info, tempDir, magnetUri, targetIdx)
-
-                    val fileOffset = files.fileOffset(targetIdx)
-                    val pieceLength = info.pieceLength()
-                    val pieceCount = info.numPieces()
-                    var lastProgress = SystemClock.elapsedRealtime()
-                    var mostDownloaded = 0L
-                    while (isActive) {
-                        check(handle.isValid) { "Download handle expired" }
-                        val status = handle.status()
-                        check(!status.errorCode().isError) { "Torrent download failed" }
-                        val done = status.totalWantedDone().coerceIn(0L, totalBytes)
-
-                        if (done >= totalBytes &&
-                            verifiedFileRange(0, totalBytes, totalBytes, fileOffset, pieceLength, pieceCount, handle::havePiece) &&
-                            stagingFile.isFile && stagingFile.length() == totalBytes
-                        ) {
-                            break
-                        }
-                        if (done > mostDownloaded) {
-                            mostDownloaded = done
-                            lastProgress = SystemClock.elapsedRealtime()
-                        }
-                        if (SystemClock.elapsedRealtime() - lastProgress > 120_000L) {
-                            throw OfflineDownloadException("The download stalled. Try again when the source is available.")
-                        }
-                        val percent = (done.toDouble() / totalBytes * 100).toInt().coerceIn(1, 99)
-                        publishEntry(entry.copy(sizeBytes = totalBytes, downloadedBytes = done, progressPercent = percent))
-                        updateNotification("Downloading $animeTitle Ep $episodeNum ($percent%)")
-                        delay(1_500)
+                    if (!succeeded) {
+                        throw OfflineDownloadException(lastFailureMessage)
                     }
-
-                    ensureActive()
-                    torrentSession.stop()
-                    session = null
-                    if (!commitFile(stagingFile, totalBytes)) {
-                        val copy = File.createTempFile("episode_", ".tmp", finalFile.parentFile)
-                        pendingCopy = copy
-                        stagingFile.copyTo(copy, overwrite = true)
-                        check(copy.length() == totalBytes && commitFile(copy, totalBytes)) { "Could not save the offline file" }
-                    }
-                    updateNotification("Offline ready: $animeTitle • Ep $episodeNum")
+                    updateNotification("Download complete: $animeTitle • Ep $episodeNum")
                 } catch (e: CancellationException) {
                     synchronized(OfflineVault.lock) {
                         if (offlineJobs[key] === coroutineContext.job && OfflineVault.episodes.value.contains(entry) &&
                             !entry.isCompleted
                         ) {
-                            OfflineVault.update(context, entry.copy(failure = "The download was interrupted. Try again."))
+                            OfflineVault.update(
+                                context,
+                                entry.copy(
+                                    failure = "Download paused or interrupted. Tap Retry to resume.",
+                                    downloadSpeedKbps = 0,
+                                    statusText = null
+                                )
+                            )
                         }
                     }
                     throw e
@@ -654,13 +1109,11 @@ class TorrentStreamService : Service() {
                     Log.w("TorrentStreamService", "Episode download failed", e)
                     if (entry.isCompleted) return@launch
                     val message = (e as? OfflineDownloadException)?.message
-                        ?: "The episode could not be saved. Try again."
-                    publishEntry(entry.copy(failure = message))
+                        ?: "The episode could not be saved. Tap Retry to try again."
+                    publishEntry(entry.copy(failure = message, downloadSpeedKbps = 0, statusText = null))
                     updateNotification("Download failed: $animeTitle • Ep $episodeNum")
                 } finally {
                     runCatching { session?.stop() }
-                    pendingCopy?.delete()
-                    stagingDir?.deleteRecursively()
                 }
             }
             offlineJobs[key] = job
@@ -672,6 +1125,9 @@ class TorrentStreamService : Service() {
         }
     }
 
+    private fun formatSpeed(speedKbps: Int): String =
+        if (speedKbps >= 1024) String.format("%.1f MB/s", speedKbps / 1024.0) else "$speedKbps KB/s"
+
     /**
      * Local HTTP server with full HTTP 206 Partial Content (Byte-Range) support so ExoPlayer
      * can seek smoothly through MKV & MP4 streams.
@@ -679,14 +1135,16 @@ class TorrentStreamService : Service() {
     private fun localHttpServerPort(): Int = synchronized(socketLock) {
         serverSocket?.let { if (!it.isClosed) return@synchronized it.localPort }
         check(serviceScope.isActive) { "Playback service is stopping" }
-        val server = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
+        val server = ServerSocket(0, 16)
         serverSocket = server
         serviceScope.launch {
             try {
                 while (isActive && !server.isClosed) {
                     val socket = server.accept()
+                    val remoteAddr = socket.inetAddress
+                    val allowedPeer = remoteAddr != null && (remoteAddr.isLoopbackAddress || remoteAddr.isSiteLocalAddress)
                     clientSockets.add(socket)
-                    if (isActive) handleClientSocket(socket) else closeClientSocket(socket)
+                    if (isActive && allowedPeer) handleClientSocket(socket) else closeClientSocket(socket)
                 }
             } catch (e: java.io.IOException) {
                 if (!server.isClosed) Log.w("TorrentStreamService", "Loopback HTTP server failed", e)
@@ -713,7 +1171,7 @@ class TorrentStreamService : Service() {
 
                 val requestLine = reader.readLine() ?: return@launch
                 val request = requestLine.split(' ')
-                if (request.size != 3 || request[0] !in listOf("GET", "HEAD")) {
+                if (request.size != 3 || request[0] !in listOf("GET", "HEAD", "OPTIONS")) {
                     output.write("HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
                     return@launch
                 }
@@ -728,25 +1186,50 @@ class TorrentStreamService : Service() {
                         rangeHeader = line.substringAfter(":").trim()
                     }
                 }
+                if (request[0] == "OPTIONS") {
+                    output.write(
+                        ("HTTP/1.1 204 No Content\r\n" +
+                            "Access-Control-Allow-Origin: *\r\n" +
+                            "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n" +
+                            "Access-Control-Allow-Headers: Range, Content-Type\r\n" +
+                            "Content-Length: 0\r\nConnection: close\r\n\r\n").toByteArray()
+                    )
+                    output.flush()
+                    return@launch
+                }
 
-                val stream = activeSession.get()
-                if (stream == null || _streamStatus.value.requestId != stream.id || !stream.file.isFile ||
-                    request[1] != "/${stream.id}/stream.${videoExtension(stream.file.name)}") {
+                val offlinePair = activeOfflineCast.get()
+                val isOfflineMatch = offlinePair != null &&
+                    offlinePair.second.isFile &&
+                    request[1] == "/${offlinePair.first}/offline.mp4"
+
+                val stream = if (isOfflineMatch) null else activeSession.get()
+                val isLiveMatch = stream != null &&
+                    _streamStatus.value.requestId == stream.id &&
+                    stream.file.isFile &&
+                    request[1] == "/${stream.id}/stream.${videoExtension(stream.file.name)}"
+
+                if (!isOfflineMatch && !isLiveMatch) {
                     output.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
                     return@launch
                 }
 
-                val file = stream.file
-                val totalLen = stream.size
-                val mimeType = when (file.extension.lowercase()) {
-                    "mp4" -> "video/mp4"
-                    "webm" -> "video/webm"
-                    else -> "video/x-matroska"
+                val file = if (isOfflineMatch) offlinePair!!.second else stream!!.file
+                val totalLen = if (isOfflineMatch) file.length() else stream!!.size
+                val mimeType = if (isOfflineMatch) {
+                    detectOfflineContainerMime(file)
+                } else {
+                    when (file.extension.lowercase()) {
+                        "mp4" -> "video/mp4"
+                        "webm" -> "video/webm"
+                        else -> "video/x-matroska"
+                    }
                 }
 
                 val range = parseByteRange(rangeHeader, totalLen)
                 if (range == null) {
                     output.write(("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */$totalLen\r\n" +
+                        "Access-Control-Allow-Origin: *\r\n" +
                         "Content-Length: 0\r\nConnection: close\r\n\r\n").toByteArray())
                     return@launch
                 }
@@ -754,18 +1237,22 @@ class TorrentStreamService : Service() {
                 val endByte = range.end
                 val isPartial = rangeHeader != null
                 val contentLength = range.length
+                val corsHeaders = "Access-Control-Allow-Origin: *\r\n" +
+                    "Access-Control-Expose-Headers: Content-Range, Content-Length, Accept-Ranges\r\n"
                 val headers = if (isPartial) {
                     "HTTP/1.1 206 Partial Content\r\n" +
                             "Content-Type: $mimeType\r\n" +
                             "Content-Length: $contentLength\r\n" +
                             "Content-Range: bytes $startByte-$endByte/$totalLen\r\n" +
                             "Accept-Ranges: bytes\r\n" +
+                            corsHeaders +
                             "Connection: close\r\n\r\n"
                 } else {
                     "HTTP/1.1 200 OK\r\n" +
                             "Content-Type: $mimeType\r\n" +
                             "Content-Length: $totalLen\r\n" +
                             "Accept-Ranges: bytes\r\n" +
+                            corsHeaders +
                             "Connection: close\r\n\r\n"
                 }
 
@@ -773,17 +1260,31 @@ class TorrentStreamService : Service() {
                 if (request[0] == "HEAD") return@launch
 
                 RandomAccessFile(file, "r").use { raf ->
-                    try {
-                        copyVerifiedRange(raf, output, range,
-                            isCurrent = { activeSession.get() === stream && _streamStatus.value.requestId == stream.id },
-                            isVerified = { offset, count -> hasFileRangeDownloaded(offset, count, stream) },
-                            verificationLength = { offset, remaining ->
-                                bytesInCurrentPiece(offset, remaining, stream.fileOffset, stream.pieceLength)
-                            },
-                            requestPieces = { offset -> requestPieces(stream, offset, lookAhead = 2) })
-                    } catch (e: TimeoutCancellationException) {
-                        // A seek may have already abandoned this connection. Let Media3 retry the range.
-                        updateStreamStatus(stream.id) { it.copy(phase = "range_wait") }
+                    if (isOfflineMatch) {
+                        raf.seek(range.start)
+                        val buf = ByteArray(64 * 1024)
+                        var left = range.length
+                        while (left > 0 && activeOfflineCast.get()?.first == offlinePair?.first) {
+                            val toRead = minOf(buf.size.toLong(), left).toInt()
+                            val n = raf.read(buf, 0, toRead)
+                            if (n <= 0) break
+                            output.write(buf, 0, n)
+                            left -= n
+                        }
+                    } else {
+                        val live = stream!!
+                        try {
+                            copyVerifiedRange(raf, output, range,
+                                isCurrent = { activeSession.get() === live && _streamStatus.value.requestId == live.id },
+                                isVerified = { offset, count -> hasFileRangeDownloaded(offset, count, live) },
+                                verificationLength = { offset, remaining ->
+                                    bytesInCurrentPiece(offset, remaining, live.fileOffset, live.pieceLength)
+                                },
+                                requestPieces = { offset -> requestPieces(live, offset, lookAhead = 6) })
+                        } catch (e: TimeoutCancellationException) {
+                            // A seek may have already abandoned this connection. Let Media3 retry the range.
+                            updateStreamStatus(live.id) { it.copy(phase = "range_wait") }
+                        }
                     }
                 }
                 output.flush()
@@ -797,9 +1298,31 @@ class TorrentStreamService : Service() {
         }
     }
 
+    private fun detectOfflineContainerMime(file: File): String {
+        return try {
+            val header = ByteArray(12)
+            RandomAccessFile(file, "r").use { raf -> raf.read(header) }
+            // EBML magic 0x1A 0x45 0xDF 0xA3 -> Matroska / WebM; "ftyp" at bytes 4..7 -> MP4
+            if (header[0] == 0x1A.toByte() && header[1] == 0x45.toByte() &&
+                header[2] == 0xDF.toByte() && header[3] == 0xA3.toByte()
+            ) {
+                "video/x-matroska"
+            } else if (header[4] == 'f'.code.toByte() && header[5] == 't'.code.toByte() &&
+                header[6] == 'y'.code.toByte() && header[7] == 'p'.code.toByte()
+            ) {
+                "video/mp4"
+            } else {
+                "video/mp4"
+            }
+        } catch (_: Exception) {
+            "video/mp4"
+        }
+    }
+
     override fun onDestroy() {
         serviceScope.cancel()
         activeSession.set(null)
+        activeOfflineCast.set(null)
         synchronized(socketLock) { runCatching { serverSocket?.close() } }
         closeClientSockets()
         streamRequestId?.let { requestId ->
@@ -823,17 +1346,21 @@ class TorrentStreamService : Service() {
         }
     }
 
-    private fun buildNotification(text: String): Notification {
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+    private fun buildNotification(text: String, progressPercent: Int? = null): Notification {
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Nanami Anime")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
-            .build()
+            .setOnlyAlertOnce(true)
+        if (progressPercent != null) {
+            builder.setProgress(100, progressPercent.coerceIn(0, 100), progressPercent <= 0)
+        }
+        return builder.build()
     }
 
-    private fun updateNotification(text: String) {
+    private fun updateNotification(text: String, progressPercent: Int? = null) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(NOTIFICATION_ID, buildNotification(text))
+        nm.notify(NOTIFICATION_ID, buildNotification(text, progressPercent))
     }
 }

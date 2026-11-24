@@ -30,6 +30,9 @@ internal class PieceDemand(private val nowMillis: () -> Long = { System.nanoTime
             deadlines[piece] = deadline
         }
     }
+    @Synchronized fun clear() {
+        deadlines.clear()
+    }
 }
 
 /** The contiguous bytes that belong to the same torrent piece as the requested offset. */

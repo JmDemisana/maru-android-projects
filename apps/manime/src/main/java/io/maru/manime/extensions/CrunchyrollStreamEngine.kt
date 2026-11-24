@@ -69,6 +69,7 @@ object CrunchyrollStreamEngine {
 
     // High-availability anime & global trackers for fast peer discovery
     private val FAST_TRACKERS = listOf(
+        "http://sukebei.tracker.wf:8888/announce",
         "http://nyaa.tracker.wf:7777/announce",
         "http://anidex.moe:6969/announce",
         "http://tracker.anirena.com:80/announce",
@@ -121,20 +122,22 @@ object CrunchyrollStreamEngine {
                 preferredAudio = "DUB",
                 isMovie = isMovie
             )
-            val dubStreams = streams.filter { it.audioType == "DUAL_AUDIO" || it.audioType == "DUB" }
+            val dubStreams = streams.filter {
+                (it.audioType == "DUAL_AUDIO" || it.audioType == "DUB") &&
+                    (!it.isTorrent || (it.seeders ?: 1) > 0)
+            }
             val hasDub = dubStreams.isNotEmpty()
             val langs = mutableSetOf<String>()
             for (s in dubStreams) {
-                val raw = (s.filename ?: "").lowercase()
-                if (raw.contains("🇬🇧") || raw.contains("🇺🇸") || raw.contains("eng") || raw.contains("english") || raw.contains("dual")) {
+                val raw = listOfNotNull(s.filename, s.sourceName).joinToString(" ").lowercase()
+                if (s.audioType == "DUAL_AUDIO" || raw.contains("dual")) {
                     langs.add("English / Dual Audio")
-                }
-                if (raw.contains("multi")) {
-                    langs.add("Multi-Language Dub")
+                } else {
+                    langs.add("English Dub")
                 }
             }
-            if (hasDub && langs.isEmpty()) langs.add("Dual Audio / Dub")
             val status = StreamDubStatus(hasStreamDubOrDual = hasDub, detectedLanguages = langs.toList())
+            if (hasDub) io.maru.manime.KnownDubRegistry.recordKnownDub(anilistId)
             if (streams.isNotEmpty()) dubStatusCache[cacheKey] = System.nanoTime() to status
             status
         } catch (e: CancellationException) {
@@ -320,38 +323,44 @@ object CrunchyrollStreamEngine {
     private suspend fun fetchKitsuEpisodes(kitsuId: String): List<CrunchyEpisodeMeta> {
         val list = mutableListOf<CrunchyEpisodeMeta>()
         try {
-            val req = Request.Builder()
-                .url("https://kitsu.io/api/edge/anime/$kitsuId/episodes?page[limit]=20&sort=number")
-                .header("User-Agent", StremioAddonClient.BROWSER_UA)
-                .build()
-            val body = httpClient.newCall(req).readResponse { response ->
-                if (response.isSuccessful) response.body?.string() else null
-            } ?: return emptyList()
-            val data = JSONObject(body).optJSONArray("data") ?: return emptyList()
-            for (i in 0 until data.length()) {
-                val attr = data.optJSONObject(i)?.optJSONObject("attributes") ?: continue
-                val num = attr.optInt("number", i + 1)
-                val canonical = attr.optString("canonicalTitle", "").takeIf { it.isNotBlank() && it != "null" }
-                    ?: "Episode $num"
-                val synopsis = attr.optString("synopsis", "").takeIf { it.isNotBlank() && it != "null" }
-                val thumb = attr.optJSONObject("thumbnail")?.optString("original")?.takeIf { it.isNotBlank() && it != "null" }
-                val airDate = attr.optString("airdate", "").takeIf { it.isNotBlank() && it != "null" }
-                val length = attr.optInt("length", 24).takeIf { it > 0 } ?: 24
-                list.add(
-                    CrunchyEpisodeMeta(
-                        episodeNumber = num,
-                        title = canonical,
-                        overview = synopsis,
-                        thumbnail = thumb,
-                        airDate = airDate,
-                        durationMinutes = length
+            var offset = 0
+            while (offset <= 40) {
+                val req = Request.Builder()
+                    .url("https://kitsu.io/api/edge/anime/$kitsuId/episodes?page[limit]=20&page[offset]=$offset&sort=number")
+                    .header("User-Agent", StremioAddonClient.BROWSER_UA)
+                    .build()
+                val body = httpClient.newCall(req).readResponse { response ->
+                    if (response.isSuccessful) response.body?.string() else null
+                } ?: break
+                val data = JSONObject(body).optJSONArray("data") ?: break
+                if (data.length() == 0) break
+                for (i in 0 until data.length()) {
+                    val attr = data.optJSONObject(i)?.optJSONObject("attributes") ?: continue
+                    val num = attr.optInt("number", offset + i + 1)
+                    val canonical = attr.optString("canonicalTitle", "").takeIf { it.isNotBlank() && it != "null" }
+                        ?: "Episode $num"
+                    val synopsis = attr.optString("synopsis", "").takeIf { it.isNotBlank() && it != "null" }
+                    val thumb = attr.optJSONObject("thumbnail")?.optString("original")?.takeIf { it.isNotBlank() && it != "null" }
+                    val airDate = attr.optString("airdate", "").takeIf { it.isNotBlank() && it != "null" }
+                    val length = attr.optInt("length", 24).takeIf { it > 0 } ?: 24
+                    list.add(
+                        CrunchyEpisodeMeta(
+                            episodeNumber = num,
+                            title = canonical,
+                            overview = synopsis,
+                            thumbnail = thumb,
+                            airDate = airDate,
+                            durationMinutes = length
+                        )
                     )
-                )
+                }
+                if (data.length() < 20) break
+                offset += 20
             }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {}
-        return list
+        return list.distinctBy { it.episodeNumber }
     }
 
     /**
@@ -553,11 +562,21 @@ object CrunchyrollStreamEngine {
         preferredAudio: String = "SUB", // "SUB" | "DUB"
         preferredQuality: String = "1080p", // "1080p" | "720p" | "4K"
         isMovie: Boolean = false,
+        altTitles: List<String> = emptyList(),
+        isStandalone: Boolean = isMovie,
+        isAdult: Boolean = false,
+        genres: List<String> = emptyList(),
+        isMusicOrConcert: Boolean = false,
+        trailerYoutubeId: String? = null,
+        externalLinks: List<io.maru.manime.ExternalLink> = emptyList(),
         onStreamsUpdated: (List<StreamLink>) -> Unit = {}
     ): List<StreamLink> = coroutineScope {
         val mappings = getAnimeMappings(anilistId, animeTitle, includeEpisodeMetadata = false)
         val lookups = streamLookups(mappings, episodeNum, isMovie)
-        if (lookups.isEmpty()) return@coroutineScope emptyList()
+        val candidateTitles = (listOf(animeTitle) + altTitles).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val isEcchi = genres.any { it.equals("Ecchi", true) || it.equals("Hentai", true) }
+        val runFallbackImmediately = lookups.isEmpty() || isAdult || isEcchi || isMusicOrConcert
+
         val displayName = URLEncoder.encode("$animeTitle - Episode $episodeNum", "UTF-8")
 
         val jobs = BUILTIN_PROVIDERS.flatMap { providerUrl ->
@@ -631,9 +650,48 @@ object CrunchyrollStreamEngine {
                     found
                 }
             }
+        }.toMutableList()
+
+        if (runFallbackImmediately) {
+            jobs += async(Dispatchers.IO) {
+                FallbackStreamResolvers.resolveFallbackStreams(
+                    titles = candidateTitles,
+                    episodeNum = episodeNum,
+                    isStandalone = isStandalone,
+                    isAdult = isAdult,
+                    isEcchi = isEcchi,
+                    isMusicOrConcert = isMusicOrConcert,
+                    preferredAudio = preferredAudio,
+                    preferredQuality = preferredQuality,
+                    trailerYoutubeId = trailerYoutubeId,
+                    externalLinks = externalLinks
+                )
+            }
         }
 
-        collectRankedStreams(jobs, onStreamsUpdated)
+        val initial = if (jobs.isEmpty()) emptyList() else collectRankedStreams(jobs, onStreamsUpdated)
+        if (!runFallbackImmediately && (initial.isEmpty() || initial.all { it.isTorrent && it.seeders == 0 })) {
+            val fallback = FallbackStreamResolvers.resolveFallbackStreams(
+                titles = candidateTitles,
+                episodeNum = episodeNum,
+                isStandalone = isStandalone,
+                isAdult = isAdult,
+                isEcchi = isEcchi,
+                isMusicOrConcert = isMusicOrConcert,
+                preferredAudio = preferredAudio,
+                preferredQuality = preferredQuality,
+                trailerYoutubeId = trailerYoutubeId,
+                externalLinks = externalLinks
+            )
+            if (fallback.isNotEmpty()) {
+                val merged = (initial + fallback)
+                    .distinctBy { it.playbackIdentity }
+                    .sortedByDescending { it.score }
+                onStreamsUpdated(merged)
+                return@coroutineScope merged
+            }
+        }
+        initial
     }
 
     private data class StreamLookup(val type: String, val id: String, val priority: Int = 0)
@@ -739,21 +797,33 @@ object CrunchyrollStreamEngine {
         return score
     }
 
-    private fun detectAudioType(raw: String): String {
+    private val dualAudioRegex = Regex(
+        "(?i)(?:\\bdual[ ._\\-]?audio\\b|\\bdualaudio\\b|\\[dual]|\\(dual\\)|\\.dual\\.|\\bmulti[ ._\\-]?audio\\b|\\b2audio\\b|\\b(?:ja|jpn|jap)\\s*[+/\\-]\\s*(?:en|eng)\\b|\\b(?:en|eng)\\s*[+/\\-]\\s*(?:ja|jpn|jap)\\b)"
+    )
+    private val englishDubRegex = Regex(
+        "(?i)(?:\\b(?:eng|english|en)[ ._\\-]?dub(?:bed)?\\b|\\bdub(?:bed)?[ ._\\-]?(?:eng|english)\\b|\\[dub]|\\(dub\\)|\\[yameii]|\\bdubbed\\b|\\bdub\\b)"
+    )
+    private val foreignOnlyDubRegex = Regex(
+        "(?i)(?:\\banidub\\b|\\bdublado\\b|\\bsubtitulado\\b|\\b(?:rus|russian|ukr|ukrainian|ger|german|ita|italian|spa|spanish|latino|castellano|por|portuguese|pt[._\\-]?br|fra|french|vf|vostfr|hin|hindi|tam|tamil|tel|telugu|ara|arabic|pol|polish|tur|turkish)\\b)"
+    )
+    private val explicitEnglishTagRegex = Regex("(?i)(?:\\beng\\b|\\benglish\\b|🇺🇸)")
+
+    internal fun detectAudioType(raw: String): String {
         val lower = raw.lowercase()
-        return if (
-            lower.contains("dual") ||
-            lower.contains("multi-audio") ||
-            lower.contains("multi audio") ||
-            lower.contains("ja+en") ||
-            lower.contains("jpn+eng")
-        ) {
-            "DUAL_AUDIO"
-        } else if (lower.contains("dub") || lower.contains("eng dub") || lower.contains("english dub")) {
-            "DUB"
-        } else {
-            "SUB"
+        val hasForeignTag = foreignOnlyDubRegex.containsMatchIn(lower)
+        val hasExplicitEnglish = explicitEnglishTagRegex.containsMatchIn(lower)
+
+        if (dualAudioRegex.containsMatchIn(lower)) {
+            if (!hasForeignTag || hasExplicitEnglish || lower.contains("dual audio") || lower.contains("dual-audio")) {
+                return "DUAL_AUDIO"
+            }
         }
+        if (englishDubRegex.containsMatchIn(lower)) {
+            if (!hasForeignTag || hasExplicitEnglish) {
+                return "DUB"
+            }
+        }
+        return "SUB"
     }
 
     private fun detectQuality(raw: String): String {

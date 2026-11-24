@@ -2,12 +2,16 @@ package io.maru.manime.player
 
 import android.app.Activity
 import android.app.PictureInPictureParams
+import android.content.Context
 import android.content.pm.ActivityInfo
 import android.graphics.Typeface
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import android.util.Rational
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -16,10 +20,13 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -28,11 +35,16 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -40,22 +52,24 @@ import androidx.core.util.Consumer
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.media3.common.C
+import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.DefaultRenderersFactory
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
@@ -66,19 +80,20 @@ import io.maru.manime.extensions.ExternalSubtitleItem
 import io.maru.manime.extensions.StreamLink
 import io.maru.manime.extensions.SubtitleTrack
 import io.maru.manime.extensions.playbackIdentity
-import io.maru.manime.torrent.TorrentStreamService
 import io.maru.manime.torrent.STREAM_READ_TIMEOUT_MS
+import io.maru.manime.torrent.TorrentStreamService
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
-import androidx.lifecycle.lifecycleScope
 import java.io.File
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -91,12 +106,65 @@ fun PlayerScreen(
     prefs: MAnimePrefs,
     onEpisodeWatched: (Int) -> Unit = {},
     onSwitchEpisode: (Int) -> Unit = {},
+    hasPrevEpisode: Boolean = episodeNum > 1,
+    hasNextEpisode: Boolean = episodeNum < (media.latestAiredEpisode ?: episodeNum),
     offlineOnly: Boolean = false,
     lastPlayableEpisode: Int? = media.latestAiredEpisode,
     onBack: () -> Unit
-) = key(media.mediaId, episodeNum) {
-    EpisodePlayerScreen(media, episodeNum, episodeTitle, initialAudioMode, hasEnglishDub,
-        prefs, onEpisodeWatched, onSwitchEpisode, offlineOnly, lastPlayableEpisode, onBack)
+) {
+    val context = LocalContext.current
+    val castController = remember(context) { NanamiCastController(context) }
+
+    // Keep landscape orientation, immersive system bars, screen brightness, and Chromecast session
+    // mounted across episode transitions so Next/Previous never flashes portrait or corrupts orientation!
+    DisposableEffect(Unit) {
+        val activity = context as? Activity
+        val originalOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        val originalBrightness = activity?.window?.attributes?.screenBrightness
+            ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (activity != null) {
+            WindowCompat.getInsetsController(activity.window, activity.window.decorView).apply {
+                hide(WindowInsetsCompat.Type.systemBars())
+                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        }
+        castController.startDiscovery()
+
+        onDispose {
+            castController.stopDiscovery()
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (activity != null) {
+                val lp = activity.window.attributes
+                lp.screenBrightness = originalBrightness
+                activity.window.attributes = lp
+                activity.requestedOrientation = originalOrientation
+                WindowCompat.getInsetsController(activity.window, activity.window.decorView)
+                    .show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
+
+    key(media.mediaId, episodeNum) {
+        EpisodePlayerScreen(
+            media = media,
+            episodeNum = episodeNum,
+            episodeTitle = episodeTitle,
+            initialAudioMode = initialAudioMode,
+            hasEnglishDub = hasEnglishDub,
+            prefs = prefs,
+            castController = castController,
+            onEpisodeWatched = onEpisodeWatched,
+            onSwitchEpisode = onSwitchEpisode,
+            hasPrevEpisode = hasPrevEpisode,
+            hasNextEpisode = hasNextEpisode,
+            offlineOnly = offlineOnly,
+            lastPlayableEpisode = lastPlayableEpisode,
+            onBack = onBack
+        )
+    }
 }
 
 @OptIn(UnstableApi::class)
@@ -108,17 +176,26 @@ private fun EpisodePlayerScreen(
     initialAudioMode: String,
     hasEnglishDub: Boolean,
     prefs: MAnimePrefs,
+    castController: NanamiCastController,
     onEpisodeWatched: (Int) -> Unit,
     onSwitchEpisode: (Int) -> Unit,
+    hasPrevEpisode: Boolean,
+    hasNextEpisode: Boolean,
     offlineOnly: Boolean,
     lastPlayableEpisode: Int?,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
 
     var detectedDualOrDubInStreams by remember { mutableStateOf(hasEnglishDub) }
     val effectiveHasDub = hasEnglishDub || detectedDualOrDubInStreams
+    LaunchedEffect(detectedDualOrDubInStreams) {
+        if (detectedDualOrDubInStreams) {
+            KnownDubRegistry.recordKnownDub(media.mediaId, context)
+        }
+    }
 
     var activeAudioMode by remember {
         mutableStateOf(if (!effectiveHasDub) "SUB" else initialAudioMode)
@@ -138,14 +215,18 @@ private fun EpisodePlayerScreen(
     var expectedTorrentRequest by remember { mutableStateOf<String?>(null) }
     var playbackAttempt by remember { mutableIntStateOf(0) }
     var playbackTracks by remember { mutableStateOf(Tracks.EMPTY) }
+    var autoAppliedAudioAttempt by remember { mutableIntStateOf(-1) }
     var sourceHeaders by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var sourceSubtitles by remember { mutableStateOf<List<SubtitleTrack>>(emptyList()) }
+    var currentLoadedUri by remember { mutableStateOf<Uri?>(null) }
+    var currentLoadedMime by remember { mutableStateOf<String?>(null) }
     var resumeAfterSwitch by remember { mutableLongStateOf(C.TIME_UNSET) }
     var playAfterSwitch by remember { mutableStateOf(true) }
     var subtitlesEnabled by remember { mutableStateOf<Boolean?>(null) }
     var selectExternalTrackOnLoad by remember { mutableStateOf(false) }
 
     val serviceStatus = TorrentStreamService.streamStatus.collectAsState()
+    val offlineCastUrl by TorrentStreamService.offlineCastUrl.collectAsState()
     val torrentConnection by remember {
         derivedStateOf {
             val status = serviceStatus.value
@@ -171,53 +252,75 @@ private fun EpisodePlayerScreen(
     var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
     var videoResizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
     var autoPlayCountdown by remember { mutableStateOf<Int?>(null) }
-    var hasScrobbled85Percent by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
+    var hasScrobbled80Percent by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
     var savedPositionMs by remember { mutableStateOf<Long?>(null) }
 
     var skipIntervals by remember { mutableStateOf<List<AniSkipInterval>>(emptyList()) }
     var activeSkipInterval by remember { mutableStateOf<AniSkipInterval?>(null) }
 
-    // Full-page Settings screen (Audio, Subtitles & Quality) instead of draggable BottomSheet!
     var showFullSettingsPage by remember { mutableStateOf(false) }
+    var showCastDialog by remember { mutableStateOf(false) }
 
-    val token by prefs.anilistToken.collectAsState(initial = "")
+    // Swipe Brightness & Volume + Double-Tap Seek HUD states
+    var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+    var activeGestureIsBrightness by remember { mutableStateOf(true) }
+    var gestureHudFraction by remember { mutableFloatStateOf(0.5f) }
+    var gestureHudVisible by remember { mutableStateOf(false) }
+    var gestureHideTick by remember { mutableIntStateOf(0) }
+
+    var doubleTapDeltaSec by remember { mutableIntStateOf(0) }
+    var doubleTapLeftSide by remember { mutableStateOf(true) }
+    var doubleTapVisible by remember { mutableStateOf(false) }
+    var doubleTapTick by remember { mutableIntStateOf(0) }
+
+    val session by prefs.anilistSession.collectAsState(initial = AniListSession())
+    val token = session.token
+    val scoreFormat by prefs.anilistScoreFormat.collectAsState(initial = "POINT_100")
     val reportProgress by prefs.reportProgress.collectAsState(initial = true)
     val rememberPosition by prefs.rememberPosition.collectAsState(initial = true)
     val autoSkipIntro by prefs.autoSkipIntro.collectAsState(initial = false)
+    val swipeGesturesEnabled by prefs.swipeGesturesEnabled.collectAsState(initial = true)
+
     val latestRememberPosition by rememberUpdatedState(rememberPosition)
     val latestWatchedCallback by rememberUpdatedState(onEpisodeWatched)
     val latestReportProgress by rememberUpdatedState(reportProgress)
     val latestToken by rememberUpdatedState(token)
+    val latestUsername by rememberUpdatedState(session.username)
+    val latestScoreFormat by rememberUpdatedState(scoreFormat)
     val latestMedia by rememberUpdatedState(media)
-    val persistenceScope = remember(context) { (context as? ComponentActivity)?.lifecycleScope
-        ?: CoroutineScope(SupervisorJob() + Dispatchers.IO) }
+    val latestSwipeEnabled by rememberUpdatedState(swipeGesturesEnabled)
+
+    val persistenceScope = remember(context) {
+        (context as? ComponentActivity)?.lifecycleScope
+            ?: CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    }
     var isAttached by remember { mutableStateOf(true) }
 
     fun markWatched() {
-        if (hasScrobbled85Percent) return
-        hasScrobbled85Percent = true
-        if (latestReportProgress && latestToken.isNotBlank() && episodeNum > latestMedia.progress) {
-            val auth = latestToken
-            val snapshot = latestMedia
-            persistenceScope.launch {
-                try {
-                    if (!prefs.reportProgress.first() || prefs.anilistToken.first() != auth) return@launch
-                    val current = AniListClient.getMediaDetail(snapshot.mediaId, auth)
-                    if (episodeNum > current.progress && current.listStatus !in setOf("COMPLETED", "REPEATING")) {
-                        if (!prefs.reportProgress.first() || prefs.anilistToken.first() != auth) return@launch
-                        AniListClient.saveEntry(current.mediaId,
-                            if (current.episodes != null && episodeNum >= current.episodes) "COMPLETED" else "CURRENT",
-                            episodeNum, null, null, null, auth)
-                    }
-                    if (isAttached) latestWatchedCallback(episodeNum)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    android.widget.Toast.makeText(context, "AniList progress sync failed. Your list was not updated.",
-                        android.widget.Toast.LENGTH_LONG).show()
+        if (hasScrobbled80Percent) return
+        hasScrobbled80Percent = true
+        val auth = latestToken
+        val activeUser = latestUsername
+        val snapshot = latestMedia
+        val shouldSyncRemote = latestReportProgress && auth.isNotBlank()
+        val fmt = latestScoreFormat
+        persistenceScope.launch {
+            LocalLibraryStore.recordEpisodeWatchedAt80Percent(
+                context = context.applicationContext,
+                media = snapshot,
+                episodeNum = episodeNum,
+                isLoggedIn = auth.isNotBlank(),
+                reportProgress = shouldSyncRemote,
+                anilistToken = auth,
+                anilistUsername = activeUser,
+                scoreFormat = fmt
+            )
+            if (isAttached) {
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    latestWatchedCallback(episodeNum)
                 }
             }
-        } else latestWatchedCallback(episodeNum)
+        }
     }
 
     val exoPlayer = remember {
@@ -236,7 +339,22 @@ private fun EpisodePlayerScreen(
         }
     }
 
+    fun refreshSeekabilityAndDuration() {
+        if (castController.isConnected) {
+            val castDur = castController.durationMs() ?: 0L
+            if (castDur > 0L) totalDuration.longValue = castDur
+            isSeekable = castDur > 0L
+            return
+        }
+        val rawDur = exoPlayer.duration
+        val safeDur = if (rawDur == C.TIME_UNSET || rawDur < 0L) 0L else rawDur
+        if (safeDur > 0L) totalDuration.longValue = safeDur
+        isSeekable = safeDur > 0L && (exoPlayer.isCurrentMediaItemSeekable || isOfflinePlayback || selectedStream != null)
+    }
+
     fun prepareVideo(videoUri: Uri, mimeType: String?) {
+        currentLoadedUri = videoUri
+        currentLoadedMime = mimeType
         val externalSub = selectedOpenSub
         selectExternalTrackOnLoad = externalSub != null && subtitlesEnabled != false
         val subConfigs = sourceSubtitles.map { sub ->
@@ -270,17 +388,67 @@ private fun EpisodePlayerScreen(
         val builder = MediaItem.Builder().setMediaId(playbackAttempt.toString()).setUri(videoUri)
         if (mimeType != null) builder.setMimeType(mimeType)
         if (subConfigs.isNotEmpty()) builder.setSubtitleConfigurations(subConfigs)
-        val dataSource = DefaultDataSource.Factory(context, DefaultHttpDataSource.Factory()
-            .setReadTimeoutMs(STREAM_READ_TIMEOUT_MS))
+        val dataSource = DefaultDataSource.Factory(
+            context,
+            DefaultHttpDataSource.Factory().setReadTimeoutMs(STREAM_READ_TIMEOUT_MS)
+        )
         val headers = sourceHeaders
-        // Video headers can authorize manifest and segment requests. Keep them off OpenSubtitles.
         val sourceFactory = if (headers.isEmpty()) dataSource else ResolvingDataSource.Factory(dataSource) { request ->
             if (request.uri.toString() == externalSub?.url) request else request.withAdditionalHeaders(headers)
         }
         val source = DefaultMediaSourceFactory(sourceFactory).createMediaSource(builder.build())
-        exoPlayer.setMediaSource(source, resumeAfterSwitch)
+        val startMs = if (resumeAfterSwitch != C.TIME_UNSET && resumeAfterSwitch > 0L) {
+            resumeAfterSwitch
+        } else {
+            val saved = savedPositionMs ?: 0L
+            if (saved >= 10_000L) saved else C.TIME_UNSET
+        }
+        exoPlayer.setMediaSource(source, startMs)
         exoPlayer.prepare()
-        exoPlayer.playWhenReady = playAfterSwitch
+        exoPlayer.playWhenReady = if (castController.isConnected) false else playAfterSwitch
+    }
+
+    // Automatically push media to Chromecast whenever Cast connects or stream URL changes
+    val isCasting = castController.isConnected
+    LaunchedEffect(isCasting, currentLoadedUri, offlineCastUrl, selectedOpenSub) {
+        val uri = currentLoadedUri ?: return@LaunchedEffect
+        if (!isCasting) return@LaunchedEffect
+        exoPlayer.pause()
+        val castUrl = castController.resolveCastableUrl(uri, offlineCastUrl) ?: return@LaunchedEffect
+        val startPos = currentPosition.longValue.takeIf { it > 0L }
+            ?: exoPlayer.currentPosition.coerceAtLeast(0L)
+        val subUrl = selectedOpenSub?.url
+            ?: sourceSubtitles.firstOrNull { it.language.startsWith("en", true) }?.url
+        val loaded = castController.loadMediaIfNeeded(
+            castUrl = castUrl,
+            mimeType = currentLoadedMime,
+            animeTitle = media.title,
+            episodeNum = episodeNum,
+            episodeTitle = episodeTitle,
+            coverUrl = media.coverUrl,
+            subtitleUrl = subUrl,
+            startPositionMs = startPos
+        )
+        if (loaded) {
+            hasRenderedFrame = true
+            isPlayerBuffering = false
+            showControls = true
+        }
+    }
+
+    // When disconnecting from Chromecast, resume local playback seamlessly at the TV's position
+    var wasCasting by remember { mutableStateOf(false) }
+    LaunchedEffect(isCasting) {
+        if (isCasting) {
+            wasCasting = true
+        } else if (wasCasting) {
+            wasCasting = false
+            val resumeMs = currentPosition.longValue
+            if (exoPlayer.currentMediaItem != null) {
+                if (resumeMs > 0L) exoPlayer.seekTo(resumeMs)
+                exoPlayer.play()
+            }
+        }
     }
 
     fun enterPip() {
@@ -302,6 +470,7 @@ private fun EpisodePlayerScreen(
             if (info.isInPictureInPictureMode) {
                 showControls = false
                 showFullSettingsPage = false
+                showCastDialog = false
             }
         }
         compActivity?.addOnPictureInPictureModeChangedListener(pipConsumer)
@@ -355,7 +524,7 @@ private fun EpisodePlayerScreen(
         activeSkipInterval = null
         playbackTracks = Tracks.EMPTY
         isPlayerBuffering = true
-        hasRenderedFrame = false
+        if (!castController.isConnected) hasRenderedFrame = false
         isSeekable = false
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
@@ -386,9 +555,11 @@ private fun EpisodePlayerScreen(
         sourceSubtitles = chosen.subtitles
         val sourceAudio = chosen.audioType.takeIf { it == "SUB" || it == "DUB" } ?: activeAudioMode
         exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
-            .clearOverrides().setPreferredAudioLanguage(if (sourceAudio == "DUB") "en" else "ja")
+            .clearOverrides()
+            .setPreferredAudioLanguage(if (sourceAudio == "DUB") "en" else "ja")
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !(subtitlesEnabled ?: (sourceAudio != "DUB")))
-            .setPreferredTextLanguage(selectedOpenSub?.langCode ?: "en").build()
+            .setPreferredTextLanguage(selectedOpenSub?.langCode ?: "en")
+            .build()
 
         if (chosen.isTorrent) {
             expectedTorrentRequest = TorrentStreamService.startStream(
@@ -453,6 +624,13 @@ private fun EpisodePlayerScreen(
                 preferredAudio = activeAudioMode,
                 preferredQuality = prefQual,
                 isMovie = media.format == "MOVIE",
+                altTitles = listOfNotNull(media.titleEnglish, media.titleRomaji, media.title),
+                isStandalone = media.isStandaloneFeature,
+                isAdult = media.isAdult,
+                genres = media.genres,
+                isMusicOrConcert = media.isMusicOrConcert,
+                trailerYoutubeId = media.trailerYoutubeId,
+                externalLinks = media.externalLinks,
                 onStreamsUpdated = { options ->
                     rankedStreams = options
                     if (options.any { it.audioType == "DUAL_AUDIO" || it.audioType == "DUB" }) {
@@ -469,7 +647,6 @@ private fun EpisodePlayerScreen(
                             playStream(preferred)
                         } else if (candidates.isNotEmpty() && startFallback?.isActive != true) {
                             startFallback = launch {
-                                // Give matching audio a brief head start while providers finish in parallel.
                                 delay(750)
                                 if (selectedStream == null || waitingForAlternative != null) {
                                     rankedStreams.firstOrNull { it.playbackIdentity !in attemptedSources }?.let(::playStream)
@@ -534,7 +711,8 @@ private fun EpisodePlayerScreen(
             android.util.Log.w("NanamiPlayer", "Source failed: ${connection.phase}")
             handlePlaybackFailure("Couldn't start this source. Try another source.")
         } else if (connection.isReady && connection.url != null &&
-            exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString() != connection.url) {
+            exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString() != connection.url
+        ) {
             val url = connection.url
             val mime = when {
                 url.endsWith(".mp4") -> MimeTypes.VIDEO_MP4
@@ -546,93 +724,118 @@ private fun EpisodePlayerScreen(
     }
 
     val latestListener by rememberUpdatedState(object : Player.Listener {
-            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-                wantsPlayback = playWhenReady
-            }
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            wantsPlayback = playWhenReady
+        }
 
-            override fun onPlaybackStateChanged(state: Int) {
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (!castController.isConnected) {
+                wantsPlayback = exoPlayer.playWhenReady
+            }
+            refreshSeekabilityAndDuration()
+        }
+
+        override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+            refreshSeekabilityAndDuration()
+        }
+
+        override fun onPlaybackStateChanged(state: Int) {
+            if (!castController.isConnected) {
                 isPlayerBuffering = state == Player.STATE_BUFFERING || (state == Player.STATE_IDLE && resolveError == null)
-                if (state == Player.STATE_READY) {
-                    val duration = exoPlayer.duration.coerceAtLeast(0L)
-                    totalDuration.longValue = duration
-                    isSeekable = exoPlayer.isCurrentMediaItemSeekable && duration > 0
-                    savedPositionMs?.let { position ->
-                        savedPositionMs = 0L
-                        if (isSeekable && position in 10_000..(duration - 30_000)) {
-                            exoPlayer.seekTo(position)
-                        }
-                    }
-                } else if (state == Player.STATE_ENDED) {
-                    markWatched()
-                    val maxEps = lastPlayableEpisode ?: episodeNum
-                    if (!offlineOnly && episodeNum < maxEps) {
-                        autoPlayCountdown = 5
+            }
+            if (state == Player.STATE_READY) {
+                refreshSeekabilityAndDuration()
+                val duration = totalDuration.longValue
+                savedPositionMs?.let { position ->
+                    savedPositionMs = 0L
+                    if (isSeekable && duration > 45_000L && position in 10_000..(duration - 25_000)) {
+                        exoPlayer.seekTo(position)
+                        currentPosition.longValue = position
                     }
                 }
-            }
-
-            override fun onRenderedFirstFrame() {
-                if (!hasRenderedFrame && !isInPipMode && !isScreenLocked) showControls = true
-                hasRenderedFrame = true
-            }
-
-            override fun onTracksChanged(tracks: Tracks) {
-                playbackTracks = tracks
-                if (findAudioTrack(tracks, "DUB") != null) detectedDualOrDubInStreams = true
-                val sub = selectedOpenSub
-                if (selectExternalTrackOnLoad && sub != null) {
-                    val label = "${sub.langName} (OpenSubtitles)"
-                    for (group in tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }) {
-                        val trackIndex = (0 until group.length).firstOrNull { group.getTrackFormat(it).label == label }
-                        if (trackIndex != null) {
-                            selectExternalTrackOnLoad = false
-                            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
-                                .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, trackIndex))
-                                .build()
-                            break
-                        }
-                    }
+            } else if (state == Player.STATE_ENDED) {
+                markWatched()
+                if (hasNextEpisode) {
+                    autoPlayCountdown = 5
                 }
-            }
-
-            override fun onPlayerError(error: PlaybackException) {
-                val failedAttempt = exoPlayer.currentMediaItem?.mediaId ?: return
-                scope.launch {
-                    // The engine and Media3 can both report the same failure.
-                    if (failedAttempt != playbackAttempt.toString()) return@launch
-                    if (selectedOpenSub != null) {
-                        useOpenSubtitle(null)
-                        return@launch
-                    }
-                    android.util.Log.w("NanamiPlayer", "Playback failed: ${error.errorCodeName} (${torrentConnection?.phase ?: "media"})")
-                    handlePlaybackFailure("This source stopped playing. Try another source.")
-                }
-            }
-        })
-    DisposableEffect(exoPlayer) {
-        val activity = context as? Activity
-        val originalOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        if (activity != null) {
-            WindowCompat.getInsetsController(activity.window, activity.window.decorView).apply {
-                hide(WindowInsetsCompat.Type.systemBars())
-                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             }
         }
+
+        override fun onRenderedFirstFrame() {
+            refreshSeekabilityAndDuration()
+            if (!hasRenderedFrame && !isInPipMode && !isScreenLocked) showControls = true
+            hasRenderedFrame = true
+        }
+
+        override fun onTracksChanged(tracks: Tracks) {
+            playbackTracks = tracks
+            if (findAudioTrack(tracks, "DUB") != null) detectedDualOrDubInStreams = true
+
+            // Ensure Dual-Audio MKVs honor the chosen SUB/DUB mode even if Japanese is flagged default in the container
+            if (autoAppliedAudioAttempt != playbackAttempt && tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO }) {
+                val desiredAudio = selectedStream?.audioType?.takeIf { it == "SUB" || it == "DUB" } ?: activeAudioMode
+                if (applyPreferredAudioTrack(exoPlayer, desiredAudio)) {
+                    autoAppliedAudioAttempt = playbackAttempt
+                }
+            }
+
+            val sub = selectedOpenSub
+            if (selectExternalTrackOnLoad && sub != null) {
+                val label = "${sub.langName} (OpenSubtitles)"
+                for (group in tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }) {
+                    val trackIndex = (0 until group.length).firstOrNull { group.getTrackFormat(it).label == label }
+                    if (trackIndex != null) {
+                        selectExternalTrackOnLoad = false
+                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                            .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, trackIndex))
+                            .build()
+                        break
+                    }
+                }
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            val failedAttempt = exoPlayer.currentMediaItem?.mediaId ?: return
+            scope.launch {
+                if (failedAttempt != playbackAttempt.toString()) return@launch
+                if (selectedOpenSub != null) {
+                    useOpenSubtitle(null)
+                    return@launch
+                }
+                android.util.Log.w("NanamiPlayer", "Playback failed: ${error.errorCodeName} (${torrentConnection?.phase ?: "media"})")
+                handlePlaybackFailure("This source stopped playing. Try another source.")
+            }
+        }
+    })
+
+    DisposableEffect(exoPlayer) {
         PlayerForegroundService.start(context, media.title, episodeNum)
         val listener = object : Player.Listener {
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) =
                 latestListener.onPlayWhenReadyChanged(playWhenReady, reason)
-            override fun onPlaybackStateChanged(state: Int) = latestListener.onPlaybackStateChanged(state)
-            override fun onRenderedFirstFrame() = latestListener.onRenderedFirstFrame()
-            override fun onTracksChanged(tracks: Tracks) = latestListener.onTracksChanged(tracks)
-            override fun onPlayerError(error: PlaybackException) = latestListener.onPlayerError(error)
+            override fun onIsPlayingChanged(isPlaying: Boolean) =
+                latestListener.onIsPlayingChanged(isPlaying)
+            override fun onTimelineChanged(timeline: Timeline, reason: Int) =
+                latestListener.onTimelineChanged(timeline, reason)
+            override fun onPlaybackStateChanged(state: Int) =
+                latestListener.onPlaybackStateChanged(state)
+            override fun onRenderedFirstFrame() =
+                latestListener.onRenderedFirstFrame()
+            override fun onTracksChanged(tracks: Tracks) =
+                latestListener.onTracksChanged(tracks)
+            override fun onPlayerError(error: PlaybackException) =
+                latestListener.onPlayerError(error)
         }
         exoPlayer.addListener(listener)
 
         onDispose {
             val ended = exoPlayer.playbackState == Player.STATE_ENDED
-            val position = if (exoPlayer.currentMediaItem != null) exoPlayer.currentPosition else resumeAfterSwitch
+            val position = when {
+                castController.isConnected -> castController.currentPositionMs() ?: currentPosition.longValue
+                exoPlayer.currentMediaItem != null -> exoPlayer.currentPosition
+                else -> resumeAfterSwitch
+            }
             val posSec = (position / 1000L).coerceAtLeast(0L)
             persistenceScope.launch {
                 if (latestRememberPosition && (ended || posSec > 5)) {
@@ -643,46 +846,62 @@ private fun EpisodePlayerScreen(
             exoPlayer.release()
             PlayerForegroundService.stop(context)
             stopTorrent()
-
-            activity?.requestedOrientation = originalOrientation
-            if (activity != null) {
-                val insetsController = WindowCompat.getInsetsController(activity.window, activity.window.decorView)
-                insetsController.show(WindowInsetsCompat.Type.systemBars())
-            }
         }
     }
 
-    LaunchedEffect(exoPlayer, skipIntervals, autoSkipIntro) {
+    // Fast, smooth 150ms position & 80% watch scrobble loop
+    LaunchedEffect(exoPlayer, skipIntervals, autoSkipIntro, isCasting) {
         var lastSavedPosition = 0L
         while (true) {
-            val position = exoPlayer.currentPosition.coerceAtLeast(0L)
-            val duration = exoPlayer.duration.coerceAtLeast(0L)
-            currentPosition.longValue = position
-            bufferedPosition.longValue = exoPlayer.bufferedPosition.coerceAtLeast(0L)
-            totalDuration.longValue = duration
+            if (castController.isConnected) {
+                val cPos = castController.currentPositionMs() ?: currentPosition.longValue
+                val cDur = castController.durationMs() ?: totalDuration.longValue
+                currentPosition.longValue = cPos.coerceAtLeast(0L)
+                bufferedPosition.longValue = cPos.coerceAtLeast(0L)
+                if (cDur > 0L) {
+                    totalDuration.longValue = cDur
+                    isSeekable = true
+                }
+                wantsPlayback = castController.isRemotePlaying()
+            } else {
+                val rawPos = exoPlayer.currentPosition.coerceAtLeast(0L)
+                val rawBuf = exoPlayer.bufferedPosition.coerceAtLeast(0L)
+                if (!isScrubbing) {
+                    currentPosition.longValue = rawPos
+                }
+                bufferedPosition.longValue = rawBuf
+                refreshSeekabilityAndDuration()
+            }
+
+            val position = currentPosition.longValue
+            val duration = totalDuration.longValue
 
             val posSec = position / 1000.0
             val matchedSkip = skipIntervals.firstOrNull { posSec >= it.startTimeSeconds && posSec < it.endTimeSeconds - 1.0 }
             activeSkipInterval = matchedSkip
 
-            if (matchedSkip != null && autoSkipIntro && exoPlayer.isPlaying && matchedSkip.skipType.equals("op", ignoreCase = true)) {
-                exoPlayer.seekTo((matchedSkip.endTimeSeconds * 1000).toLong())
+            if (!castController.isConnected && matchedSkip != null && autoSkipIntro && exoPlayer.isPlaying &&
+                matchedSkip.skipType.equals("op", ignoreCase = true)
+            ) {
+                val target = (matchedSkip.endTimeSeconds * 1000).toLong()
+                exoPlayer.seekTo(target)
+                currentPosition.longValue = target
             }
 
-            if (duration > 60_000L && !hasScrobbled85Percent) {
+            // Mark watched at 80% (even offline or in guest mode!)
+            if (duration > 45_000L && !hasScrobbled80Percent) {
                 val ratio = position.toDouble() / duration.toDouble()
-                if (ratio >= 0.85) {
+                if (ratio >= 0.80) {
                     markWatched()
                 }
             }
 
-            if (latestRememberPosition && exoPlayer.playbackState == Player.STATE_READY && position > 5000 &&
-                kotlin.math.abs(position - lastSavedPosition) >= 10_000) {
-                prefs.savePosition(media.mediaId, episodeNum, position / 1000)
+            if (latestRememberPosition && position > 5_000L && abs(position - lastSavedPosition) >= 10_000L) {
+                prefs.savePosition(media.mediaId, episodeNum, position / 1000L)
                 lastSavedPosition = position
             }
 
-            delay(if (showControls && hasRenderedFrame) 350 else 850)
+            delay(if ((showControls || isCasting) && hasRenderedFrame) 150 else 500)
         }
     }
 
@@ -699,44 +918,137 @@ private fun EpisodePlayerScreen(
         }
     }
 
-    LaunchedEffect(showControls, wantsPlayback, showFullSettingsPage, hasRenderedFrame, controlsInteraction, isScrubbing) {
-        if (showControls && wantsPlayback && hasRenderedFrame && !showFullSettingsPage && !isScrubbing) {
+    LaunchedEffect(showControls, wantsPlayback, showFullSettingsPage, showCastDialog, hasRenderedFrame, controlsInteraction, isScrubbing, isCasting) {
+        if (showControls && wantsPlayback && hasRenderedFrame && !showFullSettingsPage && !showCastDialog && !isScrubbing && !isCasting) {
             delay(4000)
             showControls = false
         }
     }
 
-    LaunchedEffect(isPlayerBuffering, hasRenderedFrame) {
+    LaunchedEffect(isPlayerBuffering, hasRenderedFrame, isCasting) {
         showRebuffering = false
-        if (isPlayerBuffering && hasRenderedFrame) {
+        if (isPlayerBuffering && hasRenderedFrame && !isCasting) {
             delay(250)
             showRebuffering = true
         }
     }
 
-    BackHandler {
-        if (showFullSettingsPage) {
-            showFullSettingsPage = false
-        } else {
-            onBack()
+    LaunchedEffect(gestureHideTick) {
+        if (gestureHideTick > 0) {
+            delay(900)
+            gestureHudVisible = false
         }
     }
 
-    val canToggleChrome = hasRenderedFrame && resolveError == null && !isInPipMode && !showFullSettingsPage
+    LaunchedEffect(doubleTapTick) {
+        if (doubleTapTick > 0) {
+            delay(750)
+            doubleTapVisible = false
+            delay(200)
+            if (!doubleTapVisible) doubleTapDeltaSec = 0
+        }
+    }
+
+    BackHandler {
+        when {
+            showCastDialog -> showCastDialog = false
+            showFullSettingsPage -> showFullSettingsPage = false
+            else -> onBack()
+        }
+    }
+
+    val canToggleChrome = (hasRenderedFrame || isCasting) && resolveError == null && !isInPipMode && !showFullSettingsPage
     val controlsShowing = canToggleChrome && showControls && !isScreenLocked
     val episodeLabel = if (episodeTitle.equals("Episode $episodeNum", true) || episodeTitle.isBlank()) {
         "Episode $episodeNum"
-    } else "Episode $episodeNum · $episodeTitle"
+    } else {
+        "Episode $episodeNum · $episodeTitle"
+    }
     val sourceAudio = selectedStream?.audioType?.takeIf { it == "SUB" || it == "DUB" } ?: activeAudioMode
     val englishSubtitle = if (sourceAudio == "SUB" && subtitlesEnabled != false && selectedOpenSub == null &&
-        playbackTracks.groups.none { it.type == C.TRACK_TYPE_TEXT }) {
+        playbackTracks.groups.none { it.type == C.TRACK_TYPE_TEXT }
+    ) {
         openSubtitlesList.firstOrNull { it.langCode.equals("en", true) || it.langCode.equals("eng", true) }
     } else null
 
+    fun performSeekTo(targetMs: Long) {
+        val clamped = if (totalDuration.longValue > 0L) targetMs.coerceIn(0L, totalDuration.longValue) else targetMs.coerceAtLeast(0L)
+        if (castController.isConnected) {
+            castController.seekTo(clamped)
+        } else {
+            exoPlayer.seekTo(clamped)
+        }
+        currentPosition.longValue = clamped
+        controlsInteraction++
+    }
+
     fun jumpBy(offsetMs: Long) {
         if (!isSeekable) return
-        exoPlayer.seekTo((exoPlayer.currentPosition + offsetMs).coerceIn(0L, totalDuration.longValue))
+        val base = if (castController.isConnected) {
+            castController.currentPositionMs() ?: currentPosition.longValue
+        } else {
+            exoPlayer.currentPosition
+        }
+        performSeekTo(base + offsetMs)
+    }
+
+    fun togglePlayPause() {
+        if (castController.isConnected) {
+            castController.togglePlayPause()
+        } else if (exoPlayer.playbackState == Player.STATE_ENDED) {
+            autoPlayCountdown = null
+            exoPlayer.seekToDefaultPosition()
+            exoPlayer.play()
+        } else if (exoPlayer.playWhenReady) {
+            exoPlayer.pause()
+        } else {
+            exoPlayer.play()
+        }
         controlsInteraction++
+    }
+
+    val audioManager = remember(context) {
+        context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    }
+
+    fun readInitialBrightness(): Float {
+        val activity = context as? Activity ?: return 0.5f
+        val currentAttr = activity.window.attributes.screenBrightness
+        if (currentAttr in 0.0f..1.0f) return currentAttr
+        return runCatching {
+            Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128) / 255f
+        }.getOrDefault(0.5f).coerceIn(0.05f, 1.0f)
+    }
+
+    fun applyBrightness(fraction: Float) {
+        val activity = context as? Activity ?: return
+        val clamped = fraction.coerceIn(0.02f, 1.0f)
+        val lp = activity.window.attributes
+        lp.screenBrightness = clamped
+        activity.window.attributes = lp
+        activeGestureIsBrightness = true
+        gestureHudFraction = clamped
+        gestureHudVisible = true
+        gestureHideTick++
+    }
+
+    fun readInitialVolumeFraction(): Float {
+        val am = audioManager ?: return 0.5f
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        val cur = am.getStreamVolume(AudioManager.STREAM_MUSIC).coerceIn(0, max)
+        return cur.toFloat() / max.toFloat()
+    }
+
+    fun applyVolumeFraction(fraction: Float) {
+        val am = audioManager ?: return
+        val clamped = fraction.coerceIn(0f, 1f)
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        val targetStep = (clamped * max).roundToInt().coerceIn(0, max)
+        runCatching { am.setStreamVolume(AudioManager.STREAM_MUSIC, targetStep, 0) }
+        activeGestureIsBrightness = false
+        gestureHudFraction = clamped
+        gestureHudVisible = true
+        gestureHideTick++
     }
 
     Box(
@@ -744,13 +1056,7 @@ private fun EpisodePlayerScreen(
             .fillMaxSize()
             .background(Color.Black)
             .clipToBounds()
-            .clickable(
-                enabled = canToggleChrome,
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null
-            ) {
-                showControls = !showControls
-            }
+            .onSizeChanged { viewportSize = it }
     ) {
         AndroidView(
             factory = { ctx ->
@@ -785,20 +1091,142 @@ private fun EpisodePlayerScreen(
             modifier = Modifier.fillMaxSize()
         )
 
+        // Casting backdrop when streaming to Chromecast
+        if (isCasting && !isInPipMode) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xE808090C)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.padding(24.dp)
+                ) {
+                    if (!media.coverUrl.isNullOrBlank()) {
+                        CrossfadeImage(
+                            model = media.coverUrl,
+                            contentDescription = media.title,
+                            modifier = Modifier
+                                .width(96.dp)
+                                .aspectRatio(2f / 3f)
+                                .clip(RoundedCornerShape(6.dp))
+                        )
+                    } else {
+                        Icon(Icons.Default.CastConnected, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(48.dp))
+                    }
+                    Text(
+                        text = "Casting to ${castController.connectedDeviceName ?: "Chromecast"}",
+                        color = CrunchyOrange,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 16.sp
+                    )
+                    Text(
+                        text = "${media.title} • $episodeLabel",
+                        color = Color.White,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+        }
+
+        // Dedicated Touch Gesture Surface: Single-tap Chrome toggle, Double-tap -10s/+10s/Play,
+        // and Left/Right Vertical Swipes for Brightness & Volume!
+        if (canToggleChrome) {
+            val edgeMarginPx = with(density) { 26.dp.toPx() }
+            val topBottomMarginPx = with(density) { 42.dp.toPx() }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(isScreenLocked, isSeekable, isCasting) {
+                        detectTapGestures(
+                            onTap = {
+                                showControls = !showControls
+                                if (showControls) controlsInteraction++
+                            },
+                            onDoubleTap = { offset ->
+                                if (isScreenLocked) {
+                                    showControls = true
+                                    return@detectTapGestures
+                                }
+                                val width = size.width.coerceAtLeast(1)
+                                when {
+                                    offset.x < width * 0.35f && isSeekable -> {
+                                        jumpBy(-10_000L)
+                                        doubleTapLeftSide = true
+                                        doubleTapDeltaSec = if (doubleTapVisible && doubleTapDeltaSec < 0) doubleTapDeltaSec - 10 else -10
+                                        doubleTapVisible = true
+                                        doubleTapTick++
+                                    }
+                                    offset.x > width * 0.65f && isSeekable -> {
+                                        jumpBy(10_000L)
+                                        doubleTapLeftSide = false
+                                        doubleTapDeltaSec = if (doubleTapVisible && doubleTapDeltaSec > 0) doubleTapDeltaSec + 10 else 10
+                                        doubleTapVisible = true
+                                        doubleTapTick++
+                                    }
+                                    else -> togglePlayPause()
+                                }
+                            }
+                        )
+                    }
+                    .pointerInput(isScreenLocked, swipeGesturesEnabled, isCasting) {
+                        if (isScreenLocked || !latestSwipeEnabled || isCasting) return@pointerInput
+                        var dragIsBrightness = true
+                        var dragFraction = 0.5f
+                        var validGestureZone = false
+
+                        detectVerticalDragGestures(
+                            onDragStart = { start ->
+                                val w = size.width.toFloat().coerceAtLeast(1f)
+                                val h = size.height.toFloat().coerceAtLeast(1f)
+                                validGestureZone = start.x in edgeMarginPx..(w - edgeMarginPx) &&
+                                    start.y in topBottomMarginPx..(h - topBottomMarginPx)
+                                if (!validGestureZone) return@detectVerticalDragGestures
+                                dragIsBrightness = start.x < (w * 0.5f)
+                                dragFraction = if (dragIsBrightness) readInitialBrightness() else readInitialVolumeFraction()
+                            },
+                            onVerticalDrag = { change, dragAmount ->
+                                if (!validGestureZone) return@detectVerticalDragGestures
+                                change.consume()
+                                val gestureRangePx = (size.height * 0.68f).coerceAtLeast(180f)
+                                val delta = -dragAmount / gestureRangePx
+                                dragFraction = (dragFraction + delta).coerceIn(if (dragIsBrightness) 0.02f else 0f, 1f)
+                                if (dragIsBrightness) applyBrightness(dragFraction) else applyVolumeFraction(dragFraction)
+                            },
+                            onDragEnd = {
+                                if (validGestureZone) gestureHideTick++
+                                validGestureZone = false
+                            },
+                            onDragCancel = {
+                                if (validGestureZone) gestureHideTick++
+                                validGestureZone = false
+                            }
+                        )
+                    }
+            )
+        }
+
         val next = autoPlayCountdown
         val jumpToNext: () -> Unit = {
             autoPlayCountdown = null
             onSwitchEpisode(episodeNum + 1)
         }
-        when {
-            isInPipMode || showFullSettingsPage -> Unit
-            resolveError != null -> PlayerProblem(
+
+        // Loading & Error States
+        AnimatedVisibility(
+            visible = !isInPipMode && !showFullSettingsPage && resolveError != null,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(150))
+        ) {
+            PlayerProblem(
                 title = media.title,
                 episode = episodeLabel,
                 message = resolveError.orEmpty(),
                 retryLabel = when {
-                    isOfflinePlayback && !offlineOnly -> "Try streaming"
-                    rankedStreams.size > 1 -> "Try another source"
+                    isOfflinePlayback && !offlineOnly -> "Try Streaming Instead"
+                    rankedStreams.size > 1 -> "Try Another Source"
                     else -> "Retry"
                 },
                 onBack = onBack,
@@ -814,7 +1242,14 @@ private fun EpisodePlayerScreen(
                     }
                 }
             )
-            !hasRenderedFrame -> PlayerLoading(
+        }
+
+        AnimatedVisibility(
+            visible = !isInPipMode && !showFullSettingsPage && resolveError == null && !hasRenderedFrame && !isCasting,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(220))
+        ) {
+            PlayerLoading(
                 title = media.title,
                 episode = episodeLabel,
                 lookingForSource = waitingForAlternative != null || (selectedStream == null && isResolvingStreams),
@@ -822,240 +1257,541 @@ private fun EpisodePlayerScreen(
                 serviceStatus = serviceStatus,
                 onBack = onBack
             )
-            controlsShowing -> {
-                Column(
-                    Modifier
-                        .fillMaxSize()
-                        .background(Brush.verticalGradient(
-                            listOf(Color(0xD6000000), Color(0x32000000), Color(0xE6000000))
-                        ))
-                        .windowInsetsPadding(WindowInsets.safeDrawing)
-                ) {
-                    PlayerHeader(media.title, episodeLabel, onBack) { showFullSettingsPage = true }
+        }
 
-                    BoxWithConstraints(
-                        modifier = Modifier.weight(1f).fillMaxWidth(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (next != null) {
-                            PlayerUpNext(episodeNum + 1, next, jumpToNext, { autoPlayCountdown = null })
-                        } else {
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(if (maxWidth < 360.dp) 1.dp else 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                if (!offlineOnly && episodeNum > 1) {
-                                    PlayerTransportButton(Icons.Default.SkipPrevious, "Previous episode",
-                                        onClick = { onSwitchEpisode(episodeNum - 1) })
-                                }
-                                PlayerTransportButton(Icons.Default.Replay10, "Rewind 10 seconds",
-                                    onClick = { jumpBy(-10_000L) }, enabled = isSeekable)
-                                val canPause = wantsPlayback && exoPlayer.playbackState != Player.STATE_ENDED
-                                PlayerTransportButton(
-                                    icon = if (canPause) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                    label = if (canPause) "Pause" else "Play",
-                                    onClick = {
-                                        if (exoPlayer.playbackState == Player.STATE_ENDED) {
-                                            autoPlayCountdown = null
-                                            exoPlayer.seekToDefaultPosition()
-                                            exoPlayer.play()
-                                        } else if (exoPlayer.playWhenReady) {
-                                            exoPlayer.pause()
-                                        } else {
-                                            exoPlayer.play()
-                                        }
-                                        controlsInteraction++
-                                    },
-                                    primary = true
-                                )
-                                PlayerTransportButton(Icons.Default.Forward10, "Forward 10 seconds",
-                                    onClick = { jumpBy(10_000L) }, enabled = isSeekable)
-                                if (!offlineOnly && episodeNum < (lastPlayableEpisode ?: episodeNum)) {
-                                    PlayerTransportButton(Icons.Default.SkipNext, "Next episode",
-                                        onClick = { onSwitchEpisode(episodeNum + 1) })
-                                }
-                            }
+        // Smooth Animated Main Transport & Seekbar Chrome (never unmounts abruptly mid-scrub!)
+        AnimatedVisibility(
+            visible = controlsShowing || (isCasting && !isInPipMode && !showFullSettingsPage && !isScreenLocked),
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(180))
+        ) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color(0xD8000000), Color(0x28000000), Color(0xEB000000))
+                        )
+                    )
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+            ) {
+                PlayerHeader(
+                    title = media.title,
+                    episode = episodeLabel,
+                    onBack = onBack,
+                    isCasting = isCasting,
+                    hasCastRoutes = castController.routes.isNotEmpty(),
+                    onCastClick = {
+                        castController.refreshRoutes()
+                        showCastDialog = true
+                        controlsInteraction++
+                    },
+                    onLockClick = if (!isCasting) {
+                        {
+                            isScreenLocked = true
+                            showControls = false
                         }
-                    }
+                    } else null,
+                    onPipClick = if (!isCasting && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        { enterPip() }
+                    } else null,
+                    onSettings = { showFullSettingsPage = true }
+                )
 
-                    if (next == null) {
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (next != null) {
+                        PlayerUpNext(episodeNum + 1, next, jumpToNext, { autoPlayCountdown = null })
+                    } else {
+                        val spacing = if (maxWidth < 380.dp) 14.dp else 24.dp
                         Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                            horizontalArrangement = Arrangement.spacedBy(spacing),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Box(Modifier.weight(1f)) {
-                                if (englishSubtitle != null && !showRebuffering) {
-                                    TextButton(onClick = { useOpenSubtitle(englishSubtitle) }) {
-                                        Text("English subtitles")
-                                    }
-                                } else if (showRebuffering || isOfflinePlayback) {
+                            if (hasPrevEpisode) {
+                                PlayerTransportButton(
+                                    icon = Icons.Default.SkipPrevious,
+                                    label = "Previous episode",
+                                    onClick = { onSwitchEpisode(episodeNum - 1) }
+                                )
+                            }
+                            PlayerTransportButton(
+                                icon = Icons.Default.Replay10,
+                                label = "Rewind 10 seconds",
+                                onClick = { jumpBy(-10_000L) },
+                                enabled = isSeekable
+                            )
+                            val canPause = wantsPlayback && exoPlayer.playbackState != Player.STATE_ENDED
+                            PlayerTransportButton(
+                                icon = if (canPause) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                label = if (canPause) "Pause" else "Play",
+                                onClick = ::togglePlayPause,
+                                primary = true
+                            )
+                            PlayerTransportButton(
+                                icon = Icons.Default.Forward10,
+                                label = "Forward 10 seconds",
+                                onClick = { jumpBy(10_000L) },
+                                enabled = isSeekable
+                            )
+                            if (hasNextEpisode) {
+                                PlayerTransportButton(
+                                    icon = Icons.Default.SkipNext,
+                                    label = "Next episode",
+                                    onClick = { onSwitchEpisode(episodeNum + 1) }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (next == null) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            if (englishSubtitle != null && !showRebuffering) {
+                                Surface(
+                                    onClick = { useOpenSubtitle(englishSubtitle) },
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = Color(0xCC16181D),
+                                    border = BorderStroke(1.dp, CrunchyOrange)
+                                ) {
                                     Text(
-                                        if (showRebuffering) "Buffering…" else "Offline",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = if (showRebuffering) CrunchyOrange else Color.White
+                                        text = "Load English Subtitles",
+                                        color = CrunchyOrange,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.5.sp,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                                     )
                                 }
+                            } else if (showRebuffering || isOfflinePlayback) {
+                                Text(
+                                    text = if (showRebuffering) "Buffering…" else "Offline Vault",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (showRebuffering) CrunchyOrange else CrunchyTeal
+                                )
                             }
-                            val interval = activeSkipInterval
-                            TextButton(
-                                enabled = isSeekable,
-                                onClick = {
-                                    if (interval == null) jumpBy(85_000L) else {
-                                        exoPlayer.seekTo((interval.endTimeSeconds * 1000).toLong())
-                                        controlsInteraction++
-                                    }
-                                }
+                        }
+
+                        val interval = activeSkipInterval
+                        if (interval != null && isSeekable) {
+                            CrunchySkipButton(
+                                label = interval.skipLabel,
+                                onClick = { performSeekTo((interval.endTimeSeconds * 1000).toLong()) }
+                            )
+                        } else if (isSeekable) {
+                            Surface(
+                                onClick = { jumpBy(85_000L) },
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0x9916181D),
+                                border = BorderStroke(1.dp, CrunchyBorder)
                             ) {
-                                Text(if (interval == null) "Skip forward 85s" else interval.skipLabel,
-                                    color = if (isSeekable) CrunchyOrange else MaruTextMuted)
+                                Text(
+                                    text = "+85s OP",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.5.sp,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                )
                             }
                         }
                     }
+                }
 
-                    PlayerTimeline(
-                        position = currentPosition,
-                        buffered = bufferedPosition,
-                        duration = totalDuration,
-                        isSeekable = isSeekable,
-                        label = "$activeQuality · ${if (sourceAudio == "DUB") "Dub" else "Sub"}",
-                        onScrub = { scrubbing ->
-                            isScrubbing = scrubbing
-                            if (!scrubbing) controlsInteraction++
-                        },
-                        onSeek = { position ->
-                            exoPlayer.seekTo(position)
-                            currentPosition.longValue = position
-                        }
+                PlayerTimeline(
+                    position = currentPosition,
+                    buffered = bufferedPosition,
+                    duration = totalDuration,
+                    isSeekable = isSeekable,
+                    label = buildString {
+                        append(activeQuality)
+                        append(" · ")
+                        append(if (sourceAudio == "DUB") "Dub" else "Sub")
+                        if (playbackSpeed != 1.0f) append(" · ${playbackSpeed}×")
+                    },
+                    skipIntervals = skipIntervals,
+                    onScrub = { scrubbing ->
+                        isScrubbing = scrubbing
+                        if (!scrubbing) controlsInteraction++
+                    },
+                    onSeek = ::performSeekTo,
+                    onOpenSettings = { showFullSettingsPage = true }
+                )
+            }
+        }
+
+        // Ambient Overlays when Main Controls are Hidden (Rebuffering, Screen Unlock, Autoplay, Skip Intro)
+        if (!isInPipMode && !showFullSettingsPage && hasRenderedFrame && resolveError == null) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+            ) {
+                if (showRebuffering && !controlsShowing) {
+                    CircularProgressIndicator(
+                        color = CrunchyOrange,
+                        strokeWidth = 3.dp,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .size(34.dp)
                     )
                 }
-            }
-            else -> {
-                Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
-                    if (showRebuffering) {
-                        CircularProgressIndicator(
-                            color = CrunchyOrange,
-                            strokeWidth = 3.dp,
-                            modifier = Modifier.align(Alignment.Center).size(30.dp)
-                        )
-                    }
-                    if (isScreenLocked && showControls) {
-                        FilledTonalIconButton(
-                            onClick = { isScreenLocked = false; controlsInteraction++ },
-                            modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)
+
+                AnimatedVisibility(
+                    visible = isScreenLocked && showControls,
+                    enter = fadeIn(tween(150)) + scaleIn(tween(150)),
+                    exit = fadeOut(tween(150)),
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(16.dp)
+                ) {
+                    Surface(
+                        onClick = {
+                            isScreenLocked = false
+                            showControls = true
+                            controlsInteraction++
+                        },
+                        shape = RoundedCornerShape(24.dp),
+                        color = Color(0xE014151A),
+                        border = BorderStroke(1.dp, CrunchyOrange)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Icon(Icons.Default.Lock, contentDescription = "Unlock controls")
+                            Icon(Icons.Default.Lock, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(18.dp))
+                            Text("Tap to Unlock", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                         }
-                    } else if (!isScreenLocked && next != null) {
-                        PlayerUpNext(episodeNum + 1, next, jumpToNext, { autoPlayCountdown = null },
-                            modifier = Modifier.align(Alignment.BottomEnd).padding(14.dp))
-                    } else if (!isScreenLocked && isSeekable && !isPlayerBuffering) {
-                        val interval = activeSkipInterval
-                        if (interval != null) {
-                            FilledTonalButton(
-                                onClick = { exoPlayer.seekTo((interval.endTimeSeconds * 1000).toLong()) },
-                                modifier = Modifier.align(Alignment.BottomEnd).padding(14.dp)
-                            ) {
-                                Text(interval.skipLabel)
-                            }
-                        }
+                    }
+                }
+
+                AnimatedVisibility(
+                    visible = !controlsShowing && !isScreenLocked && next != null,
+                    enter = slideInHorizontally(tween(220)) { it / 2 } + fadeIn(tween(180)),
+                    exit = slideOutHorizontally(tween(180)) { it / 2 } + fadeOut(tween(150)),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(18.dp)
+                ) {
+                    if (next != null) {
+                        PlayerUpNext(episodeNum + 1, next, jumpToNext, { autoPlayCountdown = null })
+                    }
+                }
+
+                val floatingSkip = activeSkipInterval
+                AnimatedVisibility(
+                    visible = !controlsShowing && !isScreenLocked && next == null && isSeekable && !isPlayerBuffering && floatingSkip != null,
+                    enter = slideInHorizontally(tween(220)) { it / 2 } + fadeIn(tween(180)),
+                    exit = slideOutHorizontally(tween(180)) { it / 2 } + fadeOut(tween(150)),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 22.dp, bottom = 24.dp)
+                ) {
+                    if (floatingSkip != null) {
+                        CrunchySkipButton(
+                            label = floatingSkip.skipLabel,
+                            onClick = { performSeekTo((floatingSkip.endTimeSeconds * 1000).toLong()) }
+                        )
                     }
                 }
             }
         }
 
+        // Brightness / Volume Swipe HUD Pill at Top Center
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            PlayerGestureHud(
+                isBrightness = activeGestureIsBrightness,
+                fraction = gestureHudFraction,
+                visible = gestureHudVisible && !isInPipMode,
+                modifier = Modifier.padding(top = 18.dp)
+            )
+        }
+
+        // Double-Tap -10s / +10s Seek Feedback Pill on Left / Right
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 48.dp),
+            contentAlignment = if (doubleTapLeftSide) Alignment.CenterStart else Alignment.CenterEnd
+        ) {
+            DoubleTapSeekBadge(
+                deltaSeconds = doubleTapDeltaSec,
+                visible = doubleTapVisible && !isInPipMode
+            )
+        }
+
+        // Sleek Translucent Playback Settings Sheet (keeps live video visible behind!)
         AnimatedVisibility(
             visible = showFullSettingsPage && !isInPipMode,
-            enter = fadeIn(tween(120)),
-            exit = ExitTransition.None
+            enter = fadeIn(tween(180)) + slideInHorizontally(tween(220)) { it / 4 },
+            exit = fadeOut(tween(160)) + slideOutHorizontally(tween(180)) { it / 4 }
         ) {
-            Surface(
-                modifier = Modifier.fillMaxSize(),
-                color = CrunchyBgBlack
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x99000000))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { showFullSettingsPage = false },
+                contentAlignment = Alignment.CenterEnd
             ) {
-                Column(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(CrunchySurface)
-                            .padding(horizontal = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        IconButton(onClick = { showFullSettingsPage = false }) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to video", tint = Color.White)
-                        }
-                        Text("Playback settings", color = Color.White, style = MaterialTheme.typography.titleMedium)
-                    }
-
-                    HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
-
-                    // Native Scrollable Full-Page Content (Zero swipe-to-dismiss interference!)
-                    LazyColumn(
+                Surface(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .widthIn(max = 460.dp)
+                        .fillMaxWidth(0.88f)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) {},
+                    color = Color(0xF50E0F13),
+                    border = BorderStroke(1.dp, CrunchyBorder)
+                ) {
+                    Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(horizontal = 24.dp),
-                        contentPadding = PaddingValues(top = 16.dp, bottom = 36.dp),
-                        verticalArrangement = Arrangement.spacedBy(18.dp)
+                            .windowInsetsPadding(WindowInsets.safeDrawing)
                     ) {
-                        item(key = "section_playback") {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text("Playback", color = CrunchyOrange, style = MaterialTheme.typography.titleSmall)
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OutlinedButton(onClick = {
-                                        playbackSpeed = when (playbackSpeed) {
-                                            0.75f -> 1.0f
-                                            1.0f -> 1.25f
-                                            1.25f -> 1.5f
-                                            1.5f -> 2.0f
-                                            else -> 0.75f
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(CrunchySurface)
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            IconButton(onClick = { showFullSettingsPage = false }) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to video", tint = Color.White)
+                            }
+                            Text(
+                                text = "Playback Settings",
+                                color = Color.White,
+                                fontWeight = FontWeight.ExtraBold,
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+
+                        HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
+
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 20.dp),
+                            contentPadding = PaddingValues(top = 16.dp, bottom = 36.dp),
+                            verticalArrangement = Arrangement.spacedBy(18.dp)
+                        ) {
+                            item(key = "section_playback") {
+                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Text("Playback & Gestures", color = CrunchyOrange, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { spd ->
+                                            val sel = playbackSpeed == spd
+                                            Surface(
+                                                onClick = {
+                                                    playbackSpeed = spd
+                                                    exoPlayer.playbackParameters = PlaybackParameters(spd)
+                                                },
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = if (sel) CrunchyOrange else CrunchyCardBg,
+                                                border = BorderStroke(1.dp, if (sel) CrunchyOrange else CrunchyBorder),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Box(modifier = Modifier.padding(vertical = 9.dp), contentAlignment = Alignment.Center) {
+                                                    Text(
+                                                        text = "${spd}×",
+                                                        fontSize = 12.sp,
+                                                        fontWeight = FontWeight.ExtraBold,
+                                                        color = if (sel) Color.Black else Color.White
+                                                    )
+                                                }
+                                            }
                                         }
-                                        exoPlayer.playbackParameters = PlaybackParameters(playbackSpeed)
-                                    }, modifier = Modifier.weight(1f)) {
-                                        Text("Speed ${playbackSpeed}×")
                                     }
-                                    OutlinedButton(onClick = {
-                                        videoResizeMode = when (videoResizeMode) {
-                                            AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                                            AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-                                            else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        listOf(
+                                            AspectRatioFrameLayout.RESIZE_MODE_FIT to "Fit Screen",
+                                            AspectRatioFrameLayout.RESIZE_MODE_ZOOM to "Crop / Zoom",
+                                            AspectRatioFrameLayout.RESIZE_MODE_FILL to "Stretch"
+                                        ).forEach { (mode, label) ->
+                                            val sel = videoResizeMode == mode
+                                            Surface(
+                                                onClick = { videoResizeMode = mode },
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = if (sel) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
+                                                border = BorderStroke(1.dp, if (sel) CrunchyOrange else CrunchyBorder),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Box(modifier = Modifier.padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+                                                    Text(
+                                                        text = label,
+                                                        fontSize = 12.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = if (sel) CrunchyOrange else Color.White
+                                                    )
+                                                }
+                                            }
                                         }
-                                    }, modifier = Modifier.weight(1f)) {
-                                        Text(when (videoResizeMode) {
-                                            AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "Zoom"
-                                            AspectRatioFrameLayout.RESIZE_MODE_FILL -> "Stretch"
-                                            else -> "Fit screen"
-                                        })
                                     }
+
+                                    GlassFeatureRow(
+                                        label = "Swipe up/down for brightness & volume",
+                                        subtitle = "Left side adjusts brightness, right side adjusts volume",
+                                        checked = swipeGesturesEnabled,
+                                        onCheckedChange = { enabled ->
+                                            scope.launch { prefs.setSwipeGesturesEnabled(enabled) }
+                                        }
+                                    )
                                 }
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OutlinedButton(onClick = {
-                                        isScreenLocked = true
-                                        showControls = false
-                                        showFullSettingsPage = false
-                                    }, modifier = Modifier.weight(1f)) { Text("Lock controls") }
-                                    OutlinedButton(onClick = { enterPip() }, modifier = Modifier.weight(1f)) {
-                                        Text("Picture in picture")
+                            }
+
+                            item(key = "section_audio") {
+                                val audioGroups = playbackTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text("Audio Track", color = CrunchyOrange, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+
+                                    if (audioGroups.sumOf { it.length } > 1) {
+                                        audioGroups.forEach { group ->
+                                            for (i in 0 until group.length) {
+                                                val format = group.getTrackFormat(i)
+                                                val isSelected = group.isTrackSelected(i)
+                                                val label = formatAudioTrackName(format.label, format.language, i)
+                                                Surface(
+                                                    onClick = {
+                                                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                                                            .buildUpon()
+                                                            .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
+                                                            .build()
+                                                        showFullSettingsPage = false
+                                                    },
+                                                    shape = RoundedCornerShape(4.dp),
+                                                    color = if (isSelected) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
+                                                    border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else CrunchyBorder),
+                                                    modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(14.dp),
+                                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        Text(label, color = Color.White, fontSize = 14.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.weight(1f))
+                                                        if (isSelected) {
+                                                            Icon(Icons.Default.Check, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(18.dp))
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        val modes = if (isOfflinePlayback) {
+                                            listOf(activeAudioMode to if (activeAudioMode == "DUB") "Dubbed Audio" else "Japanese (Original Audio)")
+                                        } else if (effectiveHasDub) {
+                                            listOf("SUB" to "Japanese (Sub)", "DUB" to "English Dub")
+                                        } else {
+                                            listOf("SUB" to "Japanese (Original Audio)")
+                                        }
+                                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                            modes.forEach { (mode, label) ->
+                                                val selected = sourceAudio == mode
+                                                Surface(
+                                                    onClick = {
+                                                        if (!selected) {
+                                                            activeAudioMode = mode
+                                                            if (!applyPreferredAudioTrack(exoPlayer, mode)) streamReload++
+                                                            scope.launch { prefs.setPreferredAudio(mode) }
+                                                        }
+                                                        showFullSettingsPage = false
+                                                    },
+                                                    shape = RoundedCornerShape(4.dp),
+                                                    color = if (selected) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
+                                                    border = BorderStroke(1.dp, if (selected) CrunchyOrange else CrunchyBorder),
+                                                    modifier = Modifier.weight(1f)
+                                                ) {
+                                                    Box(modifier = Modifier.padding(vertical = 13.dp, horizontal = 10.dp), contentAlignment = Alignment.Center) {
+                                                        Text(label, color = if (selected) CrunchyOrange else Color.White, fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        item(key = "section_audio") {
-                            val audioGroups = playbackTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text("Audio", color = CrunchyOrange, style = MaterialTheme.typography.titleSmall)
+                            item(key = "section_subs") {
+                                val subGroups = playbackTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+                                val subsCurrentlyOff = subtitlesEnabled == false ||
+                                    exoPlayer.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text("Subtitles", color = CrunchyOrange, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
 
-                                if (audioGroups.sumOf { it.length } > 1) {
-                                    audioGroups.forEach { group ->
+                                    Surface(
+                                        onClick = {
+                                            subtitlesEnabled = false
+                                            selectExternalTrackOnLoad = false
+                                            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                                                .buildUpon()
+                                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                                                .build()
+                                            showFullSettingsPage = false
+                                        },
+                                        shape = RoundedCornerShape(4.dp),
+                                        color = if (subsCurrentlyOff) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
+                                        border = BorderStroke(1.dp, if (subsCurrentlyOff) CrunchyOrange else CrunchyBorder),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(14.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text("Subtitles Off", color = Color.White, fontSize = 14.sp, fontWeight = if (subsCurrentlyOff) FontWeight.Bold else FontWeight.Normal)
+                                            if (subsCurrentlyOff) {
+                                                Icon(Icons.Default.Check, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(18.dp))
+                                            }
+                                        }
+                                    }
+
+                                    subGroups.forEach { group ->
                                         for (i in 0 until group.length) {
                                             val format = group.getTrackFormat(i)
-                                            val isSelected = group.isTrackSelected(i)
-                                            val label = formatAudioTrackName(format.label, format.language, i)
+                                            val isSelected = !subsCurrentlyOff && group.isTrackSelected(i)
+                                            val isAss = format.sampleMimeType == MimeTypes.TEXT_SSA ||
+                                                (format.codecs?.contains("ssa", true) == true) ||
+                                                (format.codecs?.contains("ass", true) == true)
+                                            val baseName = formatSubtitleTrackName(format.label, format.language, i)
+                                            val trackName = if (isAss) "$baseName • Styled ASS" else baseName
+
                                             Surface(
                                                 onClick = {
+                                                    subtitlesEnabled = true
+                                                    selectExternalTrackOnLoad = false
+                                                    if (format.label != "${selectedOpenSub?.langName} (OpenSubtitles)") selectedOpenSub = null
                                                     exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
                                                         .buildUpon()
+                                                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                                                         .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
                                                         .build()
                                                     showFullSettingsPage = false
@@ -1070,7 +1806,7 @@ private fun EpisodePlayerScreen(
                                                     horizontalArrangement = Arrangement.SpaceBetween,
                                                     verticalAlignment = Alignment.CenterVertically
                                                 ) {
-                                                    Text(label, color = Color.White, fontSize = 14.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal)
+                                                    Text(trackName, color = Color.White, fontSize = 13.5.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.weight(1f))
                                                     if (isSelected) {
                                                         Icon(Icons.Default.Check, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(18.dp))
                                                     }
@@ -1078,164 +1814,67 @@ private fun EpisodePlayerScreen(
                                             }
                                         }
                                     }
-                                } else {
-                                    val modes = if (isOfflinePlayback) {
-                                        listOf(activeAudioMode to if (activeAudioMode == "DUB") "Dubbed Audio" else "Original Audio")
-                                    } else if (effectiveHasDub) {
-                                        listOf("SUB" to "Japanese (Original Audio)", "DUB" to "Dub / Dual-Audio Stream")
-                                    } else {
-                                        listOf("SUB" to "Japanese (Original Audio)")
-                                    }
-                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                        modes.forEach { (mode, label) ->
-                                            val selected = sourceAudio == mode
+
+                                    if (openSubtitlesList.isNotEmpty() && exoPlayer.currentMediaItem != null) {
+                                        openSubtitlesList.take(10).forEach { extSub ->
+                                            val isSelected = selectedOpenSub?.url == extSub.url && !subsCurrentlyOff
                                             Surface(
                                                 onClick = {
-                                                    if (!selected) {
-                                                        activeAudioMode = mode
-                                                        if (!applyPreferredAudioTrack(exoPlayer, mode)) streamReload++
-                                                        scope.launch { prefs.setPreferredAudio(mode) }
-                                                    }
+                                                    if (!isSelected) useOpenSubtitle(extSub)
                                                     showFullSettingsPage = false
                                                 },
                                                 shape = RoundedCornerShape(4.dp),
-                                                color = if (selected) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
-                                                border = BorderStroke(1.dp, if (selected) CrunchyOrange else CrunchyBorder),
-                                                modifier = Modifier.weight(1f)
+                                                color = if (isSelected) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
+                                                border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else CrunchyBorder),
+                                                modifier = Modifier.fillMaxWidth()
                                             ) {
-                                                Box(modifier = Modifier.padding(vertical = 14.dp, horizontal = 12.dp), contentAlignment = Alignment.Center) {
-                                                    Text(label, color = if (selected) CrunchyOrange else Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                                Row(
+                                                    modifier = Modifier.padding(14.dp),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text("${extSub.langName} (${extSub.format})", color = Color.White, fontSize = 13.5.sp, modifier = Modifier.weight(1f))
+                                                    if (isSelected) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(18.dp))
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        // Subtitles Section (Embedded Positioned ASS/SSA + OpenSubtitles)
-                        item(key = "section_subs") {
-                            val subGroups = playbackTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text("Subtitles", color = CrunchyOrange, style = MaterialTheme.typography.titleSmall)
-
-                                Surface(
-                                    onClick = {
-                                        subtitlesEnabled = false
-                                        selectExternalTrackOnLoad = false
-                                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                                            .buildUpon()
-                                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                                            .build()
-                                        showFullSettingsPage = false
-                                    },
-                                    shape = RoundedCornerShape(4.dp),
-                                    color = CrunchyCardBg,
-                                    border = BorderStroke(1.dp, CrunchyBorder),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text("Subtitles Off", color = Color.White, modifier = Modifier.padding(14.dp), fontSize = 14.sp)
+                            if (!isOfflinePlayback && rankedStreams.size > 1) {
+                                item(key = "section_quality_header") {
+                                    Text("Video Sources", color = CrunchyOrange, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
                                 }
-
-                                subGroups.forEach { group ->
-                                    for (i in 0 until group.length) {
-                                        val format = group.getTrackFormat(i)
-                                        val isSelected = subtitlesEnabled != false && group.isTrackSelected(i)
-                                        val isAss = format.sampleMimeType == MimeTypes.TEXT_SSA || (format.codecs?.contains("ssa", true) == true) || (format.codecs?.contains("ass", true) == true)
-                                        val baseName = formatSubtitleTrackName(format.label, format.language, i)
-                                        val trackName = if (isAss) "$baseName • Styled ASS (Positioned)" else baseName
-
-                                        Surface(
-                                            onClick = {
-                                                subtitlesEnabled = true
-                                                selectExternalTrackOnLoad = false
-                                                if (format.label != "${selectedOpenSub?.langName} (OpenSubtitles)") selectedOpenSub = null
-                                                exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                                                    .buildUpon()
-                                                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                                                    .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
-                                                    .build()
-                                                showFullSettingsPage = false
-                                            },
-                                            shape = RoundedCornerShape(4.dp),
-                                            color = if (isSelected) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
-                                            border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else CrunchyBorder),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(14.dp),
-                                                horizontalArrangement = Arrangement.SpaceBetween,
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Text(trackName, color = Color.White, fontSize = 13.5.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal)
-                                                if (isSelected) {
-                                                    Icon(Icons.Default.Check, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(18.dp))
-                                                }
+                                items(rankedStreams.withIndex().toList(), key = { it.value.playbackIdentity.toString() }) { (idx, stream) ->
+                                    val isCurrent = stream.playbackIdentity == selectedStream?.playbackIdentity
+                                    Surface(
+                                        onClick = {
+                                            showFullSettingsPage = false
+                                            if (!isCurrent) {
+                                                attemptedSources.clear()
+                                                playStream(stream)
                                             }
-                                        }
-                                    }
-                                }
-
-                                if (openSubtitlesList.isNotEmpty() && exoPlayer.currentMediaItem != null) {
-                                    openSubtitlesList.take(10).forEach { extSub ->
-                                        val isSelected = selectedOpenSub?.url == extSub.url && subtitlesEnabled != false
-                                        Surface(
-                                            onClick = {
-                                                if (!isSelected) useOpenSubtitle(extSub)
-                                                showFullSettingsPage = false
-                                            },
-                                            shape = RoundedCornerShape(4.dp),
-                                            color = if (isSelected) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
-                                            border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else CrunchyBorder),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(14.dp),
-                                                horizontalArrangement = Arrangement.SpaceBetween,
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Text("${extSub.langName} (${extSub.format})", color = Color.White, fontSize = 13.5.sp)
-                                                if (isSelected) {
-                                                    Icon(Icons.Default.Check, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(18.dp))
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Video Quality & Stream Server Section
-                        if (!isOfflinePlayback && rankedStreams.size > 1) {
-                            item(key = "section_quality_header") {
-                                Text("Video sources", color = CrunchyOrange, style = MaterialTheme.typography.titleSmall)
-                            }
-                            items(rankedStreams.withIndex().toList(), key = { it.value.playbackIdentity.toString() }) { (idx, stream) ->
-                                val isCurrent = stream.playbackIdentity == selectedStream?.playbackIdentity
-                                Surface(
-                                    onClick = {
-                                        showFullSettingsPage = false
-                                        if (!isCurrent) {
-                                            attemptedSources.clear()
-                                            playStream(stream)
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(4.dp),
-                                    color = if (isCurrent) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
-                                    border = BorderStroke(1.dp, if (isCurrent) CrunchyOrange else CrunchyBorder),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(14.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
+                                        },
+                                        shape = RoundedCornerShape(4.dp),
+                                        color = if (isCurrent) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
+                                        border = BorderStroke(1.dp, if (isCurrent) CrunchyOrange else CrunchyBorder),
+                                        modifier = Modifier.fillMaxWidth()
                                     ) {
-                                        Column {
-                                            Text("Server ${idx + 1} • ${stream.quality}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                            Text(stream.sourceName, color = MaruTextMuted, fontSize = 12.sp)
-                                        }
-                                        if (isCurrent) {
-                                            Icon(Icons.Default.Check, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(18.dp))
+                                        Row(
+                                            modifier = Modifier.padding(14.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text("Source ${idx + 1} • ${stream.quality}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                                Text(stream.sourceName, color = MaruTextMuted, fontSize = 12.sp)
+                                            }
+                                            if (isCurrent) {
+                                                Icon(Icons.Default.Check, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(18.dp))
+                                            }
                                         }
                                     }
                                 }
@@ -1244,6 +1883,17 @@ private fun EpisodePlayerScreen(
                     }
                 }
             }
+        }
+
+        if (showCastDialog) {
+            CastDevicePickerDialog(
+                routes = castController.routes,
+                connectedDeviceName = castController.connectedDeviceName,
+                isConnecting = castController.isConnecting,
+                onSelectRoute = { castController.selectRoute(it) },
+                onDisconnect = { castController.disconnect() },
+                onDismiss = { showCastDialog = false }
+            )
         }
     }
 }
@@ -1278,7 +1928,7 @@ private fun findAudioTrack(tracks: Tracks, preferredAudioMode: String): TrackSel
 }
 
 private fun formatAudioTrackName(label: String?, lang: String?, index: Int): String {
-    val cleanLang = when (lang?.lowercase()) {
+    val cleanLang = when (lang?.lowercase()?.substringBefore('-')?.substringBefore('_')) {
         "ja", "jpn" -> "Japanese"
         "en", "eng" -> "English"
         "es", "spa" -> "Spanish"
@@ -1297,7 +1947,7 @@ private fun formatAudioTrackName(label: String?, lang: String?, index: Int): Str
 }
 
 private fun formatSubtitleTrackName(label: String?, lang: String?, index: Int): String {
-    val cleanLang = when (lang?.lowercase()) {
+    val cleanLang = when (lang?.lowercase()?.substringBefore('-')?.substringBefore('_')) {
         "en", "eng" -> "English"
         "es", "spa" -> "Español"
         "pt", "por" -> "Português"

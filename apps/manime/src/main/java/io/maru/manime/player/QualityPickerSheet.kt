@@ -331,8 +331,7 @@ private fun StreamItemCard(
                     text = stream.filename,
                     fontSize = 12.sp,
                     color = MaruTextStrong,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 2
+                    fontWeight = FontWeight.Medium
                 )
             }
 

@@ -25,7 +25,11 @@ data class OfflineEpisodeEntry(
     val progressPercent: Int,
     val isCompleted: Boolean,
     val addedAt: Long,
-    val failure: String? = null
+    val failure: String? = null,
+    val downloadSpeedKbps: Int = 0,
+    val connectedPeers: Int = 0,
+    val statusText: String? = null,
+    val retryCandidatesJson: String? = null
 )
 
 internal object OfflineVault {

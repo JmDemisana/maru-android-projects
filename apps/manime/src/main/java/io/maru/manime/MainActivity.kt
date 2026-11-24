@@ -2,6 +2,7 @@
 
 import android.net.Uri
 import android.os.Bundle
+import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -11,9 +12,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -22,8 +26,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -35,6 +41,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.maru.manime.screens.*
+import io.maru.manime.torrent.TorrentStreamService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -49,10 +56,9 @@ enum class NavigationScreen(
     val icon: ImageVector
 ) {
     DASHBOARD("Home", "Featured & Simulcasts", Icons.Default.Home),
-    PROFILE("My Lists", "Watchlist & Offline Vault", Icons.Default.BookmarkBorder),
-    RECOMMENDATIONS("Browse", "Genres, Seasons & Dubs", Icons.Default.GridView),
-    SEARCH("Search", "Find Series & Cast", Icons.Default.Search),
-    SETTINGS("Account", "Audio, Sync & Preferences", Icons.Default.PersonOutline)
+    PROFILE("My Lists", "Downloads & Watchlists", Icons.Default.BookmarkBorder),
+    SEARCH("Search", "Search & Browse Categories", Icons.Default.Search),
+    SETTINGS("Account", "Accounts, Sync & Preferences", Icons.Default.PersonOutline)
 }
 
 class MainActivity : ComponentActivity() {
@@ -93,6 +99,13 @@ private sealed interface ScreenRoute {
             is Anime -> "anime_$id"
             is User -> "user_$id"
         }
+
+    val depth: Int
+        get() = when (this) {
+            is Tab -> 0
+            is Anime -> 1 + id
+            is User -> 1 + id
+        }
 }
 
 private suspend fun <T> loadAniList(request: suspend () -> T): Result<T> {
@@ -112,23 +125,41 @@ fun AppNavigation(prefs: MAnimePrefs) {
     val scope = rememberCoroutineScope()
 
     val session by prefs.anilistSession.collectAsStateWithLifecycle(initialValue = null)
+    val savedAccounts by prefs.savedAnilistAccounts.collectAsStateWithLifecycle(initialValue = emptyList())
     val anilistToken = session?.token.orEmpty()
     val anilistUsername = session?.username.orEmpty()
+    val scoreFormat by prefs.anilistScoreFormat.collectAsStateWithLifecycle(initialValue = "POINT_100")
     val reportProgress by prefs.reportProgress.collectAsStateWithLifecycle(initialValue = true)
     val rememberPosition by prefs.rememberPosition.collectAsStateWithLifecycle(initialValue = true)
     val preferredAudio by prefs.preferredAudio.collectAsStateWithLifecycle(initialValue = "SUB")
     val preferredQuality by prefs.preferredQuality.collectAsStateWithLifecycle(initialValue = "1080p")
     val autoSkipIntro by prefs.autoSkipIntro.collectAsStateWithLifecycle(initialValue = false)
+    val swipeGesturesEnabled by prefs.swipeGesturesEnabled.collectAsStateWithLifecycle(initialValue = true)
+
+    val localEntries by LocalLibraryStore.localEntries.collectAsStateWithLifecycle()
+    val pendingQueue by LocalLibraryStore.pendingQueue.collectAsStateWithLifecycle()
+    val isSyncingQueue by LocalLibraryStore.isSyncing.collectAsStateWithLifecycle()
+    val isOnline by LocalLibraryStore.observeNetworkOnline(context).collectAsStateWithLifecycle(initialValue = true)
+    val offlineEpisodes by TorrentStreamService.offlineEpisodes.collectAsStateWithLifecycle()
 
     var selectedScreen by rememberSaveable { mutableStateOf(NavigationScreen.DASHBOARD) }
     var detailStack by remember { mutableStateOf<List<ScreenRoute>>(emptyList()) }
     var nextRouteId by rememberSaveable { mutableIntStateOf(0) }
     val currentRoute = detailStack.lastOrNull() ?: ScreenRoute.Tab(selectedScreen)
     val screenStateHolder = rememberSaveableStateHolder()
+
     var showAnilistAuthDialog by remember { mutableStateOf(false) }
+    var authClearCookies by remember { mutableStateOf(false) }
+    var showTopAccountMenu by remember { mutableStateOf(false) }
     var isOfflinePlaybackVisible by remember { mutableStateOf(false) }
+
     val showNavigationBars = currentRoute is ScreenRoute.Tab &&
         !(currentRoute.screen == NavigationScreen.PROFILE && isOfflinePlaybackVisible)
+
+    fun openAuthDialog(clearCookies: Boolean = false) {
+        authClearCookies = clearCookies
+        showAnilistAuthDialog = true
+    }
 
     fun openAnime(media: AnimeMedia) {
         if ((detailStack.lastOrNull() as? ScreenRoute.Anime)?.media?.mediaId == media.mediaId) return
@@ -147,20 +178,55 @@ fun AppNavigation(prefs: MAnimePrefs) {
         }
     }
 
-    fun signOut() {
-        scope.launch { prefs.clearAnilistSession() }
+    // Initialize persistent stores on launch
+    val legacyCacheFile = remember { File(context.filesDir, "cached_user_lists.json") }
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { legacyCacheFile.delete() }
+        LocalLibraryStore.ensureLoaded(context)
+        KnownDubRegistry.ensureLoaded(context)
+        TorrentStreamService.loadOfflineVault(context)
     }
 
-    // The old unowned disk cache could expose another account's private lists.
-    val cacheFile = remember { File(context.filesDir, "cached_user_lists.json") }
-    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { cacheFile.delete() } }
     val accountKey = anilistToken to anilistUsername
     var userAnimeLists by remember(accountKey) { mutableStateOf<Map<String, List<AnimeMedia>>>(emptyMap()) }
     var isProfileLoading by remember(accountKey) { mutableStateOf(accountKey.first.isNotBlank()) }
     var profileLoadFailed by remember(accountKey) { mutableStateOf(false) }
     var profileRefresh by remember { mutableIntStateOf(0) }
-    val library = remember(userAnimeLists) { userAnimeLists.values.flatten().distinctBy { it.mediaId } }
-    val watchingList = remember(library) { library.filter { it.listStatus in listOf("CURRENT", "REPEATING") } }
+
+    // Automatically flush queued 80%-watch & offline AniList edits as soon as internet reconnects!
+    val accountPendingCount = remember(pendingQueue, anilistUsername) {
+        if (anilistUsername.isBlank()) pendingQueue.size
+        else pendingQueue.count { it.accountUsername.isBlank() || it.accountUsername.equals(anilistUsername, ignoreCase = true) }
+    }
+
+    LaunchedEffect(isOnline, anilistToken, anilistUsername, accountPendingCount) {
+        if (isOnline && anilistToken.isNotBlank() && accountPendingCount > 0) {
+            val synced = LocalLibraryStore.flushPendingQueue(context, anilistToken, scoreFormat, anilistUsername)
+            if (synced > 0) {
+                profileRefresh++
+                Toast.makeText(
+                    context,
+                    "Synced $synced offline update${if (synced == 1) "" else "s"} to AniList!",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    // Unified lists: works seamlessly in Guest Mode (localEntries) AND AniList Mode (remote + offline queue)!
+    val mergedLists = remember(userAnimeLists, localEntries, pendingQueue, anilistToken, anilistUsername) {
+        LocalLibraryStore.buildMergedLists(
+            remoteLists = userAnimeLists,
+            localMap = localEntries,
+            pending = pendingQueue,
+            isLoggedIn = anilistToken.isNotBlank(),
+            activeUsername = anilistUsername
+        )
+    }
+    val library = remember(mergedLists) { mergedLists.values.flatten().distinctBy { it.mediaId } }
+    val watchingList = remember(library) {
+        library.filter { it.listStatus in listOf("CURRENT", "REPEATING") }
+    }
 
     var trendingList by remember { mutableStateOf<List<AnimeMedia>>(emptyList()) }
     var simulcastList by remember { mutableStateOf<List<AnimeMedia>>(emptyList()) }
@@ -176,7 +242,7 @@ fun AppNavigation(prefs: MAnimePrefs) {
     var isRecLoading by remember(accountKey, selectedRecCategory) { mutableStateOf(true) }
     var recLoadFailed by remember(accountKey, selectedRecCategory) { mutableStateOf(false) }
     var recRefresh by remember { mutableIntStateOf(0) }
-    val recommendationSeeds = if (selectedRecCategory == "For You") watchingList.take(10).map { it.mediaId } else emptyList()
+    val recommendationSeeds = if (selectedRecCategory == "For You") watchingList.take(12).map { it.mediaId } else emptyList()
     val waitingForSeeds = selectedRecCategory == "For You" && isProfileLoading && recommendationSeeds.isEmpty()
 
     LaunchedEffect(anilistToken) {
@@ -222,28 +288,27 @@ fun AppNavigation(prefs: MAnimePrefs) {
         isActivityLoading = false
     }
 
-    val isBrowsing = selectedScreen == NavigationScreen.RECOMMENDATIONS
-    LaunchedEffect(isBrowsing, accountKey, selectedRecCategory, recommendationSeeds, waitingForSeeds, recRefresh) {
-        if (!isBrowsing || waitingForSeeds) return@LaunchedEffect
+    val isSearchTabActive = selectedScreen == NavigationScreen.SEARCH
+    LaunchedEffect(isSearchTabActive, accountKey, selectedRecCategory, recommendationSeeds, waitingForSeeds, recRefresh) {
+        if (!isSearchTabActive || waitingForSeeds) return@LaunchedEffect
         isRecLoading = true
         recLoadFailed = false
         val result = loadAniList {
             when (selectedRecCategory) {
                 "For You" -> {
-                    if (recommendationSeeds.isEmpty()) AniListClient.getTrending(30)
+                    if (recommendationSeeds.isEmpty()) AniListClient.getTrending(36)
                     else AniListClient.getRecommendations(recommendationSeeds)
                 }
                 "Simulcast Calendar" -> AniListClient.getSimulcastSchedule(45)
-                "Trending Now" -> AniListClient.getTrending(30)
-                "Slice of Life" -> AniListClient.browseCategory(genre = "Slice of Life", perPage = 30)
-                "Romance & CGDCT" -> AniListClient.browseCategory(genre = "Romance", tag = "Cute Girls Doing Cute Things", perPage = 30)
-                "Action & Shounen" -> AniListClient.browseCategory(genre = "Action", perPage = 30)
-                "Sci-Fi & Cyberpunk" -> AniListClient.browseCategory(genre = "Sci-Fi", tag = "Cyberpunk", perPage = 30)
-                "Music & Idols" -> AniListClient.browseCategory(genre = "Music", tag = "Idol", perPage = 30)
-                "Fantasy" -> AniListClient.browseCategory(genre = "Fantasy", perPage = 30)
-                "Comedy" -> AniListClient.browseCategory(genre = "Comedy", perPage = 30)
-                "Dubbed Only" -> AniListClient.getTrending(50).filter { it.hasEnglishDub }
-                else -> AniListClient.getTrending(30)
+                "Trending Now" -> AniListClient.getTrending(36)
+                "Slice of Life" -> AniListClient.browseCategory(genre = "Slice of Life", perPage = 40)
+                "Romance & CGDCT" -> AniListClient.browseCategory(genre = "Romance", tag = "Cute Girls Doing Cute Things", perPage = 40)
+                "Action & Shounen" -> AniListClient.browseCategory(genre = "Action", perPage = 40)
+                "Sci-Fi & Cyberpunk" -> AniListClient.browseCategory(genre = "Sci-Fi", tag = "Cyberpunk", perPage = 40)
+                "Music & Idols" -> AniListClient.browseCategory(genre = "Music", tag = "Idol", perPage = 40)
+                "Fantasy" -> AniListClient.browseCategory(genre = "Fantasy", perPage = 40)
+                "Comedy" -> AniListClient.browseCategory(genre = "Comedy", perPage = 40)
+                else -> AniListClient.getTrending(36)
             }
         }
         result.onSuccess { recommendations = it.distinctBy(AnimeMedia::mediaId) }
@@ -252,7 +317,12 @@ fun AppNavigation(prefs: MAnimePrefs) {
     }
 
     val effectiveUser = session?.takeIf { it.token.isNotBlank() && it.username.isNotBlank() }?.let {
-        AniListUser(id = 0, name = it.username, avatarUrl = it.avatarUrl)
+        AniListUser(id = 0, name = it.username, avatarUrl = it.avatarUrl, scoreFormat = scoreFormat)
+    }
+
+    val completedDownloads = remember(offlineEpisodes) { offlineEpisodes.filter { it.isCompleted } }
+    val offlineTotalMb = remember(completedDownloads) {
+        completedDownloads.sumOf { it.sizeBytes } / (1024L * 1024L)
     }
 
     androidx.activity.compose.BackHandler(enabled = detailStack.isNotEmpty() || selectedScreen != NavigationScreen.DASHBOARD) {
@@ -311,6 +381,99 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     Icon(Icons.Default.Search, contentDescription = "Search", tint = Color.White)
                                 }
                             }
+
+                            // Quick 1-Tap Account Switcher in TopAppBar when accounts are saved!
+                            if (savedAccounts.isNotEmpty()) {
+                                Box {
+                                    Surface(
+                                        onClick = { showTopAccountMenu = true },
+                                        shape = RoundedCornerShape(18.dp),
+                                        color = CrunchyCardBg,
+                                        border = BorderStroke(1.dp, if (anilistToken.isNotBlank()) CrunchyOrange else CrunchyBorder),
+                                        modifier = Modifier.padding(end = 8.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            if (effectiveUser?.avatarUrl != null) {
+                                                CrossfadeImage(
+                                                    model = effectiveUser.avatarUrl,
+                                                    contentDescription = effectiveUser.name,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier
+                                                        .size(20.dp)
+                                                        .clip(CircleShape)
+                                                )
+                                            } else {
+                                                Icon(
+                                                    Icons.Default.PersonOutline,
+                                                    contentDescription = null,
+                                                    tint = CrunchyOrange,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+                                            Text(
+                                                text = if (anilistToken.isNotBlank()) anilistUsername else "Guest",
+                                                color = Color.White,
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            if (savedAccounts.size > 1) {
+                                                Icon(
+                                                    Icons.Default.ArrowDropDown,
+                                                    contentDescription = null,
+                                                    tint = MaruTextMuted,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    DropdownMenu(
+                                        expanded = showTopAccountMenu,
+                                        onDismissRequest = { showTopAccountMenu = false },
+                                        containerColor = CrunchySurface
+                                    ) {
+                                        savedAccounts.forEach { acc ->
+                                            val isCurrent = anilistToken.isNotBlank() && acc.username.equals(anilistUsername, ignoreCase = true)
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        text = if (isCurrent) "@${acc.username} (Active)" else "@${acc.username}",
+                                                        color = if (isCurrent) CrunchyOrange else Color.White,
+                                                        fontWeight = if (isCurrent) FontWeight.ExtraBold else FontWeight.Medium
+                                                    )
+                                                },
+                                                onClick = {
+                                                    showTopAccountMenu = false
+                                                    if (!isCurrent) {
+                                                        scope.launch { prefs.switchAnilistAccount(acc) }
+                                                    }
+                                                }
+                                            )
+                                        }
+                                        HorizontalDivider(color = CrunchyBorder)
+                                        DropdownMenuItem(
+                                            text = { Text("+ Add AniList Account", color = CrunchyOrange, fontWeight = FontWeight.Bold) },
+                                            onClick = {
+                                                showTopAccountMenu = false
+                                                openAuthDialog(clearCookies = true)
+                                            }
+                                        )
+                                        if (anilistToken.isNotBlank()) {
+                                            DropdownMenuItem(
+                                                text = { Text("Switch to Guest Mode", color = MaruTextMuted) },
+                                                onClick = {
+                                                    showTopAccountMenu = false
+                                                    scope.launch { prefs.useGuestMode() }
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(
                             containerColor = CrunchyBgBlack,
@@ -345,8 +508,8 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     label = {
                                         Text(
                                             text = screen.title,
-                                            fontSize = 10.5.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                            fontSize = 11.sp,
+                                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
                                         )
                                     },
                                     colors = NavigationBarItemDefaults.colors(
@@ -372,7 +535,20 @@ fun AppNavigation(prefs: MAnimePrefs) {
                 AnimatedContent(
                     targetState = currentRoute,
                     transitionSpec = {
-                        (fadeIn(tween(140)) togetherWith fadeOut(tween(100))).using(null)
+                        when {
+                            targetState.depth > initialState.depth -> {
+                                (slideInHorizontally(tween(220)) { it / 5 } + fadeIn(tween(180))) togetherWith
+                                    (slideOutHorizontally(tween(200)) { -it / 10 } + fadeOut(tween(140)))
+                            }
+                            targetState.depth < initialState.depth -> {
+                                (slideInHorizontally(tween(200)) { -it / 10 } + fadeIn(tween(160))) togetherWith
+                                    (slideOutHorizontally(tween(200)) { it / 5 } + fadeOut(tween(140)))
+                            }
+                            else -> {
+                                (fadeIn(tween(170)) + scaleIn(tween(170), initialScale = 0.985f)) togetherWith
+                                    fadeOut(tween(120))
+                            }
+                        }.using(SizeTransform(clip = false))
                     },
                     label = "Screen transition"
                 ) { route ->
@@ -381,12 +557,14 @@ fun AppNavigation(prefs: MAnimePrefs) {
                             AnimeDetailScreen(
                                 media = route.media,
                                 anilistToken = anilistToken,
+                                anilistUsername = anilistUsername,
                                 prefs = prefs,
                                 isActive = route == currentRoute,
                                 onBack = { closeRoute(route) },
                                 onMediaUpdated = { profileRefresh++ },
                                 onAnimeClick = { if (route == currentRoute) openAnime(it) },
-                                onUserClick = { if (route == currentRoute) openUser(it) }
+                                onUserClick = { if (route == currentRoute) openUser(it) },
+                                onLoginClick = { openAuthDialog(clearCookies = false) }
                             )
                         }
                         is ScreenRoute.User -> screenStateHolder.SaveableStateProvider(route.stateKey) {
@@ -412,7 +590,10 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     loadFailed = dashboardLoadFailed,
                                     isActivityLoading = isActivityLoading,
                                     activityLoadFailed = activityLoadFailed,
-                                    onLoginClick = { showAnilistAuthDialog = true },
+                                    onLoginClick = { openAuthDialog(clearCookies = false) },
+                                    onActivityPosted = { posted ->
+                                        activitiesList = listOf(posted) + activitiesList
+                                    },
                                     onRefresh = {
                                         dashboardRefresh++
                                         profileRefresh++
@@ -421,31 +602,31 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     onUserClick = ::openUser
                                 )
                                 NavigationScreen.PROFILE -> ProfileScreen(
-                                    allLists = userAnimeLists,
+                                    allLists = mergedLists,
                                     anilistToken = anilistToken,
                                     prefs = prefs,
+                                    pendingSyncCount = accountPendingCount,
+                                    isSyncingQueue = isSyncingQueue,
                                     isLoading = isProfileLoading,
                                     loadFailed = profileLoadFailed,
                                     onRetry = { profileRefresh++ },
-                                    onLoginClick = { showAnilistAuthDialog = true },
+                                    onLoginClick = { openAuthDialog(clearCookies = false) },
                                     onAnimeClick = ::openAnime,
                                     onMediaUpdated = { profileRefresh++ },
                                     onPlaybackVisibilityChange = { isOfflinePlaybackVisible = it }
                                 )
-                                NavigationScreen.RECOMMENDATIONS -> RecommendationsScreen(
-                                    recommendations = recommendations,
-                                    isLoading = isRecLoading,
-                                    loadFailed = recLoadFailed,
-                                    onRetry = { recRefresh++ },
-                                    isLoggedIn = anilistToken.isNotBlank(),
-                                    username = effectiveUser?.name ?: "Guest",
-                                    selectedCategory = selectedRecCategory,
-                                    onSelectCategory = { selectedRecCategory = it },
-                                    onLoginClick = { showAnilistAuthDialog = true },
-                                    onAnimeClick = ::openAnime
-                                )
                                 NavigationScreen.SEARCH -> SearchScreen(
                                     anilistToken = anilistToken,
+                                    browseItems = recommendations,
+                                    isBrowseLoading = isRecLoading,
+                                    browseLoadFailed = recLoadFailed,
+                                    onRetryBrowse = { recRefresh++ },
+                                    isLoggedIn = anilistToken.isNotBlank(),
+                                    hasLocalSeeds = recommendationSeeds.isNotEmpty(),
+                                    username = effectiveUser?.name ?: "Guest",
+                                    selectedBrowseCategory = selectedRecCategory,
+                                    onSelectBrowseCategory = { selectedRecCategory = it },
+                                    onLoginClick = { openAuthDialog(clearCookies = false) },
                                     onAnimeClick = ::openAnime,
                                     onUserClick = ::openUser
                                 )
@@ -453,18 +634,57 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     user = effectiveUser,
                                     anilistUsername = anilistUsername,
                                     isLoggedIn = anilistToken.isNotBlank(),
+                                    savedAccounts = savedAccounts,
+                                    pendingSyncCount = accountPendingCount,
+                                    isSyncingQueue = isSyncingQueue,
+                                    onSyncNow = {
+                                        scope.launch {
+                                            val synced = LocalLibraryStore.flushPendingQueue(
+                                                context,
+                                                anilistToken,
+                                                scoreFormat,
+                                                anilistUsername
+                                            )
+                                            if (synced > 0) profileRefresh++
+                                        }
+                                    },
+                                    offlineCount = completedDownloads.size,
+                                    offlineTotalMb = offlineTotalMb,
                                     preferredAudio = preferredAudio,
                                     onSelectPreferredAudio = { scope.launch { prefs.setPreferredAudio(it) } },
                                     preferredQuality = preferredQuality,
                                     onSelectPreferredQuality = { scope.launch { prefs.setPreferredQuality(it) } },
                                     autoSkipIntro = autoSkipIntro,
                                     onToggleAutoSkipIntro = { scope.launch { prefs.setAutoSkipIntro(it) } },
+                                    swipeGesturesEnabled = swipeGesturesEnabled,
+                                    onToggleSwipeGestures = { scope.launch { prefs.setSwipeGesturesEnabled(it) } },
                                     reportProgress = reportProgress,
                                     onToggleReportProgress = { scope.launch { prefs.setReportProgress(it) } },
                                     rememberPosition = rememberPosition,
                                     onToggleRememberPosition = { scope.launch { prefs.setRememberPosition(it) } },
-                                    onLoginClick = { showAnilistAuthDialog = true },
-                                    onLogoutClick = ::signOut
+                                    onLoginClick = { openAuthDialog(clearCookies = false) },
+                                    onAddAccountClick = { openAuthDialog(clearCookies = true) },
+                                    onSwitchAccount = { acc ->
+                                        scope.launch {
+                                            prefs.switchAnilistAccount(acc)
+                                            Toast.makeText(context, "Switched to @${acc.username}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    onRemoveAccount = { acc ->
+                                        scope.launch {
+                                            prefs.removeAnilistAccount(acc.username)
+                                            Toast.makeText(context, "Removed @${acc.username}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    onGuestModeClick = {
+                                        scope.launch {
+                                            prefs.useGuestMode()
+                                            Toast.makeText(context, "Switched to Local Guest Mode", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    onLogoutClick = {
+                                        scope.launch { prefs.clearAnilistSession(removeSavedAccount = true) }
+                                    }
                                 )
                             }
                         }
@@ -474,19 +694,27 @@ fun AppNavigation(prefs: MAnimePrefs) {
         }
 
         if (showAnilistAuthDialog) {
-            AniListAuthDialog(prefs) { showAnilistAuthDialog = false }
+            AniListAuthDialog(
+                prefs = prefs,
+                clearCookies = authClearCookies,
+                onClose = { showAnilistAuthDialog = false }
+            )
         }
     }
 }
 
 @Composable
-private fun AniListAuthDialog(prefs: MAnimePrefs, onClose: () -> Unit) {
+private fun AniListAuthDialog(
+    prefs: MAnimePrefs,
+    clearCookies: Boolean = false,
+    onClose: () -> Unit
+) {
     val context = LocalContext.current
     val expectedRedirect = remember { Uri.parse(AniListClient.REDIRECT_URI) }
     val oauthState = remember { UUID.randomUUID().toString() }
     val authUrl = remember(oauthState) {
         Uri.parse("https://anilist.co/api/v2/oauth/authorize").buildUpon()
-            .appendQueryParameter("client_id", AniListClient.MASTER_CLIENT_ID.toString())
+            .appendQueryParameter("client_id", AniListClient.MASTER_CLIENT_ID)
             .appendQueryParameter("redirect_uri", AniListClient.REDIRECT_URI)
             .appendQueryParameter("response_type", "code")
             .appendQueryParameter("state", oauthState)
@@ -538,7 +766,12 @@ private fun AniListAuthDialog(prefs: MAnimePrefs, onClose: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Connect AniList", color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
+                    Text(
+                        text = if (clearCookies) "Add Another AniList Account" else "Connect AniList",
+                        color = Color.White,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 15.sp
+                    )
                     IconButton(onClick = onClose) {
                         Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
                     }
@@ -551,13 +784,25 @@ private fun AniListAuthDialog(prefs: MAnimePrefs, onClose: () -> Unit) {
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             CircularProgressIndicator(color = CrunchyOrange)
-                            Text("Connecting your AniList account...", color = Color.White)
+                            Text("Connecting your AniList account…", color = Color.White)
                         }
                     }
                 } else {
                     AndroidView(
                         factory = { ctx ->
+                            if (clearCookies) {
+                                runCatching {
+                                    CookieManager.getInstance().apply {
+                                        removeAllCookies(null)
+                                        flush()
+                                    }
+                                }
+                            }
                             WebView(ctx).apply {
+                                if (clearCookies) {
+                                    clearCache(true)
+                                    clearHistory()
+                                }
                                 settings.javaScriptEnabled = true
                                 settings.domStorageEnabled = true
                                 webViewClient = object : WebViewClient() {

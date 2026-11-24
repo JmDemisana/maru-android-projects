@@ -1,11 +1,15 @@
 ﻿package io.maru.manime
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 internal fun aniListVariables(variables: Map<String, Any?>): JSONObject = JSONObject().apply {
@@ -61,13 +65,35 @@ data class AnimeMedia(
     val isPrivate: Boolean,
     val updatedAt: Long?,
     val hasEnglishDubCast: Boolean = false,
-    val relationType: String? = null
+    val relationType: String? = null,
+    val tags: List<MediaTag> = emptyList(),
+    val trailerYoutubeId: String? = null
 ) {
     val isReleasing: Boolean get() = status.equals("RELEASING", ignoreCase = true)
 
     val hasUncertainReleaseCount: Boolean get() = !status.equals("FINISHED", ignoreCase = true)
 
-    val hasEnglishDub: Boolean get() = hasEnglishDubCast || externalLinks.any { it.isEnglishDub }
+    val hasEnglishDub: Boolean get() = hasEnglishDubCast || KnownDubRegistry.isKnownDub(mediaId) || externalLinks.any { it.isEnglishDub }
+
+    val contentAdvisory: ContentAdvisory get() = deriveContentAdvisory(isAdult, genres, tags)
+
+    val isMusicOrConcert: Boolean
+        get() = format.equals("MUSIC", ignoreCase = true) ||
+            tags.any {
+                it.name.contains("concert", true) ||
+                    it.name.contains("band", true) ||
+                    (it.name.contains("idol", true) && format.equals("SPECIAL", true))
+            } ||
+            title.contains(" Live ", ignoreCase = true) ||
+            title.contains("Concert", ignoreCase = true) ||
+            title.endsWith(" Live", ignoreCase = true)
+
+    val isStandaloneFeature: Boolean
+        get() {
+            val fmt = format?.uppercase().orEmpty()
+            return fmt == "MOVIE" || fmt == "MUSIC" ||
+                (fmt in setOf("SPECIAL", "OVA", "ONA") && (episodes ?: 1) <= 1)
+        }
 
     val latestAiredEpisode: Int? get() {
         return latestReleasedEpisode(status, episodes, nextEpisode)
@@ -81,14 +107,17 @@ data class ExternalLink(
     val type: String,
     val language: String?
 ) {
+    /**
+     * Note: AniList sets `language = "English"` on English-region streaming sites (e.g. Crunchyroll, HIDIVE)
+     * even for sub-only simulcasts. Never treat `language == "English"` alone as proof of an English dub!
+     */
     val isEnglishDub: Boolean get() {
         if (!type.equals("STREAMING", ignoreCase = true)) return false
-        val isExplicitEnglishLang = language?.equals("ENGLISH", ignoreCase = true) == true
         val isExplicitEnglishSite = site.contains("English", ignoreCase = true) && site.contains("Dub", ignoreCase = true)
         val isExplicitEnglishUrl = (url.contains("english", ignoreCase = true) && url.contains("dub", ignoreCase = true)) ||
                                    url.contains("/en-dub", ignoreCase = true) ||
                                    url.contains("en_dub", ignoreCase = true)
-        return isExplicitEnglishLang || isExplicitEnglishSite || isExplicitEnglishUrl
+        return isExplicitEnglishSite || isExplicitEnglishUrl
     }
 }
 
@@ -183,6 +212,7 @@ object AniListClient {
         .build()
 
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+    private val dubCastCache = ConcurrentHashMap<Int, Boolean>()
 
     suspend fun exchangeAuthCode(code: String): String? {
         val payload = JSONObject().apply {
@@ -286,6 +316,21 @@ object AniListClient {
             if (g.isNotEmpty() && !g.equals("null", ignoreCase = true)) genres += g
         }
 
+        val mediaTags = mutableListOf<MediaTag>()
+        val rawTags = obj.optJSONArray("tags")
+        if (rawTags != null) for (i in 0 until rawTags.length()) {
+            val t = rawTags.optJSONObject(i) ?: continue
+            val tName = t.optString("name", "").trim()
+            if (tName.isNotEmpty() && !tName.equals("null", ignoreCase = true)) {
+                mediaTags += MediaTag(
+                    name = tName,
+                    rank = t.optInt("rank", 0),
+                    isAdult = t.optBoolean("isAdult", false),
+                    isMediaSpoiler = t.optBoolean("isMediaSpoiler", false)
+                )
+            }
+        }
+
         val titleEng = title?.optNullableString("english")
         val titleRom = title?.optNullableString("romaji")
         val titlePref = title?.optNullableString("userPreferred")
@@ -293,8 +338,10 @@ object AniListClient {
 
         val displayTitle = titleEng ?: titleRom ?: titlePref ?: titleNative ?: "Untitled"
 
+        val mediaId = obj.getInt("id")
         var hasEngVa = false
-        val charEdges = obj.optJSONObject("characters")?.optJSONArray("edges")
+        val charactersObj = obj.optJSONObject("characters")
+        val charEdges = charactersObj?.optJSONArray("edges")
         if (charEdges != null) {
             for (i in 0 until charEdges.length()) {
                 val vas = charEdges.optJSONObject(i)?.optJSONArray("voiceActors")
@@ -303,10 +350,19 @@ object AniListClient {
                     break
                 }
             }
+            dubCastCache[mediaId] = hasEngVa
+            if (hasEngVa) KnownDubRegistry.recordKnownDub(mediaId)
+        } else {
+            hasEngVa = dubCastCache[mediaId] ?: KnownDubRegistry.isKnownDub(mediaId)
         }
 
+        val trailerObj = obj.optJSONObject("trailer")
+        val trailerYtId = if (trailerObj?.optString("site", "")?.equals("youtube", ignoreCase = true) == true) {
+            trailerObj.optNullableString("id")
+        } else null
+
         return AnimeMedia(
-            mediaId       = obj.getInt("id"),
+            mediaId       = mediaId,
             title         = displayTitle,
             titleEnglish  = titleEng,
             titleRomaji   = titleRom,
@@ -333,21 +389,83 @@ object AniListClient {
             notes         = le?.optNullableString("notes"),
             isPrivate     = le?.optBoolean("private") ?: false,
             updatedAt     = le?.optLong("updatedAt")?.takeIf { it > 0 },
-            hasEnglishDubCast = hasEngVa
+            hasEnglishDubCast = hasEngVa,
+            tags          = mediaTags,
+            trailerYoutubeId = trailerYtId
         )
     }
 
-    private fun mediaFields(includeDubCast: Boolean = false) = """
+    private fun mediaFields(includeDubCast: Boolean = true) = """
         id episodes format status season seasonYear meanScore averageScore isAdult siteUrl bannerImage
         title { userPreferred english romaji native }
         coverImage { large color }
         nextAiringEpisode { episode airingAt }
         externalLinks { id url site type language }
-        ${if (includeDubCast) "characters(perPage: 2, sort: [ROLE]) { edges { voiceActors(language: ENGLISH) { id } } }" else ""}
+        trailer { id site }
+        ${if (includeDubCast) "characters(perPage: 15, sort: [ROLE, RELEVANCE, ID]) { edges { voiceActors(language: ENGLISH) { id } } }" else ""}
         genres
+        tags { name rank isAdult isMediaSpoiler }
         description(asHtml: false)
         mediaListEntry { id status score progress private notes updatedAt }
     """.trimIndent()
+
+    private suspend fun hydrateDubCastMap(mediaIds: Collection<Int>): Map<Int, Boolean> = coroutineScope {
+        val uncached = mediaIds.filter { it > 0 && !dubCastCache.containsKey(it) }.distinct()
+        if (uncached.isNotEmpty()) {
+            uncached.chunked(50).take(6).map { chunk ->
+                async {
+                    try {
+                        val data = query(
+                            """
+                            query (${'$'}ids: [Int]) {
+                              Page(page: 1, perPage: 50) {
+                                media(id_in: ${'$'}ids, type: ANIME) {
+                                  id
+                                  characters(perPage: 15, sort: [ROLE, RELEVANCE, ID]) {
+                                    edges { voiceActors(language: ENGLISH) { id } }
+                                  }
+                                }
+                              }
+                            }
+                            """.trimIndent(),
+                            mapOf("ids" to chunk)
+                        )
+                        val arr = data.optJSONObject("Page")?.optJSONArray("media") ?: return@async
+                        for (i in 0 until arr.length()) {
+                            val m = arr.optJSONObject(i) ?: continue
+                            val id = m.optInt("id")
+                            if (id <= 0) continue
+                            val edges = m.optJSONObject("characters")?.optJSONArray("edges")
+                            var found = false
+                            if (edges != null) {
+                                for (j in 0 until edges.length()) {
+                                    val vas = edges.optJSONObject(j)?.optJSONArray("voiceActors")
+                                    if (vas != null && vas.length() > 0) {
+                                        found = true
+                                        break
+                                    }
+                                }
+                            }
+                            dubCastCache[id] = found
+                            if (found) KnownDubRegistry.recordKnownDub(id)
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {}
+                }
+            }.awaitAll()
+        }
+        dubCastCache
+    }
+
+    private suspend fun hydrateDubCast(items: List<AnimeMedia>): List<AnimeMedia> {
+        if (items.isEmpty()) return items
+        val map = hydrateDubCastMap(items.map { it.mediaId })
+        return items.map { item ->
+            val cached = map[item.mediaId]
+            if (cached != null && cached != item.hasEnglishDubCast) item.copy(hasEnglishDubCast = cached) else item
+        }
+    }
 
     suspend fun getViewer(token: String): AniListUser {
         val data = query("""
@@ -370,23 +488,55 @@ object AniListClient {
     }
 
     fun parseUserListJson(data: JSONObject): Map<String, List<AnimeMedia>> {
-        val result = mutableMapOf<String, MutableList<AnimeMedia>>()
+        val rawBuckets = linkedMapOf<String, MutableList<AnimeMedia>>()
+        val customListNames = mutableSetOf<String>()
         val collection = data.optJSONObject("MediaListCollection") ?: return emptyMap()
         val lists = collection.optJSONArray("lists") ?: return emptyMap()
         for (i in 0 until lists.length()) {
             val list = lists.optJSONObject(i) ?: continue
-            val listName = list.optString("name", "List")
+            val isCustom = list.optBoolean("isCustomList", false)
+            val status = list.optNullableString("status")?.uppercase()
+            val rawName = list.optString("name", "List").trim().ifEmpty { "List" }
+            val canonicalName = if (!isCustom && status != null) {
+                when (status) {
+                    "CURRENT" -> "Watching"
+                    "REPEATING" -> "Rewatching"
+                    "PLANNING" -> "Planning"
+                    "COMPLETED" -> "Completed"
+                    "PAUSED" -> "Paused"
+                    "DROPPED" -> "Dropped"
+                    else -> rawName
+                }
+            } else {
+                customListNames += rawName
+                rawName
+            }
             val entries = list.optJSONArray("entries") ?: continue
-            val bucket = result.getOrPut(listName) { mutableListOf() }
+            val bucket = rawBuckets.getOrPut(canonicalName) { mutableListOf() }
+            val seenInBucket = bucket.mapTo(mutableSetOf()) { it.mediaId }
             for (j in 0 until entries.length()) {
                 val entry = entries.optJSONObject(j) ?: continue
                 val media = entry.optJSONObject("media") ?: continue
-                if (media.optInt("id") > 0 && !isMangaOrNovel(media)) {
+                val mId = media.optInt("id")
+                if (mId > 0 && !isMangaOrNovel(media) && seenInBucket.add(mId)) {
                     bucket += mapMedia(media, entry)
                 }
             }
         }
-        return result
+        val ordered = linkedMapOf<String, List<AnimeMedia>>()
+        val standardOrder = listOf("Watching", "Rewatching", "Planning", "Completed", "Paused", "Dropped")
+        for (name in standardOrder) {
+            val items = rawBuckets.remove(name) ?: continue
+            if (items.isNotEmpty() || name != "Rewatching") {
+                ordered[name] = items
+            }
+        }
+        for ((name, items) in rawBuckets) {
+            if (items.isNotEmpty() || name in customListNames) {
+                ordered[name] = items
+            }
+        }
+        return ordered
     }
 
     fun parseUserListJsonString(jsonStr: String): Map<String, List<AnimeMedia>> {
@@ -402,16 +552,26 @@ object AniListClient {
             query (${'$'}name: String) {
               MediaListCollection(userName: ${'$'}name, type: ANIME) {
                 lists {
-                  name status
+                  name status isCustomList
                   entries {
                     id status score progress private notes updatedAt
-                    media { ${mediaFields()} }
+                    media { ${mediaFields(includeDubCast = false)} }
                   }
                 }
               }
             }
         """, mapOf("name" to username), token)
-        return Pair(data.toString(), parseUserListJson(data))
+        val parsed = parseUserListJson(data)
+        val allIds = parsed.values.asSequence().flatten().map { it.mediaId }.distinct().toList()
+        val dubMap = hydrateDubCastMap(allIds)
+        val hydrated = LinkedHashMap<String, List<AnimeMedia>>(parsed.size)
+        for ((k, list) in parsed) {
+            hydrated[k] = list.map { m ->
+                val hasDub = dubMap[m.mediaId]
+                if (hasDub != null && hasDub != m.hasEnglishDubCast) m.copy(hasEnglishDubCast = hasDub) else m
+            }
+        }
+        return Pair(data.toString(), hydrated)
     }
 
     suspend fun getUserList(username: String, token: String? = null): Map<String, List<AnimeMedia>> {
@@ -668,7 +828,7 @@ object AniListClient {
                   id
                   recommendations(perPage: 10, sort: [RATING_DESC]) {
                     nodes {
-                      mediaRecommendation { ${mediaFields()} }
+                      mediaRecommendation { ${mediaFields(includeDubCast = false)} }
                     }
                   }
                 }
@@ -686,7 +846,7 @@ object AniListClient {
                 if (!isMangaOrNovel(rec) && id > 0 && seen.add(id)) results += mapMedia(rec)
             }
         }
-        return results
+        return hydrateDubCast(results.take(60))
     }
 
     suspend fun getSimilarAnime(mediaId: Int): List<AnimeMedia> {
@@ -698,7 +858,7 @@ object AniListClient {
                     relationType
                     node {
                       type
-                      ${mediaFields()}
+                      ${mediaFields(includeDubCast = false)}
                     }
                   }
                 }
@@ -706,7 +866,7 @@ object AniListClient {
                   nodes {
                     mediaRecommendation {
                       type
-                      ${mediaFields()}
+                      ${mediaFields(includeDubCast = false)}
                     }
                   }
                 }
@@ -742,7 +902,7 @@ object AniListClient {
             }
         }
 
-        return results
+        return hydrateDubCast(results)
     }
 
     suspend fun getFriendsMediaStatus(mediaId: Int, token: String? = null): List<FriendAnimeStatus> {
@@ -811,7 +971,7 @@ object AniListClient {
               SaveMediaListEntry(mediaId: ${'$'}mediaId, status: ${'$'}status, score: ${'$'}score, scoreRaw: ${'$'}scoreRaw,
                                  progress: ${'$'}progress, private: ${'$'}private, notes: ${'$'}notes) {
                 id status score progress private notes updatedAt
-                media { ${mediaFields(includeDubCast = false)} }
+                media { ${mediaFields(includeDubCast = true)} }
               }
             }
         """, vars, token)
@@ -1140,10 +1300,7 @@ object AniListClient {
                 languageV2
                 characterMedia(type: ANIME, sort: [POPULARITY_DESC], perPage: 30) {
                   nodes {
-                    id episodes format status season seasonYear meanScore averageScore isAdult siteUrl bannerImage
-                    title { userPreferred english romaji native }
-                    coverImage { large color }
-                    genres
+                    ${mediaFields(includeDubCast = true)}
                   }
                 }
               }

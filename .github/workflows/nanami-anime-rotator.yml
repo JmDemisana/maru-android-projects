@@ -110,9 +110,12 @@ jobs:
             Rolling Rotator build for **Nanami Anime** (v${{ env.NANAMI_ANIME_VERSION_NAME }}).
 
             What's inside:
-            - Authentic Crunchyroll Dark & Orange (#F47521) interface
-            - Built-in silent episode streaming engine (zero addon setup or torrent jargon)
-            - 1-Tap Japanese (Sub) and English (Dub) audio & soft-subtitle switching
-            - AniSkip "SKIP INTRO" / "SKIP ENDING" button
-            - Private app-only Offline Vault (`.nanami` internal storage, hidden from external gallery/video players)
-            - Full AniList Watchlist & 85% auto-scrobble sync
+            - Authentic Crunchyroll Dark & Orange (#F47521) interface with smooth transitions & full wrapped titles
+            - Custom 60fps Canvas seekbar with instant scrub lock, AniSkip markers, double-tap seek, and left/right vertical Brightness & Volume swipe gestures (toggleable in Settings)
+            - Built-in Chromecast device picker & remote casting support
+            - Multi-source private app-only Offline Vault (`.nanami` + `.nomedia` internal storage, hidden from external gallery/video players) with automatic Direct HTTP + magnet failover
+            - `My Lists` with `Downloads` first followed by AniList lists, unified Browse-in-Search hub, and standalone 1-tap Play layout for Movies, Music Videos, and 1-episode Specials
+            - Full Guest Mode local watchlist + 80% offline auto-scrobble sync queue (`ConnectivityManager` auto-flush) + multi-account AniList switcher
+            - Crunchyroll-style maturity badge & content warnings (e.g. `18+  Violence, Drugs`)
+            - Accurate `Dub | Sub` vs `Subtitled` detection (`IsThisDubbed` English VA cast + live stream verification)
+            - Multi-source fallback resolvers for Uncensored Ecchi, 18+ Adult/Hentai, Music Videos, and Live Concerts

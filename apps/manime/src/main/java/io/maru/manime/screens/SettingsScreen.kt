@@ -24,7 +24,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
 import io.maru.manime.*
 
 @Composable
@@ -32,17 +31,29 @@ fun SettingsScreen(
     user: AniListUser?,
     anilistUsername: String,
     isLoggedIn: Boolean,
+    savedAccounts: List<SavedAniListAccount> = emptyList(),
+    pendingSyncCount: Int = 0,
+    isSyncingQueue: Boolean = false,
+    onSyncNow: () -> Unit = {},
+    offlineCount: Int = 0,
+    offlineTotalMb: Long = 0L,
     preferredAudio: String = "SUB",
     onSelectPreferredAudio: (String) -> Unit = {},
     preferredQuality: String = "1080p",
     onSelectPreferredQuality: (String) -> Unit = {},
     autoSkipIntro: Boolean = false,
     onToggleAutoSkipIntro: (Boolean) -> Unit = {},
+    swipeGesturesEnabled: Boolean = true,
+    onToggleSwipeGestures: (Boolean) -> Unit = {},
     reportProgress: Boolean,
     onToggleReportProgress: (Boolean) -> Unit,
     rememberPosition: Boolean,
     onToggleRememberPosition: (Boolean) -> Unit,
     onLoginClick: () -> Unit,
+    onAddAccountClick: () -> Unit = onLoginClick,
+    onSwitchAccount: (SavedAniListAccount) -> Unit = {},
+    onRemoveAccount: (SavedAniListAccount) -> Unit = {},
+    onGuestModeClick: () -> Unit = {},
     onLogoutClick: () -> Unit
 ) {
     val context = LocalContext.current
@@ -60,7 +71,7 @@ fun SettingsScreen(
         contentPadding = PaddingValues(vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // AniList Account Section
+        // 1. Multi-Account AniList & Guest Mode Section
         item(key = "account_card") {
             GlassCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
@@ -68,7 +79,7 @@ fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     GlassSectionHeader(
-                        title = "AniList account",
+                        title = "AniList Accounts & Sync",
                         icon = Icons.Default.AccountCircle,
                         color = CrunchyOrange
                     )
@@ -78,8 +89,8 @@ fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        if (user?.avatarUrl != null) {
-                            AsyncImage(
+                        if (user?.avatarUrl != null && isLoggedIn) {
+                            CrossfadeImage(
                                 model = user.avatarUrl,
                                 contentDescription = user.name,
                                 contentScale = ContentScale.Crop,
@@ -91,59 +102,210 @@ fun SettingsScreen(
                             Icon(
                                 Icons.Default.AccountCircle,
                                 contentDescription = null,
-                                tint = CrunchyOrange,
+                                tint = if (isLoggedIn) CrunchyOrange else MaruTextMuted,
                                 modifier = Modifier.size(54.dp)
                             )
                         }
 
-                        Column(modifier = Modifier.weight(1f)) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text(
-                                text = user?.name ?: if (isLoggedIn) anilistUsername.ifEmpty { "AniList Connected" } else "Guest User",
+                                text = if (isLoggedIn) {
+                                    user?.name ?: anilistUsername.ifEmpty { "AniList Connected" }
+                                } else {
+                                    "Local Guest Mode"
+                                },
                                 fontSize = 17.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = MaruTextStrong
                             )
                             Text(
-                                text = if (isLoggedIn) "Connected to AniList" else "Connect to sync your watchlist and episode progress.",
+                                text = if (isLoggedIn) {
+                                    "Syncing watchlist & watched episodes at 80%"
+                                } else {
+                                    "Watchlists, progress & downloads work locally without signing in."
+                                },
                                 fontSize = 12.sp,
-                                color = if (isLoggedIn) CrunchyTeal else MaruTextMuted
+                                color = if (isLoggedIn) CrunchyTeal else MaruTextMuted,
+                                lineHeight = 16.sp
                             )
+                        }
+                    }
+
+                    // Pending Offline Sync Queue Banner
+                    if (pendingSyncCount > 0) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFF141820),
+                            border = BorderStroke(1.dp, CrunchyTeal.copy(alpha = 0.5f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = if (isSyncingQueue) "Syncing $pendingSyncCount queued updates…" else "$pendingSyncCount offline updates queued",
+                                        color = CrunchyTeal,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.5.sp
+                                    )
+                                    Text(
+                                        text = "Automatically syncs to AniList as soon as internet returns.",
+                                        color = MaruTextMuted,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                if (!isSyncingQueue && isLoggedIn) {
+                                    TextButton(onClick = onSyncNow) {
+                                        Text("Sync Now", color = CrunchyOrange, fontWeight = FontWeight.ExtraBold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Saved Multi-Account Switcher List
+                    if (savedAccounts.isNotEmpty()) {
+                        HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
+                        Text(
+                            text = if (savedAccounts.size > 1) "SWITCH ACCOUNT" else "SAVED ACCOUNT",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = CrunchyOrange,
+                            letterSpacing = 0.8.sp
+                        )
+
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            savedAccounts.forEach { acc ->
+                                val isCurrent = isLoggedIn && acc.username.equals(anilistUsername, ignoreCase = true)
+                                Surface(
+                                    onClick = { if (!isCurrent) onSwitchAccount(acc) },
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = if (isCurrent) CrunchyOrange.copy(alpha = 0.16f) else CrunchySurface,
+                                    border = BorderStroke(1.dp, if (isCurrent) CrunchyOrange else CrunchyBorder),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        if (acc.avatarUrl != null) {
+                                            CrossfadeImage(
+                                                model = acc.avatarUrl,
+                                                contentDescription = acc.username,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier
+                                                    .size(36.dp)
+                                                    .clip(CircleShape)
+                                            )
+                                        } else {
+                                            Icon(
+                                                Icons.Default.Person,
+                                                contentDescription = null,
+                                                tint = CrunchyOrange,
+                                                modifier = Modifier.size(36.dp)
+                                            )
+                                        }
+
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "@${acc.username}",
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color.White
+                                            )
+                                            Text(
+                                                text = if (isCurrent) "Active account" else "Tap to switch",
+                                                fontSize = 11.sp,
+                                                color = if (isCurrent) CrunchyOrange else MaruTextMuted
+                                            )
+                                        }
+
+                                        if (isCurrent) {
+                                            Surface(
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = CrunchyOrange
+                                            ) {
+                                                Text(
+                                                    text = "ACTIVE",
+                                                    fontSize = 9.5.sp,
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    color = Color.Black,
+                                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                                )
+                                            }
+                                        }
+
+                                        IconButton(onClick = { onRemoveAccount(acc) }) {
+                                            Icon(
+                                                Icons.Default.DeleteOutline,
+                                                contentDescription = "Remove @${acc.username}",
+                                                tint = MaruTextMuted,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
                     HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
 
-                    if (isLoggedIn) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
                         Button(
-                            onClick = onLogoutClick,
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0x33E74C3C)),
-                            border = BorderStroke(1.dp, MaruDanger),
+                            onClick = if (isLoggedIn || savedAccounts.isNotEmpty()) onAddAccountClick else onLoginClick,
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = CrunchyOrange, contentColor = Color.Black),
                             shape = RoundedCornerShape(4.dp)
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = if (savedAccounts.isNotEmpty()) "Add Account" else "Connect AniList",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 12.5.sp
+                            )
+                        }
+
+                        if (isLoggedIn) {
+                            OutlinedButton(
+                                onClick = onGuestModeClick,
+                                modifier = Modifier.weight(1f),
+                                border = BorderStroke(1.dp, CrunchyBorder),
+                                shape = RoundedCornerShape(4.dp)
                             ) {
-                                Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = MaruDanger, modifier = Modifier.size(18.dp))
-                                Text("Log out of AniList", color = MaruDanger, fontWeight = FontWeight.ExtraBold, fontSize = 12.5.sp)
+                                Text(
+                                    text = "Guest Mode",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.5.sp
+                                )
                             }
                         }
-                    } else {
-                        Button(
-                            onClick = onLoginClick,
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(containerColor = CrunchyOrange),
-                            shape = RoundedCornerShape(4.dp)
+                    }
+
+                    if (isLoggedIn) {
+                        TextButton(
+                            onClick = onLogoutClick,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text("Connect AniList", color = Color.Black, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                            Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = MaruDanger, modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Remove Active Account", color = MaruDanger, fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
                         }
                     }
                 }
             }
         }
 
-        // Stream & Audio Preferences
+        // 2. Stream & Audio Preferences
         item(key = "stream_prefs") {
             GlassCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
@@ -151,20 +313,22 @@ fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     GlassSectionHeader(
-                        title = "Streaming preferences",
+                        title = "Streaming Preferences",
                         icon = Icons.Default.Tune,
                         color = CrunchyOrange
                     )
 
                     Text("Default audio language", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = MaruTextStrong)
                     Row(
-                        modifier = Modifier.fillMaxWidth().selectableGroup(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectableGroup(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        SettingChoice("Japanese with subtitles", preferredAudio == "SUB", Modifier.weight(1f)) {
+                        SettingChoice("Japanese (Sub)", preferredAudio == "SUB", Modifier.weight(1f)) {
                             onSelectPreferredAudio("SUB")
                         }
-                        SettingChoice("English dub", preferredAudio == "DUB", Modifier.weight(1f)) {
+                        SettingChoice("English Dub", preferredAudio == "DUB", Modifier.weight(1f)) {
                             onSelectPreferredAudio("DUB")
                         }
                     }
@@ -173,7 +337,9 @@ fun SettingsScreen(
 
                     Text("Preferred video quality", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = MaruTextStrong)
                     Row(
-                        modifier = Modifier.fillMaxWidth().selectableGroup(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectableGroup(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         listOf("720p", "1080p", "4K").forEach { quality ->
@@ -186,7 +352,7 @@ fun SettingsScreen(
             }
         }
 
-        // Playback & Tracker Settings
+        // 3. Playback, Gestures & Scrobbling Settings
         item(key = "player_settings") {
             GlassCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
@@ -194,13 +360,23 @@ fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     GlassSectionHeader(
-                        title = "Playback",
+                        title = "Playback & Gestures",
                         icon = Icons.Default.PlayCircleOutline,
                         color = CrunchyOrange
                     )
 
                     GlassFeatureRow(
-                        label = "Sync watched episodes to AniList",
+                        label = "Swipe up/down for brightness & volume",
+                        subtitle = "Left side adjusts screen brightness, right side adjusts volume",
+                        checked = swipeGesturesEnabled,
+                        onCheckedChange = onToggleSwipeGestures
+                    )
+
+                    HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
+
+                    GlassFeatureRow(
+                        label = "Mark watched at 80% & queue offline sync",
+                        subtitle = "Marks watched locally even offline and syncs to AniList once online",
                         checked = reportProgress,
                         onCheckedChange = onToggleReportProgress
                     )
@@ -208,7 +384,8 @@ fun SettingsScreen(
                     HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
 
                     GlassFeatureRow(
-                        label = "Remember where I stopped",
+                        label = "Remember playback position",
+                        subtitle = "Resume episodes right where you stopped",
                         checked = rememberPosition,
                         onCheckedChange = onToggleRememberPosition
                     )
@@ -217,6 +394,7 @@ fun SettingsScreen(
 
                     GlassFeatureRow(
                         label = "Skip intros automatically",
+                        subtitle = "Jump past openings automatically using AniSkip timestamps",
                         checked = autoSkipIntro,
                         onCheckedChange = onToggleAutoSkipIntro
                     )
@@ -224,20 +402,41 @@ fun SettingsScreen(
             }
         }
 
-        // App Information Card
+        // 4. Private Offline Vault & App Information
         item(key = "app_info") {
             GlassCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     GlassSectionHeader(
-                        title = "About",
-                        icon = Icons.Default.Info,
+                        title = "Private Offline Vault & About",
+                        icon = Icons.Default.Lock,
                         color = CrunchyTeal
                     )
-                    Text("Nanami Anime $versionName".trimEnd(), fontSize = 13.sp, color = MaruTextStrong, fontWeight = FontWeight.Bold)
-                    Text("Downloaded episodes are stored inside the app.", fontSize = 12.sp, color = MaruTextMuted, lineHeight = 17.sp)
+                    Text(
+                        text = if (offlineCount > 0) {
+                            "$offlineCount downloaded episode${if (offlineCount == 1) "" else "s"} • $offlineTotalMb MB used"
+                        } else {
+                            "0 downloaded episodes stored"
+                        },
+                        fontSize = 13.5.sp,
+                        color = CrunchyTeal,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Downloads are sealed inside Nanami Anime's private internal vault (.nanami + .nomedia) so they never clutter your phone's gallery or external video players.",
+                        fontSize = 12.sp,
+                        color = MaruTextMuted,
+                        lineHeight = 17.sp
+                    )
+                    HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
+                    Text(
+                        text = "Nanami Anime $versionName".trimEnd(),
+                        fontSize = 13.sp,
+                        color = MaruTextStrong,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }
@@ -254,7 +453,9 @@ private fun SettingChoice(label: String, isSelected: Boolean, modifier: Modifier
         modifier = modifier.semantics { selected = isSelected }
     ) {
         Box(
-            modifier = Modifier.heightIn(min = 48.dp).padding(horizontal = 6.dp, vertical = 8.dp),
+            modifier = Modifier
+                .heightIn(min = 48.dp)
+                .padding(horizontal = 8.dp, vertical = 8.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
