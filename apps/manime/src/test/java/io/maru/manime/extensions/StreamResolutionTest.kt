@@ -8,10 +8,25 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class StreamResolutionTest {
+    @Test fun hstreamAcceptsDottedAssetNamesAndRejectsUnsafeSegments() {
+        assertEquals(
+            "library/Oni.Chichi/episode.01",
+            HstreamResolver.validatedAssetPath("/library/Oni.Chichi/episode.01/")
+        )
+        assertEquals("library/euphoria/episode-1", HstreamResolver.validatedAssetPath("library/euphoria/episode-1"))
+        assertNull(HstreamResolver.validatedAssetPath(""))
+        assertNull(HstreamResolver.validatedAssetPath("library/../episode"))
+        assertNull(HstreamResolver.validatedAssetPath("library/./episode"))
+        assertNull(HstreamResolver.validatedAssetPath("library/%2e%2e/episode"))
+        assertNull(HstreamResolver.validatedAssetPath("library//episode"))
+        assertNull(HstreamResolver.validatedAssetPath("library\\episode"))
+    }
+
     @Test fun completedRoutesPublishBeforeSlowRoutesAndKeepDistinctTorrentFiles() = runBlocking {
         val first = StreamLink(
             url = "magnet:?xt=urn:btih:example",

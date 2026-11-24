@@ -38,7 +38,7 @@ internal object HstreamResolver {
         "imoto-str.ane-h.xyz", "chibi-str.imoto-h.xyz", "koneko-str.musume-h.xyz",
         "shinobu-str.rorikon-h.xyz", "oppai-str.shoujo-h.org"
     )
-    private val assetPath = Regex("[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*")
+    private val assetSegment = Regex("[A-Za-z0-9_-][A-Za-z0-9_.-]*")
     private val slugEpisodeRegex = Regex("^/hentai/([a-z0-9]+(?:-[a-z0-9]+)*)-(\\d{1,3})/?$", RegexOption.IGNORE_CASE)
     private val videoEpisodeSuffixRegex = Regex("^(.*?)\\s+Episode\\s+(\\d{1,3})$", RegexOption.IGNORE_CASE)
     private val cardEpisodeSuffix = Regex("\\s*(?:-|Episode)\\s*\\d{1,3}$", RegexOption.IGNORE_CASE)
@@ -134,6 +134,9 @@ internal object HstreamResolver {
             .replace(separators, " ")
             .trim()
 
+    internal fun validatedAssetPath(raw: String): String? =
+        raw.trim('/').takeIf { path -> path.split('/').all(assetSegment::matches) }
+
     private suspend fun resolveEpisodeSlug(
         seriesSlug: String,
         episode: Int,
@@ -171,8 +174,7 @@ internal object HstreamResolver {
                 .post(JSONObject().put("episode_id", episodeId.toString()).toString().toRequestBody("application/json".toMediaType()))
                 .build()
             val payload = session.fetch(request)?.let(::JSONObject) ?: return emptyList()
-            val path = payload.optString("stream_url").trim('/')
-            if (!assetPath.matches(path)) return emptyList()
+            val path = validatedAssetPath(payload.optString("stream_url")) ?: return emptyList()
             val domains = payload.optJSONArray("stream_domains") ?: return emptyList()
             (0 until domains.length()).mapNotNull { index ->
                 val host = domains.optString(index).toHttpUrlOrNull() ?: return@mapNotNull null
