@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -694,7 +695,7 @@ fun ProfileScreen(
                                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                                     ) {
                                         Icon(
-                                            Icons.Default.Sort,
+                                            Icons.AutoMirrored.Filled.Sort,
                                             contentDescription = "Sort Options",
                                             tint = CrunchyOrange,
                                             modifier = Modifier.size(16.dp)

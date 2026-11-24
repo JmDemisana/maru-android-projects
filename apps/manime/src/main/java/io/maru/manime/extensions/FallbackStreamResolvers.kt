@@ -576,7 +576,7 @@ internal object FallbackStreamResolvers {
             lower.contains("s01") ||
             lower.contains("s1") ||
             Regex("全\\s*\\d+\\s*話").containsMatchIn(releaseTitle) ||
-            Regex("\\b0*1\\s*[-~]\\s*\\d{1,3}\\b").containsMatchIn(lower) ||
+            Regex("(?<![0-9])0*1\\s*[-~]\\s*\\d{1,3}(?![0-9])").containsMatchIn(lower) ||
             Regex("(?i)vol\\.?\\s*0*1\\s*[-~]\\s*\\d{1,3}").containsMatchIn(lower)
         return isBatchOrComplete
     }
