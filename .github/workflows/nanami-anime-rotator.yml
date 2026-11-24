@@ -8,8 +8,6 @@ on:
     paths:
       - "apps/manime/**"
       - ".github/workflows/nanami-anime-rotator.yml"
-    tags:
-      - "nanami-anime-v*"
 
 permissions:
   contents: write
@@ -41,15 +39,12 @@ jobs:
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
-      - name: Resolve version
+      - name: Resolve rotator version
         run: |
-          VERSION_NAME="${GITHUB_REF_NAME#nanami-anime-v}"
-          if [ "$VERSION_NAME" = "main" ] || [ -z "$VERSION_NAME" ]; then
-            VERSION_NAME="2.0.${GITHUB_RUN_NUMBER}"
-          fi
+          VERSION_NAME="2.1.0-rotator.${GITHUB_RUN_NUMBER}"
           echo "NANAMI_ANIME_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
           echo "NANAMI_ANIME_VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
-          echo "Building Nanami Anime $VERSION_NAME (code ${GITHUB_RUN_NUMBER})"
+          echo "Building Nanami Anime Rotator $VERSION_NAME (code ${GITHUB_RUN_NUMBER})"
 
       - name: Prepare signing key
         env:
@@ -71,7 +66,7 @@ jobs:
             echo "Using fallback debug signing key."
           fi
 
-      - name: Test and build Nanami Anime release APK
+      - name: Test and build Nanami Anime rotator APK
         run: |
           chmod +x gradlew
           ./gradlew :apps:manime:testDebugUnitTest :apps:manime:assembleRelease --console=plain
@@ -89,33 +84,27 @@ jobs:
           mkdir -p out
           cp "$BUILT_APK" "out/nanami-anime-${NANAMI_ANIME_VERSION_NAME}.apk"
           cp "$BUILT_APK" "out/nanami-anime-latest.apk"
+          sha256sum out/*.apk > out/SHA256SUMS.txt
           ls -lh out
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nanami-anime-${{ env.NANAMI_ANIME_VERSION_NAME }}
-          path: out/*.apk
+          name: nanami-anime-rotator-${{ env.NANAMI_ANIME_VERSION_NAME }}
+          path: out/*
 
-      - name: Update rolling nanami-anime-latest release
+      - name: Update rolling nanami-anime-latest pre-release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: nanami-anime-latest
-          name: Nanami Anime Latest (${{ env.NANAMI_ANIME_VERSION_NAME }})
-          make_latest: "true"
+          name: Nanami Anime Rotator (${{ env.NANAMI_ANIME_VERSION_NAME }})
+          prerelease: true
+          make_latest: "false"
           files: |
             out/nanami-anime-latest.apk
             out/nanami-anime-${{ env.NANAMI_ANIME_VERSION_NAME }}.apk
+            out/SHA256SUMS.txt
           body: |
-            Rolling Rotator build for **Nanami Anime** (v${{ env.NANAMI_ANIME_VERSION_NAME }}).
+            Rolling Rotator pre-release build for **Nanami Anime** (`${{ env.NANAMI_ANIME_VERSION_NAME }}`, commit `${{ github.sha }}`).
 
-            What's inside:
-            - Authentic Crunchyroll Dark & Orange (#F47521) interface with smooth transitions & full wrapped titles
-            - Custom 60fps Canvas seekbar with instant scrub lock, AniSkip markers, double-tap seek, and left/right vertical Brightness & Volume swipe gestures (toggleable in Settings)
-            - Built-in Chromecast device picker & remote casting support
-            - Multi-source private app-only Offline Vault (`.nanami` + `.nomedia` internal storage, hidden from external gallery/video players) with automatic Direct HTTP + magnet failover
-            - `My Lists` with `Downloads` first followed by AniList lists, unified Browse-in-Search hub, and standalone 1-tap Play layout for Movies, Music Videos, and 1-episode Specials
-            - Full Guest Mode local watchlist + 80% offline auto-scrobble sync queue (`ConnectivityManager` auto-flush) + multi-account AniList switcher
-            - Crunchyroll-style maturity badge & content warnings (e.g. `18+  Violence, Drugs`)
-            - Accurate `Dub | Sub` vs `Subtitled` detection (`IsThisDubbed` English VA cast + live stream verification)
-            - Multi-source fallback resolvers for Uncensored Ecchi, 18+ Adult/Hentai, Music Videos, and Live Concerts
+            Official versioned releases live on separate `nanami-anime-v*` tags without being overwritten by rotator builds.
