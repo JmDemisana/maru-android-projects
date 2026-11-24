@@ -79,6 +79,7 @@ import io.maru.manime.*
 import io.maru.manime.extensions.AniSkipInterval
 import io.maru.manime.extensions.CrunchyrollStreamEngine
 import io.maru.manime.extensions.ExternalSubtitleItem
+import io.maru.manime.extensions.HstreamResolver
 import io.maru.manime.extensions.StreamLink
 import io.maru.manime.extensions.SubtitleTrack
 import io.maru.manime.extensions.playbackIdentity
@@ -275,9 +276,6 @@ private fun EpisodePlayerScreen(
     var doubleTapVisible by remember { mutableStateOf(false) }
     var doubleTapTick by remember { mutableIntStateOf(0) }
 
-    val session by prefs.anilistSession.collectAsState(initial = AniListSession())
-    val token = session.token
-    val scoreFormat by prefs.anilistScoreFormat.collectAsState(initial = "POINT_100")
     val reportProgress by prefs.reportProgress.collectAsState(initial = true)
     val rememberPosition by prefs.rememberPosition.collectAsState(initial = true)
     val autoSkipIntro by prefs.autoSkipIntro.collectAsState(initial = false)
@@ -296,9 +294,6 @@ private fun EpisodePlayerScreen(
     val latestRememberPosition by rememberUpdatedState(rememberPosition)
     val latestWatchedCallback by rememberUpdatedState(onEpisodeWatched)
     val latestReportProgress by rememberUpdatedState(reportProgress)
-    val latestToken by rememberUpdatedState(token)
-    val latestUsername by rememberUpdatedState(session.username)
-    val latestScoreFormat by rememberUpdatedState(scoreFormat)
     val latestMedia by rememberUpdatedState(media)
     val latestSwipeEnabled by rememberUpdatedState(swipeGesturesEnabled)
 
@@ -311,21 +306,24 @@ private fun EpisodePlayerScreen(
     fun markWatched() {
         if (hasScrobbled80Percent) return
         hasScrobbled80Percent = true
-        val auth = latestToken
-        val activeUser = latestUsername
-        val snapshot = latestMedia
-        val shouldSyncRemote = latestReportProgress && auth.isNotBlank()
-        val fmt = latestScoreFormat
+        val snapshot = if (advisoryMedia.hasKnownAdultRating && !latestMedia.hasKnownAdultRating) {
+            latestMedia.copy(
+                isAdult = advisoryMedia.isAdult,
+                genres = advisoryMedia.genres,
+                hasKnownAdultRating = true
+            )
+        } else {
+            latestMedia
+        }
+        val shouldSyncRemote = latestReportProgress
         persistenceScope.launch {
+            val accounts = prefs.trackingAccounts.first()
             LocalLibraryStore.recordEpisodeWatchedAt80Percent(
                 context = context.applicationContext,
                 media = snapshot,
                 episodeNum = episodeNum,
-                isLoggedIn = auth.isNotBlank(),
-                reportProgress = shouldSyncRemote,
-                anilistToken = auth,
-                anilistUsername = activeUser,
-                scoreFormat = fmt
+                reportProgress = shouldSyncRemote && (snapshot.hasKnownAdultRating || accounts.nsfw == null),
+                accounts = accounts
             )
             if (isAttached) {
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
@@ -496,7 +494,7 @@ private fun EpisodePlayerScreen(
         if (media.genres.isEmpty() && media.tags.isEmpty()) {
             launch {
                 runCatching {
-                    AniListClient.getMediaDetail(media.mediaId, token.ifBlank { null })
+                    AniListClient.getMediaDetail(media.mediaId)
                 }.onSuccess { detailed ->
                     advisoryMedia = detailed
                 }
@@ -596,6 +594,9 @@ private fun EpisodePlayerScreen(
     }
 
     var streamReload by remember { mutableIntStateOf(0) }
+    val isExplicitAdult = isExplicitAdultAnime(media.isAdult, media.genres)
+    var triedHstream by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
+    val canTryHstream = isExplicitAdult && !triedHstream && HstreamResolver.supports(media.mediaId, episodeNum)
     LaunchedEffect(streamReload) {
         try {
             isResolvingStreams = true
@@ -603,6 +604,7 @@ private fun EpisodePlayerScreen(
             waitingForAlternative = null
             selectedStream = null
             attemptedSources.clear()
+            triedHstream = false
             resetPlayback()
             rankedStreams = emptyList()
             val loadPosition = async {
@@ -679,13 +681,19 @@ private fun EpisodePlayerScreen(
             )
             startFallback?.cancel()
             rankedStreams = streams
+            triedHstream = streams.any { it.sourceName == HstreamResolver.SOURCE_NAME } ||
+                streams.none { !it.isTorrent || it.seeders != 0 }
             isResolvingStreams = false
             if (selectedStream == null || waitingForAlternative != null) {
                 val remaining = streams.firstOrNull { it.playbackIdentity !in attemptedSources }
                 if (remaining != null) playStream(remaining)
                 else {
                     isPlayerBuffering = false
-                    resolveError = waitingForAlternative ?: "Episode $episodeNum is not available yet."
+                    resolveError = waitingForAlternative ?: if (isExplicitAdult) {
+                        "No verified source for episode $episodeNum."
+                    } else {
+                        "Episode $episodeNum is not available yet."
+                    }
                     waitingForAlternative = null
                 }
             }
@@ -714,7 +722,19 @@ private fun EpisodePlayerScreen(
         }
     }
 
-    val hasFallback = rankedStreams.any { it.playbackIdentity !in attemptedSources }
+    LaunchedEffect(resolveError, streamReload) {
+        if (resolveError == null || selectedStream == null || isOfflinePlayback || offlineOnly || !canTryHstream) {
+            return@LaunchedEffect
+        }
+        triedHstream = true
+        val sources = HstreamResolver.resolve(media.mediaId, episodeNum)
+        if (sources.isNotEmpty()) {
+            rankedStreams = (rankedStreams + sources).distinctBy { it.playbackIdentity }
+            playStream(sources.first())
+        }
+    }
+
+    val hasFallback = canTryHstream || rankedStreams.any { it.playbackIdentity !in attemptedSources }
     LaunchedEffect(playbackAttempt, hasRenderedFrame, hasFallback) {
         val source = selectedStream ?: return@LaunchedEffect
         val attempt = playbackAttempt

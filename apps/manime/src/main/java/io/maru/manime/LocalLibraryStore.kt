@@ -35,8 +35,19 @@ data class PendingAniListUpdate(
     val totalEpisodes: Int?,
     val isWatchedAutoBump: Boolean = false,
     val accountUsername: String = "",
-    val queuedAt: Long = System.currentTimeMillis()
+    val queuedAt: Long = System.currentTimeMillis(),
+    val accountId: Int? = null,
+    val isRemoval: Boolean = false
 )
+
+internal fun PendingAniListUpdate.belongsTo(account: SavedAniListAccount, includeUnassigned: Boolean = false): Boolean =
+    if (accountId != null) accountId == account.id
+    else if (accountUsername.isBlank()) includeUnassigned
+    else accountUsername.equals(account.username, ignoreCase = true)
+
+private fun PendingAniListUpdate.sameDestination(other: PendingAniListUpdate): Boolean =
+    if (accountId != null && other.accountId != null) accountId == other.accountId
+    else accountUsername.equals(other.accountUsername, ignoreCase = true)
 
 /**
  * Provides two essential capabilities:
@@ -73,6 +84,24 @@ object LocalLibraryStore {
         }
     }
 
+    suspend fun applyAdultRatings(context: Context, ratings: Map<Int, Boolean>) = withContext(Dispatchers.IO) {
+        ensureLoaded(context)
+        synchronized(ioLock) {
+            val updated = _localEntries.value.mapValues { (id, media) ->
+                val isAdult = ratings[id]
+                if (!media.hasKnownAdultRating && isAdult != null) {
+                    media.copy(isAdult = isAdult, hasKnownAdultRating = true)
+                } else {
+                    media
+                }
+            }
+            if (updated != _localEntries.value) {
+                writeLocalLibrary(libraryFile(context), updated)
+                _localEntries.value = updated
+            }
+        }
+    }
+
     /**
      * Merges local entries and pending offline updates onto AniList lists (or builds full lists when signed out).
      */
@@ -81,12 +110,12 @@ object LocalLibraryStore {
         localMap: Map<Int, AnimeMedia>,
         pending: List<PendingAniListUpdate>,
         isLoggedIn: Boolean,
-        activeUsername: String = ""
+        activeUsername: String = "",
+        activeAccountId: Int? = null
     ): Map<String, List<AnimeMedia>> {
-        val relevantPending = if (activeUsername.isBlank()) {
-            pending
-        } else {
-            pending.filter { it.accountUsername.isBlank() || it.accountUsername.equals(activeUsername, ignoreCase = true) }
+        val relevantPending = pending.filter {
+            if (it.accountId != null && activeAccountId != null) it.accountId == activeAccountId
+            else it.accountUsername.isBlank() || it.accountUsername.equals(activeUsername, ignoreCase = true)
         }
         val pendingByMedia = relevantPending.associateBy { it.mediaId }
 
@@ -100,17 +129,27 @@ object LocalLibraryStore {
                 mergedById[item.mediaId] = item
             }
         }
+        for (item in relevantPending) {
+            if (item.isRemoval) mergedById.remove(item.mediaId)
+        }
 
         // Overlay local progress/entries that have pending updates or were tracked locally while offline
         for ((id, localItem) in localMap) {
             val remote = mergedById[id]
             val queued = pendingByMedia[id]
+            if (queued?.isRemoval == true) continue
             if (remote == null) {
                 if (queued != null) {
+                    val legacy = queued.accountId == null
                     mergedById[id] = localItem.copy(
+                        listEntryId = null,
                         listStatus = queued.status ?: localItem.listStatus ?: "CURRENT",
-                        progress = maxOf(localItem.progress, queued.progress ?: 0),
-                        score = queued.score ?: localItem.score
+                        progress = if (legacy) maxOf(localItem.progress, queued.progress ?: 0) else queued.progress ?: 0,
+                        score = queued.score ?: localItem.score.takeIf { legacy },
+                        notes = null,
+                        isPrivate = false,
+                        createdAt = null,
+                        updatedAt = queued.queuedAt / 1000L
                     )
                 }
             } else if (queued != null) {
@@ -147,6 +186,7 @@ object LocalLibraryStore {
         for ((listName, items) in remoteLists) {
             val list = mutableListOf<AnimeMedia>()
             for (item in items) {
+                if (pendingByMedia[item.mediaId]?.isRemoval == true) continue
                 val updated = mergedById[item.mediaId] ?: item
                 list.add(updated)
                 placedMediaIds.add(item.mediaId)
@@ -234,12 +274,16 @@ object LocalLibraryStore {
                 score <= 0.0 -> null
                 else -> score
             }
+            val preserveRating = !media.hasKnownAdultRating && current.hasKnownAdultRating
             val updated = media.copy(
                 listStatus = nextStatus,
                 progress = nextProgress,
                 score = nextScore,
                 updatedAt = nowSec,
-                hasEnglishDubCast = media.hasEnglishDubCast || current.hasEnglishDubCast
+                hasEnglishDubCast = media.hasEnglishDubCast || current.hasEnglishDubCast,
+                isAdult = if (preserveRating) current.isAdult else media.isAdult,
+                genres = media.genres.ifEmpty { current.genres },
+                hasKnownAdultRating = media.hasKnownAdultRating || current.hasKnownAdultRating
             )
             val nextMap = LinkedHashMap(_localEntries.value).apply { put(media.mediaId, updated) }
             writeLocalLibrary(libraryFile(context), nextMap)
@@ -248,14 +292,21 @@ object LocalLibraryStore {
         }
     }
 
-    suspend fun removeLocalEntry(context: Context, mediaId: Int) = withContext(Dispatchers.IO) {
+    internal suspend fun removeLocalEntry(
+        context: Context,
+        mediaId: Int,
+        account: SavedAniListAccount? = null,
+        includeUnassigned: Boolean = false
+    ) = withContext(Dispatchers.IO) {
         ensureLoaded(context)
         synchronized(ioLock) {
             val nextMap = LinkedHashMap(_localEntries.value).apply { remove(mediaId) }
             writeLocalLibrary(libraryFile(context), nextMap)
             _localEntries.value = nextMap
 
-            val nextQueue = _pendingQueue.value.filterNot { it.mediaId == mediaId }
+            val nextQueue = _pendingQueue.value.filterNot {
+                it.mediaId == mediaId && account != null && it.belongsTo(account, includeUnassigned)
+            }
             if (nextQueue.size != _pendingQueue.value.size) {
                 writeQueue(queueFile(context), nextQueue)
                 _pendingQueue.value = nextQueue
@@ -268,23 +319,21 @@ object LocalLibraryStore {
      * - Updates local tracking immediately (if already tracked OR in guest mode so Continue Watching works!).
      * - If signed into AniList with `reportProgress`, enqueues a durable offline update and flushes immediately if online.
      */
-    suspend fun recordEpisodeWatchedAt80Percent(
+    internal suspend fun recordEpisodeWatchedAt80Percent(
         context: Context,
         media: AnimeMedia,
         episodeNum: Int,
-        isLoggedIn: Boolean,
         reportProgress: Boolean,
-        anilistToken: String,
-        anilistUsername: String = "",
-        scoreFormat: String? = null
+        accounts: AniListTrackingAccounts
     ): Boolean = withContext(Dispatchers.IO) {
         ensureLoaded(context)
+        val account = accounts.forTitle(isExplicitAdultAnime(media.isAdult, media.genres))
         val existingLocal = _localEntries.value[media.mediaId]
         val isTracked = media.listStatus != null || existingLocal?.listStatus != null
 
         // For guests (no AniList), auto-track watched shows in Watching/Completed so Continue Watching works seamlessly!
         // For AniList users, mark watched if tracked (or already in list / auto-sync enabled).
-        val shouldMarkLocally = !isLoggedIn || isTracked || reportProgress
+        val shouldMarkLocally = account == null || isTracked || reportProgress
         if (!shouldMarkLocally) return@withContext false
 
         val currentProgress = maxOf(media.progress, existingLocal?.progress ?: 0)
@@ -305,7 +354,7 @@ object LocalLibraryStore {
             score = media.score ?: existingLocal?.score
         )
 
-        if (isLoggedIn && reportProgress && anilistToken.isNotBlank() && episodeNum > media.progress) {
+        if (account != null && reportProgress) {
             enqueueAniListUpdate(
                 context = context,
                 update = PendingAniListUpdate(
@@ -316,10 +365,11 @@ object LocalLibraryStore {
                     score = null,
                     totalEpisodes = totalEps,
                     isWatchedAutoBump = true,
-                    accountUsername = anilistUsername
+                    accountUsername = account.username,
+                    accountId = account.id.takeIf { it > 0 }
                 )
             )
-            flushPendingQueue(context, anilistToken, scoreFormat, anilistUsername)
+            flushPendingQueue(context, accounts)
         }
         true
     }
@@ -329,18 +379,22 @@ object LocalLibraryStore {
         synchronized(ioLock) {
             val current = _pendingQueue.value.toMutableList()
             val idx = current.indexOfFirst {
-                it.mediaId == update.mediaId && it.accountUsername.equals(update.accountUsername, ignoreCase = true)
+                it.mediaId == update.mediaId && it.sameDestination(update)
             }
             if (idx >= 0) {
                 val prev = current[idx]
-                val merged = if (update.isWatchedAutoBump && !prev.isWatchedAutoBump) {
+                val merged = if (update.isRemoval || prev.isRemoval) {
+                    if (prev.isRemoval && update.isWatchedAutoBump) prev else update
+                } else if (update.isWatchedAutoBump && !prev.isWatchedAutoBump) {
                     prev.copy(
                         progress = maxOf(prev.progress ?: 0, update.progress ?: 0),
-                        queuedAt = update.queuedAt
+                        queuedAt = update.queuedAt,
+                        accountId = update.accountId ?: prev.accountId
                     )
                 } else {
                     update.copy(
                         progress = if (update.isWatchedAutoBump) maxOf(prev.progress ?: 0, update.progress ?: 0) else update.progress,
+                        accountId = update.accountId ?: prev.accountId,
                         score = update.score ?: prev.score
                     )
                 }
@@ -356,27 +410,31 @@ object LocalLibraryStore {
     /**
      * Flushes all queued AniList updates in order. Returns the number of updates synced during this pass.
      */
-    suspend fun flushPendingQueue(
+    internal suspend fun flushPendingQueue(
         context: Context,
-        anilistToken: String,
-        scoreFormat: String? = null,
-        activeUsername: String = ""
+        accounts: AniListTrackingAccounts
     ): Int = withContext(Dispatchers.IO) {
-        if (anilistToken.isBlank() || !isNetworkAvailable(context)) return@withContext 0
+        if (accounts.active == null || !isNetworkAvailable(context)) return@withContext 0
         ensureLoaded(context)
         flushMutex.withLock {
-            val snapshot = _pendingQueue.value.filter {
-                activeUsername.isBlank() || it.accountUsername.isBlank() ||
-                    it.accountUsername.equals(activeUsername, ignoreCase = true)
+            val snapshot = _pendingQueue.value.mapNotNull { update ->
+                accounts.forUpdate(update)?.let { update to it }
             }
             if (snapshot.isEmpty()) return@withLock 0
             _isSyncing.value = true
             var syncedCount = 0
+            val failedAccounts = mutableSetOf<String>()
             try {
-                for (item in snapshot) {
+                for ((item, account) in snapshot) {
                     if (!isNetworkAvailable(context)) break
+                    if (account.token in failedAccounts) continue
+                    val anilistToken = account.token
+                    val scoreFormat = account.scoreFormat
                     try {
-                        if (item.isWatchedAutoBump) {
+                        if (item.isRemoval) {
+                            val entryId = AniListClient.getMediaDetail(item.mediaId, anilistToken).listEntryId
+                            if (entryId != null) AniListClient.deleteEntry(entryId, anilistToken)
+                        } else if (item.isWatchedAutoBump) {
                             val remote = AniListClient.getMediaDetail(item.mediaId, anilistToken)
                             // Only sync watched auto-bumps if the anime is tracked on AniList or user started watching it!
                             val targetEp = item.progress ?: 0
@@ -430,11 +488,7 @@ object LocalLibraryStore {
                         }
 
                         synchronized(ioLock) {
-                            val remaining = _pendingQueue.value.filterNot {
-                                it.mediaId == item.mediaId &&
-                                    it.accountUsername.equals(item.accountUsername, ignoreCase = true) &&
-                                    it.queuedAt <= item.queuedAt
-                            }
+                            val remaining = _pendingQueue.value.filterNot { it == item }
                             writeQueue(queueFile(context), remaining)
                             _pendingQueue.value = remaining
                         }
@@ -443,7 +497,7 @@ object LocalLibraryStore {
                         throw e
                     } catch (e: Exception) {
                         Log.w("LocalLibraryStore", "Deferred AniList sync for ${item.mediaId}: ${e.message}")
-                        break
+                        failedAccounts.add(account.token)
                     }
                 }
             } finally {
@@ -528,6 +582,8 @@ object LocalLibraryStore {
                 if (m.score != null) put("score", m.score)
                 put("updatedAt", m.updatedAt ?: (System.currentTimeMillis() / 1000L))
                 put("hasEnglishDubCast", m.hasEnglishDubCast)
+                if (m.hasKnownAdultRating) put("isAdult", m.isAdult)
+                put("genres", JSONArray(m.genres))
             })
         }
         val out = file.startWrite()
@@ -563,10 +619,12 @@ object LocalLibraryStore {
                 season = null,
                 seasonYear = null,
                 averageScore = o.optInt("averageScore").takeIf { it > 0 },
-                genres = emptyList(),
+                genres = o.optJSONArray("genres")?.let { genres ->
+                    (0 until genres.length()).mapNotNull { genres.optString(it).takeIf(String::isNotBlank) }
+                }.orEmpty(),
                 description = null,
                 siteUrl = null,
-                isAdult = false,
+                isAdult = o.optBoolean("isAdult", false),
                 nextEpisode = null,
                 nextEpisodeAt = null,
                 externalLinks = emptyList(),
@@ -577,7 +635,8 @@ object LocalLibraryStore {
                 notes = null,
                 isPrivate = false,
                 updatedAt = o.optLong("updatedAt").takeIf { it > 0 },
-                hasEnglishDubCast = o.optBoolean("hasEnglishDubCast", false)
+                hasEnglishDubCast = o.optBoolean("hasEnglishDubCast", false),
+                hasKnownAdultRating = o.has("isAdult")
             )
         }
         return map
@@ -608,6 +667,8 @@ object LocalLibraryStore {
                 put("isWatchedAutoBump", u.isWatchedAutoBump)
                 put("accountUsername", u.accountUsername)
                 put("queuedAt", u.queuedAt)
+                if (u.accountId != null) put("accountId", u.accountId)
+                if (u.isRemoval) put("isRemoval", true)
             })
         }
         val out = file.startWrite()
@@ -637,7 +698,9 @@ object LocalLibraryStore {
                         totalEpisodes = if (o.has("totalEpisodes") && !o.isNull("totalEpisodes")) o.optInt("totalEpisodes") else null,
                         isWatchedAutoBump = o.optBoolean("isWatchedAutoBump", false),
                         accountUsername = o.optString("accountUsername", ""),
-                        queuedAt = o.optLong("queuedAt", 0L)
+                        queuedAt = o.optLong("queuedAt", 0L),
+                        accountId = o.optInt("accountId").takeIf { it > 0 },
+                        isRemoval = o.optBoolean("isRemoval", false)
                     )
                 )
             }

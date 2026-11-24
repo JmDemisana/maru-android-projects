@@ -73,6 +73,7 @@ fun AnimeDetailScreen(
     anilistUsername: String = "",
     prefs: MAnimePrefs,
     isActive: Boolean = true,
+    hideNsfwContent: Boolean = true,
     onBack: () -> Unit,
     onMediaUpdated: (AnimeMedia) -> Unit = {},
     onAnimeClick: (AnimeMedia) -> Unit = {},
@@ -85,16 +86,27 @@ fun AnimeDetailScreen(
     val localEntries by LocalLibraryStore.localEntries.collectAsState()
     val pendingQueue by LocalLibraryStore.pendingQueue.collectAsState()
     val knownDubIds by KnownDubRegistry.dubbedIds.collectAsState()
+    val trackingAccounts by prefs.trackingAccounts.collectAsState(initial = null)
+    var isNsfwForTracking by remember(media.mediaId) {
+        mutableStateOf(isExplicitAdultAnime(media.isAdult, media.genres))
+    }
+    val trackingAccount = trackingAccounts?.forTitle(isNsfwForTracking)
+    val trackingToken = trackingAccount?.token.orEmpty()
+    val isActiveTrackingAccount = trackingAccount?.token == trackingAccounts?.active?.token
 
-    var currentMedia by remember(media.mediaId, anilistToken, anilistUsername) {
-        val savedLocal = localEntries[media.mediaId]
-        val queued = if (anilistToken.isBlank()) null else pendingQueue.firstOrNull {
-            it.mediaId == media.mediaId &&
-                (it.accountUsername.isBlank() || it.accountUsername.equals(anilistUsername, ignoreCase = true))
+    fun queuedUpdate() = trackingAccount?.let { account ->
+        pendingQueue.firstOrNull {
+            it.mediaId == media.mediaId && it.belongsTo(account, includeUnassigned = isActiveTrackingAccount)
         }
-        val initial = if (anilistToken.isBlank()) {
+    }
+
+    var currentMedia by remember(media.mediaId, trackingToken, trackingAccounts != null) {
+        val savedLocal = localEntries[media.mediaId]
+        val queued = queuedUpdate()
+        val base = if (isActiveTrackingAccount && trackingToken.isNotBlank()) media else media.withoutTrackingEntry()
+        val initial = if (trackingToken.isBlank()) {
             if (savedLocal != null) {
-                media.copy(
+                base.copy(
                     listStatus = savedLocal.listStatus,
                     progress = savedLocal.progress,
                     score = savedLocal.score,
@@ -102,32 +114,26 @@ fun AnimeDetailScreen(
                     hasEnglishDubCast = media.hasEnglishDubCast || savedLocal.hasEnglishDubCast
                 )
             } else {
-                media.copy(
-                    listEntryId = null,
-                    listStatus = null,
-                    progress = 0,
-                    score = null,
-                    notes = null,
-                    isPrivate = false,
-                    updatedAt = null
-                )
+                base
             }
+        } else if (queued?.isRemoval == true) {
+            base.withoutTrackingEntry()
         } else if (queued != null) {
-            val baseProg = maxOf(media.progress, savedLocal?.progress ?: 0)
-            media.copy(
-                listStatus = queued.status ?: media.listStatus ?: savedLocal?.listStatus,
+            val baseProg = base.progress
+            base.copy(
+                listStatus = queued.status ?: base.listStatus,
                 progress = if (queued.isWatchedAutoBump) maxOf(baseProg, queued.progress ?: baseProg)
                 else (queued.progress ?: baseProg),
-                score = queued.score ?: media.score ?: savedLocal?.score
+                score = queued.score ?: base.score
             )
         } else {
-            media
+            base
         }
         mutableStateOf(initial)
     }
 
-    LaunchedEffect(localEntries[media.mediaId], anilistToken) {
-        if (anilistToken.isBlank()) {
+    LaunchedEffect(localEntries[media.mediaId], trackingToken) {
+        if (trackingToken.isBlank()) {
             val savedLocal = localEntries[media.mediaId]
             if (savedLocal != null) {
                 currentMedia = currentMedia.copy(
@@ -140,19 +146,26 @@ fun AnimeDetailScreen(
         }
     }
 
-    var isEntryLoading by remember(media.mediaId, anilistToken) { mutableStateOf(true) }
+    var isEntryLoading by remember(media.mediaId, trackingToken) { mutableStateOf(true) }
     var entryRetry by remember { mutableIntStateOf(0) }
-    LaunchedEffect(media.mediaId, anilistToken, anilistUsername, entryRetry) {
+    LaunchedEffect(media.mediaId, trackingToken, trackingAccounts != null, entryRetry, hideNsfwContent) {
         isEntryLoading = true
         try {
+            if (trackingAccounts == null) return@LaunchedEffect
             val detail = withContext(Dispatchers.IO) {
-                AniListClient.getMediaDetail(media.mediaId, anilistToken.ifBlank { null })
+                AniListClient.getMediaDetail(media.mediaId, trackingToken.ifBlank { null })
             }
-            val queued = if (anilistToken.isBlank()) null else pendingQueue.firstOrNull {
-                it.mediaId == media.mediaId &&
-                    (it.accountUsername.isBlank() || it.accountUsername.equals(anilistUsername, ignoreCase = true))
+            if (hideNsfwContent && !detail.isVisibleWithNsfwHidden) {
+                onBack()
+                return@LaunchedEffect
             }
-            val guestLocal = if (anilistToken.isBlank()) localEntries[media.mediaId] else null
+            val isNsfw = isExplicitAdultAnime(detail.isAdult, detail.genres)
+            if (isNsfw != isNsfwForTracking) {
+                isNsfwForTracking = isNsfw
+                if (trackingAccounts?.forTitle(isNsfw)?.token.orEmpty() != trackingToken) return@LaunchedEffect
+            }
+            val queued = queuedUpdate()
+            val guestLocal = if (trackingToken.isBlank()) localEntries[media.mediaId] else null
 
             currentMedia = detail.copy(
                 hasEnglishDubCast = detail.hasEnglishDubCast || media.hasEnglishDubCast,
@@ -172,7 +185,7 @@ fun AnimeDetailScreen(
                     guestLocal != null -> guestLocal.score
                     else -> detail.score
                 }
-            )
+            ).let { if (queued?.isRemoval == true) it.withoutTrackingEntry() else it }
             if (currentMedia.hasEnglishDubCast) {
                 KnownDubRegistry.recordKnownDub(currentMedia.mediaId, context)
             }
@@ -187,10 +200,11 @@ fun AnimeDetailScreen(
     var isSynopsisExpanded by rememberSaveable { mutableStateOf(false) }
     var isUpdatingList by remember { mutableStateOf(false) }
     var showEditPage by remember { mutableStateOf(false) }
+    val canEditList = trackingAccounts != null && !isEntryLoading && !isUpdatingList
 
     val preferredAudioFlow by prefs.preferredAudio.collectAsState(initial = "SUB")
     val reportProgress by prefs.reportProgress.collectAsState(initial = true)
-    val userScoreFormat by prefs.anilistScoreFormat.collectAsState(initial = "POINT_100")
+    val userScoreFormat = trackingAccount?.scoreFormat ?: "POINT_100"
     var selectedAudioMode by remember(preferredAudioFlow) { mutableStateOf(preferredAudioFlow) }
 
     var activePlayingEp by remember { mutableStateOf<CrunchyEpisodeMeta?>(null) }
@@ -252,7 +266,9 @@ fun AnimeDetailScreen(
                     thumbnailUrl = episode.thumbnail ?: anime.bannerUrl ?: anime.coverUrl,
                     audioType = primary.audioType,
                     quality = primary.quality,
-                    candidates = candidates
+                    candidates = candidates,
+                    isAdultContent = isExplicitAdultAnime(anime.isAdult, anime.genres)
+                        .takeIf { anime.hasKnownAdultRating }
                 )
                 val label = if (anime.isStandaloneFeature) anime.title else "Episode $episodeNum"
                 Toast.makeText(context, "Downloading $label privately inside the app…", Toast.LENGTH_SHORT).show()
@@ -269,7 +285,10 @@ fun AnimeDetailScreen(
     var streamingEpisodes by remember { mutableStateOf<List<StreamingEpisode>>(emptyList()) }
     var castList by remember { mutableStateOf<List<CastMember>>(emptyList()) }
     var isCastLoading by remember { mutableStateOf(true) }
-    var similarAnime by remember { mutableStateOf<List<AnimeMedia>>(emptyList()) }
+    var fetchedSimilarAnime by remember { mutableStateOf<List<AnimeMedia>>(emptyList()) }
+    val similarAnime = remember(fetchedSimilarAnime, hideNsfwContent) {
+        fetchedSimilarAnime.filterNsfw(hideNsfwContent)
+    }
     var isSimilarLoading by remember { mutableStateOf(true) }
     var friendsStatus by remember { mutableStateOf<List<FriendAnimeStatus>>(emptyList()) }
     var isFriendsLoading by remember { mutableStateOf(true) }
@@ -324,11 +343,11 @@ fun AnimeDetailScreen(
         }
         launch {
             try {
-                similarAnime = withContext(Dispatchers.IO) {
+                fetchedSimilarAnime = withContext(Dispatchers.IO) {
                     AniListClient.getSimilarAnime(currentMedia.mediaId)
                 }
             } catch (_: Exception) {
-                similarAnime = emptyList()
+                fetchedSimilarAnime = emptyList()
             } finally {
                 isSimilarLoading = false
             }
@@ -368,7 +387,7 @@ fun AnimeDetailScreen(
         } catch (_: Exception) {}
     }
 
-    LaunchedEffect(media.mediaId, anilistToken) {
+    LaunchedEffect(media.mediaId, anilistToken, anilistUsername) {
         friendsStatus = emptyList()
         isFriendsLoading = anilistToken.isNotBlank()
         if (anilistToken.isNotBlank()) {
@@ -446,10 +465,12 @@ fun AnimeDetailScreen(
     }
 
     fun saveEntry(newStatus: String?, newProgress: Int?, newScore: Double?) {
-        if (isUpdatingList) return
+        val accounts = trackingAccounts ?: return
+        if (isUpdatingList || isEntryLoading) return
         val safeProgress = (newProgress ?: currentMedia.progress).coerceIn(0, currentMedia.episodes ?: 9999)
         val resolvedStatus = (newStatus ?: currentMedia.listStatus ?: "CURRENT").uppercase()
         val previous = currentMedia
+        val account = trackingAccount.takeIf { previous.hasKnownAdultRating || accounts.nsfw == null || isNsfwForTracking }
         isUpdatingList = true
 
         scope.launch {
@@ -463,7 +484,7 @@ fun AnimeDetailScreen(
                 )
                 currentMedia = localSaved
 
-                if (anilistToken.isBlank()) {
+                if (account == null) {
                     onMediaUpdated(localSaved)
                     Toast.makeText(
                         context,
@@ -471,59 +492,31 @@ fun AnimeDetailScreen(
                         Toast.LENGTH_SHORT
                     ).show()
                 } else {
-                    try {
-                        val updated = withContext(Dispatchers.IO) {
-                            AniListClient.saveEntry(
-                                mediaId = previous.mediaId,
-                                status = resolvedStatus,
-                                progress = safeProgress,
-                                score = newScore,
-                                notes = previous.notes,
-                                isPrivate = previous.isPrivate,
-                                token = anilistToken,
-                                scoreFormat = userScoreFormat
-                            )
-                        }
-                        val merged = updated.copy(
-                            hasEnglishDubCast = updated.hasEnglishDubCast || previous.hasEnglishDubCast
+                    LocalLibraryStore.enqueueAniListUpdate(
+                        context = context,
+                        update = PendingAniListUpdate(
+                            mediaId = previous.mediaId,
+                            title = previous.title,
+                            status = resolvedStatus,
+                            progress = safeProgress,
+                            score = newScore,
+                            totalEpisodes = previous.episodes,
+                            accountUsername = account.username,
+                            accountId = account.id.takeIf { it > 0 }
                         )
-                        currentMedia = merged
-                        LocalLibraryStore.saveLocalEntry(
-                            context = context,
-                            media = merged,
-                            status = merged.listStatus,
-                            progress = merged.progress,
-                            score = merged.score
-                        )
-                        onMediaUpdated(merged)
-                        Toast.makeText(
-                            context,
-                            "Updated AniList: ${resolvedStatus.lowercase().replaceFirstChar { it.uppercase() }} (Ep $safeProgress)",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (_: Exception) {
-                        LocalLibraryStore.enqueueAniListUpdate(
-                            context = context,
-                            update = PendingAniListUpdate(
-                                mediaId = previous.mediaId,
-                                title = previous.title,
-                                status = resolvedStatus,
-                                progress = safeProgress,
-                                score = newScore,
-                                totalEpisodes = previous.episodes,
-                                isWatchedAutoBump = false,
-                                accountUsername = anilistUsername
-                            )
-                        )
-                        onMediaUpdated(localSaved)
-                        Toast.makeText(
-                            context,
-                            "Saved offline • Will sync to AniList when online",
-                            Toast.LENGTH_LONG
-                        ).show()
+                    )
+                    LocalLibraryStore.flushPendingQueue(context, accounts)
+                    val awaitingSync = LocalLibraryStore.pendingQueue.value.any {
+                        it.mediaId == previous.mediaId && it.belongsTo(account)
                     }
+                    if (!awaitingSync) entryRetry++
+                    onMediaUpdated(localSaved)
+                    Toast.makeText(
+                        context,
+                        if (awaitingSync) "Saved offline • Will sync to AniList when online"
+                        else "Updated AniList: ${resolvedStatus.lowercase().replaceFirstChar { it.uppercase() }} (Ep $safeProgress)",
+                        if (awaitingSync) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
+                    ).show()
                 }
             } finally {
                 isUpdatingList = false
@@ -532,25 +525,32 @@ fun AnimeDetailScreen(
     }
 
     fun removeFromList() {
-        if (isUpdatingList) return
+        val accounts = trackingAccounts ?: return
+        if (isUpdatingList || isEntryLoading) return
         val previous = currentMedia
+        val account = trackingAccount.takeIf { previous.hasKnownAdultRating || accounts.nsfw == null || isNsfwForTracking }
         isUpdatingList = true
         scope.launch {
             try {
-                LocalLibraryStore.removeLocalEntry(context, previous.mediaId)
-                if (anilistToken.isNotBlank() && previous.listEntryId != null) {
-                    runCatching {
-                        withContext(Dispatchers.IO) {
-                            AniListClient.deleteEntry(previous.listEntryId, anilistToken)
-                        }
-                    }
+                LocalLibraryStore.removeLocalEntry(context, previous.mediaId, account, isActiveTrackingAccount)
+                if (account != null) {
+                    LocalLibraryStore.enqueueAniListUpdate(
+                        context,
+                        PendingAniListUpdate(
+                            mediaId = previous.mediaId,
+                            title = previous.title,
+                            status = null,
+                            progress = null,
+                            score = null,
+                            totalEpisodes = previous.episodes,
+                            accountUsername = account.username,
+                            accountId = account.id.takeIf { it > 0 },
+                            isRemoval = true
+                        )
+                    )
+                    LocalLibraryStore.flushPendingQueue(context, accounts)
                 }
-                val cleared = previous.copy(
-                    listEntryId = null,
-                    listStatus = null,
-                    progress = 0,
-                    score = null
-                )
+                val cleared = previous.withoutTrackingEntry()
                 currentMedia = cleared
                 onMediaUpdated(cleared)
                 Toast.makeText(context, "Removed from My Lists.", Toast.LENGTH_SHORT).show()
@@ -577,7 +577,7 @@ fun AnimeDetailScreen(
                         listStatus = currentMedia.listStatus ?: "CURRENT"
                     )
                 }
-                if (anilistToken.isBlank() || reportProgress) {
+                if (trackingToken.isBlank() || reportProgress) {
                     onMediaUpdated(currentMedia)
                 }
             },
@@ -833,9 +833,8 @@ fun AnimeDetailScreen(
 
                         // My List / AniList Status & Score Button (Works both Logged In AND Guest!)
                         Surface(
-                            onClick = {
-                                if (!isUpdatingList) showEditPage = true
-                            },
+                            onClick = { showEditPage = true },
+                            enabled = canEditList,
                             shape = RoundedCornerShape(4.dp),
                             color = if (currentMedia.listStatus != null) CrunchyOrange.copy(alpha = 0.16f) else CrunchyCardBg,
                             border = BorderStroke(1.dp, if (currentMedia.listStatus != null) CrunchyOrange else CrunchyBorder),
@@ -1485,7 +1484,7 @@ fun AnimeDetailScreen(
                             }
                             Column {
                                 Text(
-                                    text = if (anilistToken.isNotBlank()) "AniList Status & Rating" else "My List & Rating",
+                                    text = if (trackingToken.isNotBlank()) "AniList Status & Rating" else "My List & Rating",
                                     color = Color.White,
                                     fontWeight = FontWeight.ExtraBold,
                                     fontSize = 16.5.sp
@@ -1505,7 +1504,8 @@ fun AnimeDetailScreen(
                                     newProgress = selectedProgress,
                                     newScore = selectedScore
                                 )
-                            }
+                            },
+                            enabled = canEditList
                         ) {
                             Text("SAVE", color = CrunchyOrange, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
                         }
@@ -1520,7 +1520,7 @@ fun AnimeDetailScreen(
                         contentPadding = PaddingValues(vertical = 20.dp),
                         verticalArrangement = Arrangement.spacedBy(22.dp)
                     ) {
-                        if (anilistToken.isBlank()) {
+                        if (trackingToken.isBlank()) {
                             item {
                                 GlassCard(modifier = Modifier.fillMaxWidth()) {
                                     Row(
@@ -1742,6 +1742,7 @@ fun AnimeDetailScreen(
                                             newScore = selectedScore
                                         )
                                     },
+                                    enabled = canEditList,
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .height(50.dp),
@@ -1749,7 +1750,7 @@ fun AnimeDetailScreen(
                                     colors = ButtonDefaults.buttonColors(containerColor = CrunchyOrange, contentColor = Color.Black)
                                 ) {
                                     Text(
-                                        text = if (anilistToken.isNotBlank()) "SAVE TO ANILIST" else "SAVE TO MY LIST",
+                                        text = if (trackingToken.isNotBlank()) "SAVE TO ANILIST" else "SAVE TO MY LIST",
                                         fontWeight = FontWeight.ExtraBold,
                                         fontSize = 14.sp
                                     )
@@ -1761,6 +1762,7 @@ fun AnimeDetailScreen(
                                             showEditPage = false
                                             removeFromList()
                                         },
+                                        enabled = canEditList,
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .height(48.dp),
@@ -1808,7 +1810,7 @@ fun AnimeDetailScreen(
                                 CircularProgressIndicator(color = CrunchyOrange)
                             }
                         } else {
-                            val works = activeStaffWorks?.works ?: emptyList()
+                            val works = activeStaffWorks?.works.orEmpty().filterNsfw(hideNsfwContent)
                             LazyVerticalGrid(
                                 columns = GridCells.Adaptive(140.dp),
                                 modifier = Modifier
@@ -1835,6 +1837,17 @@ fun AnimeDetailScreen(
         }
     }
 }
+
+private fun AnimeMedia.withoutTrackingEntry() = copy(
+    listEntryId = null,
+    listStatus = null,
+    progress = 0,
+    score = null,
+    notes = null,
+    isPrivate = false,
+    updatedAt = null,
+    createdAt = null
+)
 
 private fun formatListStatusName(status: String): String = when (status.uppercase()) {
     "CURRENT" -> "Watching"

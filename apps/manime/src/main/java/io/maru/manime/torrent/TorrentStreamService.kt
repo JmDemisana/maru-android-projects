@@ -183,6 +183,7 @@ class TorrentStreamService : Service() {
         const val EXTRA_AUDIO_TYPE = "extra_audio_type"
         const val EXTRA_QUALITY = "extra_quality"
         const val EXTRA_CANDIDATES_JSON = "extra_candidates_json"
+        private const val EXTRA_IS_ADULT_CONTENT = "extra_is_adult_content"
 
         const val NOTIFICATION_ID = 9002
         const val CHANNEL_ID = "nanami_anime_stream_channel"
@@ -228,6 +229,9 @@ class TorrentStreamService : Service() {
         suspend fun loadOfflineVault(context: Context) = withContext(Dispatchers.IO) {
             OfflineVault.load(context)
         }
+
+        internal suspend fun applyOfflineAdultRatings(context: Context, ratings: Map<Int, Boolean>) =
+            withContext(Dispatchers.IO) { OfflineVault.applyAdultRatings(context, ratings) }
 
         suspend fun getCompletedOfflineEpisode(context: Context, mediaId: Int, episodeNum: Int) =
             withContext(Dispatchers.IO) { OfflineVault.getCompleted(context, mediaId, episodeNum) }
@@ -293,7 +297,8 @@ class TorrentStreamService : Service() {
             thumbnailUrl: String?,
             audioType: String,
             quality: String,
-            candidates: List<OfflineDownloadCandidate> = emptyList()
+            candidates: List<OfflineDownloadCandidate> = emptyList(),
+            isAdultContent: Boolean? = null
         ) {
             val effectiveCandidates = candidates.ifEmpty {
                 listOf(
@@ -321,6 +326,7 @@ class TorrentStreamService : Service() {
                 putExtra(EXTRA_AUDIO_TYPE, primary.audioType)
                 putExtra(EXTRA_QUALITY, primary.quality)
                 putExtra(EXTRA_CANDIDATES_JSON, encodedCandidates)
+                isAdultContent?.let { putExtra(EXTRA_IS_ADULT_CONTENT, it) }
             }
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -349,7 +355,8 @@ class TorrentStreamService : Service() {
                         isCompleted = false,
                         addedAt = System.currentTimeMillis(),
                         failure = "Background download service was blocked. Open the app and tap Retry.",
-                        retryCandidatesJson = encodedCandidates
+                        retryCandidatesJson = encodedCandidates,
+                        isAdultContent = isAdultContent
                     )
                 )
             }
@@ -371,7 +378,8 @@ class TorrentStreamService : Service() {
                 thumbnailUrl = entry.thumbnailUrl,
                 audioType = entry.audioType,
                 quality = entry.quality,
-                candidates = candidates
+                candidates = candidates,
+                isAdultContent = entry.isAdultContent
             )
             return true
         }
@@ -461,6 +469,9 @@ class TorrentStreamService : Service() {
                 val audioType = intent.getStringExtra(EXTRA_AUDIO_TYPE) ?: "SUB"
                 val quality = intent.getStringExtra(EXTRA_QUALITY) ?: "1080p"
                 val candidatesJson = intent.getStringExtra(EXTRA_CANDIDATES_JSON)
+                val isAdultContent = if (intent.hasExtra(EXTRA_IS_ADULT_CONTENT)) {
+                    intent.getBooleanExtra(EXTRA_IS_ADULT_CONTENT, false)
+                } else null
 
                 launchOfflineDownload(
                     magnetUri = magnet,
@@ -473,7 +484,8 @@ class TorrentStreamService : Service() {
                     thumbnailUrl = thumbUrl,
                     audioType = audioType,
                     quality = quality,
-                    candidatesJson = candidatesJson
+                    candidatesJson = candidatesJson,
+                    isAdultContent = isAdultContent
                 )
             }
             ACTION_SERVE_OFFLINE_CAST -> {
@@ -761,7 +773,8 @@ class TorrentStreamService : Service() {
         thumbnailUrl: String?,
         audioType: String,
         quality: String,
-        candidatesJson: String? = null
+        candidatesJson: String? = null,
+        isAdultContent: Boolean? = null
     ) {
         val key = mediaId to episodeNum
         val context = applicationContext
@@ -802,7 +815,8 @@ class TorrentStreamService : Service() {
                     isCompleted = false,
                     addedAt = System.currentTimeMillis(),
                     statusText = "Connecting to source…",
-                    retryCandidatesJson = persistedCandidatesJson
+                    retryCandidatesJson = persistedCandidatesJson,
+                    isAdultContent = isAdultContent
                 )
 
                 fun publishEntry(next: OfflineEpisodeEntry) {

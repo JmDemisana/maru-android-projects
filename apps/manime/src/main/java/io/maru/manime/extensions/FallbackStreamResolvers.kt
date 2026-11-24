@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit
 /**
  * Multi-source fallback stream engine covering content that standard Stremio/Kitsu addons miss:
  * 1. Uncensored / Edgy Ecchi (`[AT-X]`, `[BD]`, `[Uncensored]`): AnimeTosho JSON + Nyaa RSS mirrors
- * 2. 18+ Adult / Hentai (`isAdult = true`): Sukebei Nyaa (`c=1_1` Art - Anime) + Sukebei mirrors
+ * 2. Uncensored Ecchi: Sukebei Nyaa (`c=1_1` Art - Anime) + Sukebei mirrors
  * 3. Music Videos (`format == "MUSIC"`), Concerts & Hard-to-Find Live Specials:
  *    - Official YouTube external links / AniList trailer IDs resolved via Piped / Invidious APIs into direct MP4/HLS
  *    - Internet Archive (`archive.org`) direct CDN `.mp4` / `.mkv` movies & concerts
@@ -74,7 +74,6 @@ internal object FallbackStreamResolvers {
         titles: List<String>,
         episodeNum: Int,
         isStandalone: Boolean,
-        isAdult: Boolean,
         isEcchi: Boolean,
         isMusicOrConcert: Boolean,
         preferredAudio: String,
@@ -91,10 +90,9 @@ internal object FallbackStreamResolvers {
         if (cleanTitles.isEmpty()) return@coroutineScope emptyList()
 
         val displayTitle = cleanTitles.first()
-        val isAdultOrEcchi = isAdult || isEcchi
         val tasks = buildList {
-            // 1. 18+ Adult / Hentai & Uncensored Ecchi -> Sukebei Nyaa (Art - Anime c=1_1)
-            if (isAdultOrEcchi) {
+            // 1. Uncensored Ecchi -> Sukebei Nyaa (Art - Anime c=1_1)
+            if (isEcchi) {
                 for (t in cleanTitles.take(3)) {
                     val cleanBase = cleanAnimeTitle(t).ifBlank { t }
                     add(async(Dispatchers.IO) {
@@ -108,7 +106,7 @@ internal object FallbackStreamResolvers {
                             isAdultOrEcchi = true,
                             preferredAudio = preferredAudio,
                             preferredQuality = preferredQuality,
-                            sourceLabelPrefix = if (isAdult) "Adult Vault" else "Uncensored Vault"
+                            sourceLabelPrefix = "Uncensored Vault"
                         )
                     })
                 }
@@ -118,7 +116,6 @@ internal object FallbackStreamResolvers {
             // Catches English-translated anime (c=1_2) and general anime (c=1_0), or all categories (c=0_0) for concerts
             val nyaaCategories = when {
                 isMusicOrConcert -> listOf("0_0")
-                isAdultOrEcchi -> listOf("1_2", "1_0")
                 else -> listOf("1_2", "1_0")
             }
             for (t in cleanTitles.take(3)) {
@@ -132,10 +129,10 @@ internal object FallbackStreamResolvers {
                             allTitles = cleanTitles,
                             episodeNum = episodeNum,
                             isStandalone = isStandalone || isMusicOrConcert,
-                            isAdultOrEcchi = isAdultOrEcchi,
+                            isAdultOrEcchi = isEcchi,
                             preferredAudio = preferredAudio,
                             preferredQuality = preferredQuality,
-                            sourceLabelPrefix = if (isMusicOrConcert) "Concert / MV Archive" else if (isAdultOrEcchi) "Ecchi / Archive" else "Archive"
+                            sourceLabelPrefix = if (isMusicOrConcert) "Concert / MV Archive" else if (isEcchi) "Ecchi / Archive" else "Archive"
                         )
                     })
                 }

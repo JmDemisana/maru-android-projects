@@ -126,6 +126,7 @@ fun AppNavigation(prefs: MAnimePrefs) {
 
     val session by prefs.anilistSession.collectAsStateWithLifecycle(initialValue = null)
     val savedAccounts by prefs.savedAnilistAccounts.collectAsStateWithLifecycle(initialValue = emptyList())
+    val trackingAccounts by prefs.trackingAccounts.collectAsStateWithLifecycle(initialValue = AniListTrackingAccounts())
     val anilistToken = session?.token.orEmpty()
     val anilistUsername = session?.username.orEmpty()
     val scoreFormat by prefs.anilistScoreFormat.collectAsStateWithLifecycle(initialValue = "POINT_100")
@@ -138,6 +139,13 @@ fun AppNavigation(prefs: MAnimePrefs) {
     val subtitleBlackFill by prefs.subtitleBlackFill.collectAsStateWithLifecycle(initialValue = true)
     val subtitleSize by prefs.subtitleSize.collectAsStateWithLifecycle(initialValue = "MEDIUM")
     val persistentDurationLine by prefs.persistentDurationLine.collectAsStateWithLifecycle(initialValue = false)
+    val hideNsfwPreference by prefs.hideNsfwContent.collectAsStateWithLifecycle(initialValue = true)
+    val nsfwAnilistAccountId by prefs.nsfwAnilistAccountId.collectAsStateWithLifecycle(initialValue = null)
+    val contentOptions = session?.contentOptions
+    val canShowNsfwContent = anilistToken.isNotBlank() && contentOptions?.displayAdultContent == true
+    val hideNsfwContent = hideNsfwPreference || !canShowNsfwContent
+    val hideNsfwSearch = hideNsfwContent || contentOptions?.includeAdultContentInSearch != true
+    val hideNsfwActivities = hideNsfwContent || contentOptions?.displayAdultActivities != true
 
     val localEntries by LocalLibraryStore.localEntries.collectAsStateWithLifecycle()
     val pendingQueue by LocalLibraryStore.pendingQueue.collectAsStateWithLifecycle()
@@ -165,6 +173,7 @@ fun AppNavigation(prefs: MAnimePrefs) {
     }
 
     fun openAnime(media: AnimeMedia) {
+        if (hideNsfwContent && !media.isVisibleWithNsfwHidden) return
         if ((detailStack.lastOrNull() as? ScreenRoute.Anime)?.media?.mediaId == media.mediaId) return
         detailStack = detailStack + ScreenRoute.Anime(media, nextRouteId++)
     }
@@ -178,6 +187,17 @@ fun AppNavigation(prefs: MAnimePrefs) {
         if (detailStack.lastOrNull() == route) {
             screenStateHolder.removeState(route.stateKey)
             detailStack = detailStack.dropLast(1)
+        }
+    }
+
+    LaunchedEffect(hideNsfwContent, detailStack) {
+        if (hideNsfwContent) {
+            val hiddenRoutes = detailStack.filterIsInstance<ScreenRoute.Anime>()
+                .filterNot { it.media.isVisibleWithNsfwHidden }
+            if (hiddenRoutes.isNotEmpty()) {
+                hiddenRoutes.forEach { screenStateHolder.removeState(it.stateKey) }
+                detailStack = detailStack - hiddenRoutes.toSet()
+            }
         }
     }
 
@@ -197,14 +217,13 @@ fun AppNavigation(prefs: MAnimePrefs) {
     var profileRefresh by remember { mutableIntStateOf(0) }
 
     // Automatically flush queued 80%-watch & offline AniList edits as soon as internet reconnects!
-    val accountPendingCount = remember(pendingQueue, anilistUsername) {
-        if (anilistUsername.isBlank()) pendingQueue.size
-        else pendingQueue.count { it.accountUsername.isBlank() || it.accountUsername.equals(anilistUsername, ignoreCase = true) }
+    val accountPendingCount = remember(pendingQueue, trackingAccounts) {
+        pendingQueue.count { trackingAccounts.forUpdate(it) != null }
     }
 
-    LaunchedEffect(isOnline, anilistToken, anilistUsername, accountPendingCount) {
-        if (isOnline && anilistToken.isNotBlank() && accountPendingCount > 0) {
-            val synced = LocalLibraryStore.flushPendingQueue(context, anilistToken, scoreFormat, anilistUsername)
+    LaunchedEffect(isOnline, trackingAccounts, accountPendingCount) {
+        if (isOnline && accountPendingCount > 0) {
+            val synced = LocalLibraryStore.flushPendingQueue(context, trackingAccounts)
             if (synced > 0) {
                 profileRefresh++
                 Toast.makeText(
@@ -217,16 +236,35 @@ fun AppNavigation(prefs: MAnimePrefs) {
     }
 
     // Unified lists: works seamlessly in Guest Mode (localEntries) AND AniList Mode (remote + offline queue)!
-    val mergedLists = remember(userAnimeLists, localEntries, pendingQueue, anilistToken, anilistUsername) {
+    val activeTrackingAccountId = trackingAccounts.active?.id?.takeIf { it > 0 }
+    val mergedLists = remember(userAnimeLists, localEntries, pendingQueue, anilistToken, anilistUsername, activeTrackingAccountId) {
         LocalLibraryStore.buildMergedLists(
             remoteLists = userAnimeLists,
             localMap = localEntries,
             pending = pendingQueue,
             isLoggedIn = anilistToken.isNotBlank(),
-            activeUsername = anilistUsername
+            activeUsername = anilistUsername,
+            activeAccountId = activeTrackingAccountId
         )
     }
-    val library = remember(mergedLists) { mergedLists.values.flatten().distinctBy { it.mediaId } }
+    val visibleLists = remember(mergedLists, hideNsfwContent) {
+        mergedLists.mapValues { (_, entries) -> entries.filterNsfw(hideNsfwContent) }
+    }
+    val legacyAdultRatingIds = remember(localEntries, offlineEpisodes) {
+        (localEntries.values.filterNot { it.hasKnownAdultRating }.map { it.mediaId } +
+            offlineEpisodes.filter { it.isCompleted && it.isAdultContent == null }.map { it.mediaId })
+            .distinct()
+    }
+    LaunchedEffect(isOnline, anilistToken, legacyAdultRatingIds) {
+        if (isOnline && legacyAdultRatingIds.isNotEmpty()) {
+            loadAniList {
+                val ratings = AniListClient.getAdultContentRatings(legacyAdultRatingIds, anilistToken.ifBlank { null })
+                TorrentStreamService.applyOfflineAdultRatings(context, ratings)
+                LocalLibraryStore.applyAdultRatings(context, ratings)
+            }
+        }
+    }
+    val library = remember(visibleLists) { visibleLists.values.flatten().distinctBy { it.mediaId } }
     val watchingList = remember(library) {
         library.filter { it.listStatus in listOf("CURRENT", "REPEATING") }
     }
@@ -323,7 +361,9 @@ fun AppNavigation(prefs: MAnimePrefs) {
         AniListUser(id = 0, name = it.username, avatarUrl = it.avatarUrl, scoreFormat = scoreFormat)
     }
 
-    val completedDownloads = remember(offlineEpisodes) { offlineEpisodes.filter { it.isCompleted } }
+    val completedDownloads = remember(offlineEpisodes, hideNsfwContent) {
+        offlineEpisodes.filter { it.isCompleted && (!hideNsfwContent || it.isAdultContent == false) }
+    }
     val offlineTotalMb = remember(completedDownloads) {
         completedDownloads.sumOf { it.sizeBytes } / (1024L * 1024L)
     }
@@ -557,24 +597,28 @@ fun AppNavigation(prefs: MAnimePrefs) {
                 ) { route ->
                     when (route) {
                         is ScreenRoute.Anime -> screenStateHolder.SaveableStateProvider(route.stateKey) {
-                            AnimeDetailScreen(
-                                media = route.media,
-                                anilistToken = anilistToken,
-                                anilistUsername = anilistUsername,
-                                prefs = prefs,
-                                isActive = route == currentRoute,
-                                onBack = { closeRoute(route) },
-                                onMediaUpdated = { profileRefresh++ },
-                                onAnimeClick = { if (route == currentRoute) openAnime(it) },
-                                onUserClick = { if (route == currentRoute) openUser(it) },
-                                onLoginClick = { openAuthDialog(clearCookies = false) }
-                            )
+                            if (!hideNsfwContent || route.media.isVisibleWithNsfwHidden) {
+                                AnimeDetailScreen(
+                                    media = route.media,
+                                    anilistToken = anilistToken,
+                                    anilistUsername = anilistUsername,
+                                    prefs = prefs,
+                                    isActive = route == currentRoute,
+                                    hideNsfwContent = hideNsfwContent,
+                                    onBack = { closeRoute(route) },
+                                    onMediaUpdated = { profileRefresh++ },
+                                    onAnimeClick = { if (route == currentRoute) openAnime(it) },
+                                    onUserClick = { if (route == currentRoute) openUser(it) },
+                                    onLoginClick = { openAuthDialog(clearCookies = false) }
+                                )
+                            }
                         }
                         is ScreenRoute.User -> screenStateHolder.SaveableStateProvider(route.stateKey) {
                             UserProfileScreen(
                                 username = route.username,
                                 anilistToken = anilistToken,
                                 isActive = route == currentRoute,
+                                hideNsfwContent = hideNsfwContent,
                                 onBack = { closeRoute(route) },
                                 onAnimeClick = { if (route == currentRoute) openAnime(it) },
                                 onUserClick = { if (route == currentRoute) openUser(it) }
@@ -586,9 +630,11 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     user = effectiveUser,
                                     anilistToken = anilistToken,
                                     watchingList = watchingList,
-                                    trendingList = trendingList,
-                                    simulcastList = simulcastList,
-                                    activitiesList = activitiesList,
+                                    trendingList = trendingList.filterNsfw(hideNsfwContent),
+                                    simulcastList = simulcastList.filterNsfw(hideNsfwContent),
+                                    activitiesList = if (hideNsfwActivities) activitiesList.filter {
+                                        it.type == "TEXT" || it.rawMedia?.isVisibleWithNsfwHidden == true
+                                    } else activitiesList,
                                     isLoading = isDashboardLoading,
                                     loadFailed = dashboardLoadFailed,
                                     isActivityLoading = isActivityLoading,
@@ -605,9 +651,10 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     onUserClick = ::openUser
                                 )
                                 NavigationScreen.PROFILE -> ProfileScreen(
-                                    allLists = mergedLists,
+                                    allLists = visibleLists,
                                     anilistToken = anilistToken,
                                     prefs = prefs,
+                                    hideNsfwContent = hideNsfwContent,
                                     pendingSyncCount = accountPendingCount,
                                     isSyncingQueue = isSyncingQueue,
                                     isLoading = isProfileLoading,
@@ -620,7 +667,8 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                 )
                                 NavigationScreen.SEARCH -> SearchScreen(
                                     anilistToken = anilistToken,
-                                    browseItems = recommendations,
+                                    browseItems = recommendations.filterNsfw(hideNsfwContent),
+                                    hideNsfwContent = hideNsfwSearch,
                                     isBrowseLoading = isRecLoading,
                                     browseLoadFailed = recLoadFailed,
                                     onRetryBrowse = { recRefresh++ },
@@ -638,16 +686,16 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     anilistUsername = anilistUsername,
                                     isLoggedIn = anilistToken.isNotBlank(),
                                     savedAccounts = savedAccounts,
+                                    hideNsfwContent = hideNsfwContent,
+                                    canShowNsfwContent = canShowNsfwContent,
+                                    onToggleHideNsfwContent = { value -> scope.launch { prefs.setHideNsfwContent(value) } },
+                                    nsfwAnilistAccountId = nsfwAnilistAccountId,
+                                    onSelectNsfwAnilistAccount = { accountId -> scope.launch { prefs.setNsfwAnilistAccountId(accountId) } },
                                     pendingSyncCount = accountPendingCount,
                                     isSyncingQueue = isSyncingQueue,
                                     onSyncNow = {
                                         scope.launch {
-                                            val synced = LocalLibraryStore.flushPendingQueue(
-                                                context,
-                                                anilistToken,
-                                                scoreFormat,
-                                                anilistUsername
-                                            )
+                                            val synced = LocalLibraryStore.flushPendingQueue(context, trackingAccounts)
                                             if (synced > 0) profileRefresh++
                                         }
                                     },

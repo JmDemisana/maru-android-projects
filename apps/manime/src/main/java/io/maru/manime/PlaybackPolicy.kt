@@ -22,6 +22,9 @@ data class ContentAdvisory(
         get() = ageRating == "18+" || ageRating == "16+"
 }
 
+internal fun isExplicitAdultAnime(isAdult: Boolean, genres: List<String>): Boolean =
+    isAdult || genres.any { it.trim().equals("Hentai", ignoreCase = true) }
+
 /**
  * Computes Netflix / Crunchyroll-style TV maturity rating and content descriptors
  * shown during the opening seconds of video playback.
@@ -50,7 +53,7 @@ internal fun deriveContentAdvisory(
     val warnings = linkedSetOf<String>()
     var severity = 0 // 0 = PG, 1 = 14+, 2 = 16+, 3 = 18+
 
-    if (isAdult || "hentai" in genreSet) {
+    if (isExplicitAdultAnime(isAdult, genres)) {
         severity = 3
     }
 
@@ -88,7 +91,7 @@ internal fun deriveContentAdvisory(
     }
 
     // 2. Sexual Content / Suggestive Themes (ignoring magical girl transformation silhouettes!)
-    if (isAdult || "hentai" in genreSet) {
+    if (isExplicitAdultAnime(isAdult, genres)) {
         if (hasTag("nudity", minRank = 50)) warnings += "Nudity"
         warnings += "Sexual Content"
         severity = 3

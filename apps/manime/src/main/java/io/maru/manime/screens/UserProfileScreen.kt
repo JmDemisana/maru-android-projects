@@ -47,6 +47,7 @@ fun UserProfileScreen(
     username: String,
     anilistToken: String,
     isActive: Boolean = true,
+    hideNsfwContent: Boolean = true,
     onBack: () -> Unit,
     onAnimeClick: (AnimeMedia) -> Unit,
     onUserClick: (String) -> Unit
@@ -147,13 +148,16 @@ fun UserProfileScreen(
         }
     } else {
         val u = profile!!
-        val availableCategories = remember(u.userLists) {
-            if (u.userLists.isEmpty()) listOf("Watching", "Planning", "Completed")
-            else u.userLists.keys.toList()
+        val visibleLists = remember(u.userLists, hideNsfwContent) {
+            u.userLists.mapValues { (_, entries) -> entries.filterNsfw(hideNsfwContent) }
+        }
+        val availableCategories = remember(visibleLists) {
+            if (visibleLists.isEmpty()) listOf("Watching", "Planning", "Completed")
+            else visibleLists.keys.toList()
         }
         var selectedCategory by rememberSaveable(availableCategories) { mutableStateOf(availableCategories.firstOrNull() ?: "Watching") }
-        val currentCategoryList = remember(u.userLists, selectedCategory) {
-            u.userLists[selectedCategory].orEmpty().distinctBy { it.mediaId }
+        val currentCategoryList = remember(visibleLists, selectedCategory) {
+            visibleLists[selectedCategory].orEmpty().distinctBy { it.mediaId }
         }
 
         LaunchedEffect(currentCategoryList) {
@@ -352,7 +356,7 @@ fun UserProfileScreen(
                             ) {
                                 availableCategories.forEach { category ->
                                     val isSelected = selectedCategory.equals(category, ignoreCase = true)
-                                    val count = u.userLists[category]?.size ?: 0
+                                    val count = visibleLists[category]?.size ?: 0
                                     Surface(
                                         onClick = { selectedCategory = category },
                                         shape = MaruPillShape,

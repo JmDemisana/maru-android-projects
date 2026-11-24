@@ -2,6 +2,7 @@ package io.maru.manime.extensions
 
 import io.maru.manime.StreamingEpisode
 import io.maru.manime.cleanAnimeTitle
+import io.maru.manime.isExplicitAdultAnime
 import io.maru.manime.readResponse
 import kotlinx.coroutines.*
 import kotlinx.coroutines.selects.select
@@ -579,8 +580,9 @@ object CrunchyrollStreamEngine {
             .map { it.trim() }
             .filter { it.length >= 2 }
             .distinct()
-        val isEcchi = genres.any { it.equals("Ecchi", true) || it.equals("Hentai", true) }
-        val runFallbackImmediately = lookups.isEmpty() || isAdult || isEcchi || isMusicOrConcert
+        val isExplicitAdult = isExplicitAdultAnime(isAdult, genres)
+        val isEcchi = genres.any { it.equals("Ecchi", true) }
+        val runFallbackImmediately = !isExplicitAdult && (lookups.isEmpty() || isEcchi || isMusicOrConcert)
 
         val displayName = URLEncoder.encode("$animeTitle - Episode $episodeNum", "UTF-8")
 
@@ -667,7 +669,6 @@ object CrunchyrollStreamEngine {
                         titles = candidateTitles,
                         episodeNum = episodeNum,
                         isStandalone = isStandalone,
-                        isAdult = isAdult,
                         isEcchi = isEcchi,
                         isMusicOrConcert = isMusicOrConcert,
                         preferredAudio = preferredAudio,
@@ -680,12 +681,20 @@ object CrunchyrollStreamEngine {
         }
 
         val initial = if (jobs.isEmpty()) emptyList() else collectRankedStreams(jobs, onStreamsUpdated)
-        if (!runFallbackImmediately && (initial.isEmpty() || initial.all { it.isTorrent && it.seeders == 0 })) {
+        val needsFallback = initial.isEmpty() || initial.all { it.isTorrent && it.seeders == 0 }
+        if (isExplicitAdult) {
+            if (!needsFallback) return@coroutineScope initial
+            val verified = HstreamResolver.resolve(anilistId, episodeNum)
+            if (verified.isEmpty()) return@coroutineScope initial
+            val options = verified + initial
+            onStreamsUpdated(options)
+            return@coroutineScope options
+        }
+        if (!runFallbackImmediately && needsFallback) {
             val fallback = FallbackStreamResolvers.resolveFallbackStreams(
                 titles = candidateTitles,
                 episodeNum = episodeNum,
                 isStandalone = isStandalone,
-                isAdult = isAdult,
                 isEcchi = isEcchi,
                 isMusicOrConcert = isMusicOrConcert,
                 preferredAudio = preferredAudio,

@@ -69,7 +69,7 @@ private fun OfflineEpisodeEntry.toAnimeSummary() = AnimeMedia(
     genres = emptyList(),
     description = null,
     siteUrl = null,
-    isAdult = false,
+    isAdult = isAdultContent == true,
     nextEpisode = null,
     nextEpisodeAt = null,
     externalLinks = emptyList(),
@@ -80,7 +80,8 @@ private fun OfflineEpisodeEntry.toAnimeSummary() = AnimeMedia(
     notes = null,
     isPrivate = false,
     updatedAt = null,
-    hasEnglishDubCast = audioType == "DUB" || audioType == "DUAL_AUDIO" || KnownDubRegistry.isKnownDub(mediaId)
+    hasEnglishDubCast = audioType == "DUB" || audioType == "DUAL_AUDIO" || KnownDubRegistry.isKnownDub(mediaId),
+    hasKnownAdultRating = isAdultContent != null
 )
 
 private val defaultAniListTabs = listOf("Watching", "Planning", "Completed", "Paused", "Dropped")
@@ -123,6 +124,7 @@ fun ProfileScreen(
     allLists: Map<String, List<AnimeMedia>>,
     anilistToken: String,
     prefs: MAnimePrefs? = null,
+    hideNsfwContent: Boolean = true,
     pendingSyncCount: Int = 0,
     isSyncingQueue: Boolean = false,
     isLoading: Boolean = false,
@@ -135,7 +137,10 @@ fun ProfileScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val offlineEpisodes by TorrentStreamService.offlineEpisodes.collectAsState()
+    val allOfflineEpisodes by TorrentStreamService.offlineEpisodes.collectAsState()
+    val offlineEpisodes = remember(allOfflineEpisodes, hideNsfwContent) {
+        if (hideNsfwContent) allOfflineEpisodes.filter { it.isAdultContent == false } else allOfflineEpisodes
+    }
     var activeOfflinePlaying by remember { mutableStateOf<OfflineEpisodeEntry?>(null) }
     var selectedOfflineSeriesId by rememberSaveable { mutableStateOf<Int?>(null) }
     var selectedCategory by rememberSaveable { mutableStateOf("Downloads") }
@@ -154,7 +159,15 @@ fun ProfileScreen(
     }
 
     val notifyPlaybackVisibility by rememberUpdatedState(onPlaybackVisibilityChange)
-    val isOfflinePlayerVisible = activeOfflinePlaying != null && prefs != null
+    val playingEntry = activeOfflinePlaying?.takeUnless { hideNsfwContent && it.isAdultContent != false }
+    val isOfflinePlayerVisible = playingEntry != null && prefs != null
+
+    LaunchedEffect(hideNsfwContent, isVaultLoading) {
+        if (hideNsfwContent && activeOfflinePlaying?.isAdultContent != false) activeOfflinePlaying = null
+        if (!isVaultLoading && selectedOfflineSeriesId != null && offlineEpisodes.none { it.mediaId == selectedOfflineSeriesId }) {
+            selectedOfflineSeriesId = null
+        }
+    }
 
     LaunchedEffect(Unit) {
         TorrentStreamService.loadOfflineVault(context)
@@ -168,12 +181,15 @@ fun ProfileScreen(
         }
     }
 
-    val playingEntry = activeOfflinePlaying
     if (playingEntry != null && prefs != null) {
         val entry = playingEntry
         val preferredAudio by prefs.preferredAudio.collectAsState(initial = "SUB")
         val cachedMedia = allLists.values.asSequence().flatten().firstOrNull { it.mediaId == entry.mediaId }
-        val playerMedia = cachedMedia ?: entry.toAnimeSummary()
+        val playerMedia = cachedMedia?.let { media ->
+            if (!media.hasKnownAdultRating && entry.isAdultContent != null) {
+                media.copy(isAdult = entry.isAdultContent, hasKnownAdultRating = true)
+            } else media
+        } ?: entry.toAnimeSummary()
         val seriesCompletedEps = remember(offlineEpisodes, entry.mediaId) {
             offlineEpisodes
                 .filter { it.mediaId == entry.mediaId && it.isCompleted }
@@ -254,7 +270,7 @@ fun ProfileScreen(
     fun retryFailedDownload(item: OfflineEpisodeEntry) {
         val key = item.mediaId to item.episodeNumber
         if (retryingDownloads[key] == true) return
-        if (TorrentStreamService.retryOfflineDownload(context, item)) {
+        if (item.isAdultContent == false && TorrentStreamService.retryOfflineDownload(context, item)) {
             Toast.makeText(context, "Retrying Episode ${item.episodeNumber} download…", Toast.LENGTH_SHORT).show()
             return
         }
@@ -267,7 +283,8 @@ fun ProfileScreen(
                     animeTitle = item.animeTitle,
                     episodeNum = item.episodeNumber,
                     preferredAudio = item.audioType.takeIf { it == "DUB" || it == "SUB" } ?: "SUB",
-                    preferredQuality = prefQual
+                    preferredQuality = prefQual,
+                    isAdult = item.isAdultContent == true
                 )
                 val candidates = selectDownloadCandidates(streams, item.audioType)
                 if (candidates.isEmpty()) {
@@ -286,7 +303,8 @@ fun ProfileScreen(
                         thumbnailUrl = item.thumbnailUrl,
                         audioType = primary.audioType,
                         quality = primary.quality,
-                        candidates = candidates
+                        candidates = candidates,
+                        isAdultContent = item.isAdultContent
                     )
                 }
             } catch (e: CancellationException) {

@@ -50,6 +50,7 @@ private val browseCategories = listOf(
 fun SearchScreen(
     anilistToken: String,
     browseItems: List<AnimeMedia> = emptyList(),
+    hideNsfwContent: Boolean = true,
     isBrowseLoading: Boolean = false,
     browseLoadFailed: Boolean = false,
     onRetryBrowse: () -> Unit = {},
@@ -71,7 +72,7 @@ fun SearchScreen(
     val term = query.trim()
     val token = anilistToken.takeUnless { searchUsers || it.isBlank() }
     var submitCount by remember(term, searchUsers) { mutableIntStateOf(0) }
-    var animeResults by remember(term, searchUsers, token) { mutableStateOf<List<AnimeMedia>>(emptyList()) }
+    var animeResults by remember(term, searchUsers, token, hideNsfwContent) { mutableStateOf<List<AnimeMedia>>(emptyList()) }
     var userResults by remember(term, searchUsers, token) { mutableStateOf<List<AniListProfile>>(emptyList()) }
     var isSearching by remember(term, searchUsers, token) { mutableStateOf(term.isNotEmpty()) }
     var isDebouncing by remember(term, searchUsers, token) { mutableStateOf(term.isNotEmpty()) }
@@ -84,7 +85,7 @@ fun SearchScreen(
         keyboard?.hide()
     }
 
-    LaunchedEffect(term, searchUsers, token, submitCount) {
+    LaunchedEffect(term, searchUsers, token, submitCount, hideNsfwContent) {
         if (term.isEmpty()) return@LaunchedEffect
         isSearching = true
         searchFailed = false
@@ -97,7 +98,7 @@ fun SearchScreen(
                 }
             } else {
                 animeResults = withContext(Dispatchers.IO) {
-                    AniListClient.search(term, 1, 32, token).results.distinctBy { it.mediaId }
+                    AniListClient.search(term, 1, 32, token, hideNsfwContent).results.distinctBy { it.mediaId }
                 }
             }
         } catch (e: CancellationException) {

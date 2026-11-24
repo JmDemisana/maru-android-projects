@@ -29,7 +29,8 @@ data class OfflineEpisodeEntry(
     val downloadSpeedKbps: Int = 0,
     val connectedPeers: Int = 0,
     val statusText: String? = null,
-    val retryCandidatesJson: String? = null
+    val retryCandidatesJson: String? = null,
+    val isAdultContent: Boolean? = null
 )
 
 internal object OfflineVault {
@@ -89,6 +90,20 @@ internal object OfflineVault {
         }
     }
 
+    fun applyAdultRatings(context: Context, ratings: Map<Int, Boolean>) = synchronized(lock) {
+        val current = load(context)
+        val updated = current.map { entry ->
+            val rating = ratings[entry.mediaId]
+            if (entry.isCompleted && entry.isAdultContent == null && rating != null) {
+                entry.copy(isAdultContent = rating)
+            } else entry
+        }
+        if (updated != current) {
+            persist(context, updated)
+            entries.value = updated
+        }
+    }
+
     fun delete(context: Context, mediaId: Int, episodeNumber: Int): Boolean = synchronized(lock) {
         val current = load(context)
         val entry = current.firstOrNull {
@@ -126,6 +141,7 @@ internal object OfflineVault {
                 put("progressPercent", entry.progressPercent)
                 put("isCompleted", entry.isCompleted)
                 put("addedAt", entry.addedAt)
+                entry.isAdultContent?.let { put("isAdultContent", it) }
             })
         }
         val index = index(context)
@@ -170,7 +186,8 @@ internal fun readOfflineIndex(vaultDir: File, json: String): List<OfflineEpisode
             downloadedBytes = size,
             progressPercent = 100,
             isCompleted = true,
-            addedAt = saved.optLong("addedAt", file.lastModified())
+            addedAt = saved.optLong("addedAt", file.lastModified()),
+            isAdultContent = saved.opt("isAdultContent") as? Boolean
         )
     }.distinctBy { it.mediaId to it.episodeNumber }
 }

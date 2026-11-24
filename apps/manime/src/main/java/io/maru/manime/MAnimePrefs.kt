@@ -6,6 +6,7 @@ import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
@@ -18,7 +19,8 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
 internal data class AniListSession(
     val token: String = "",
     val username: String = "",
-    val avatarUrl: String? = null
+    val avatarUrl: String? = null,
+    val contentOptions: AniListContentOptions? = null
 )
 
 data class SavedAniListAccount(
@@ -26,8 +28,30 @@ data class SavedAniListAccount(
     val username: String,
     val avatarUrl: String?,
     val scoreFormat: String = "POINT_100",
-    val token: String
+    val token: String,
+    val contentOptions: AniListContentOptions? = null
 )
+
+internal data class AniListTrackingAccounts(
+    val active: SavedAniListAccount? = null,
+    val nsfw: SavedAniListAccount? = null,
+    private val saved: List<SavedAniListAccount> = emptyList()
+) {
+    fun forTitle(isNsfw: Boolean): SavedAniListAccount? {
+        if (active == null) return null
+        return if (isNsfw) nsfw ?: active else active
+    }
+
+    fun forUpdate(update: PendingAniListUpdate): SavedAniListAccount? {
+        val session = active ?: return null
+        val id = update.accountId
+        return if (id != null) {
+            session.takeIf { it.id == id } ?: saved.firstOrNull { it.id == id }
+        } else {
+            session.takeIf { update.belongsTo(it, includeUnassigned = true) }
+        }
+    }
+}
 
 class MAnimePrefs(private val context: Context) {
     companion object {
@@ -36,6 +60,9 @@ class MAnimePrefs(private val context: Context) {
         val KEY_ANILIST_AVATAR      = stringPreferencesKey("anilist_avatar")
         val KEY_ANILIST_SCORE_FMT   = stringPreferencesKey("anilist_score_format")
         val KEY_ANILIST_ACCOUNTS    = stringPreferencesKey("anilist_saved_accounts_json")
+        private val KEY_ANILIST_CONTENT_OPTIONS = stringPreferencesKey("anilist_content_options")
+        private val KEY_HIDE_NSFW_CONTENT = booleanPreferencesKey("hide_nsfw_content")
+        private val KEY_NSFW_ANILIST_ACCOUNT_ID = intPreferencesKey("nsfw_anilist_account_id")
         val KEY_EXT_TYPE            = stringPreferencesKey("extension_type") // CLOUDSTREAM | ANIYOMI | STREMIO
         val KEY_STREMIO_URL         = stringPreferencesKey("stremio_url")
         val KEY_STREMIO_ADDONS      = stringSetPreferencesKey("stremio_addon_urls")
@@ -74,7 +101,8 @@ class MAnimePrefs(private val context: Context) {
         AniListSession(
             token = it[KEY_ANILIST_TOKEN].orEmpty(),
             username = it[KEY_ANILIST_USERNAME].orEmpty(),
-            avatarUrl = it[KEY_ANILIST_AVATAR]?.takeIf(String::isNotBlank)
+            avatarUrl = it[KEY_ANILIST_AVATAR]?.takeIf(String::isNotBlank),
+            contentOptions = it.readAniListContentOptions()
         )
     }
     val savedAnilistAccounts: Flow<List<SavedAniListAccount>> = context.dataStore.data.map { prefs ->
@@ -92,11 +120,36 @@ class MAnimePrefs(private val context: Context) {
                     username = activeUsername,
                     avatarUrl = prefs[KEY_ANILIST_AVATAR]?.takeIf(String::isNotBlank),
                     scoreFormat = prefs[KEY_ANILIST_SCORE_FMT] ?: "POINT_100",
-                    token = activeToken
+                    token = activeToken,
+                    contentOptions = prefs.readAniListContentOptions()
                 )
             )
         }
         parsed
+    }
+    val nsfwAnilistAccountId: Flow<Int?> = context.dataStore.data.map { it[KEY_NSFW_ANILIST_ACCOUNT_ID] }
+        .distinctUntilChanged()
+    internal val trackingAccounts: Flow<AniListTrackingAccounts> = context.dataStore.data.map { prefs ->
+        val saved = parseAccountsJson(prefs[KEY_ANILIST_ACCOUNTS])
+        val token = prefs[KEY_ANILIST_TOKEN].orEmpty()
+        val username = prefs[KEY_ANILIST_USERNAME].orEmpty()
+        val active = token.takeIf(String::isNotBlank)?.let {
+            saved.firstOrNull { account -> account.token == token } ?: SavedAniListAccount(
+                id = 0,
+                username = username,
+                avatarUrl = prefs[KEY_ANILIST_AVATAR],
+                scoreFormat = prefs[KEY_ANILIST_SCORE_FMT] ?: "POINT_100",
+                token = token
+            )
+        }
+        AniListTrackingAccounts(active, saved.firstOrNull { it.id == prefs[KEY_NSFW_ANILIST_ACCOUNT_ID] }, saved)
+    }.distinctUntilChanged()
+
+    suspend fun setNsfwAnilistAccountId(accountId: Int?) = context.dataStore.edit { prefs ->
+        if (accountId == null) prefs.remove(KEY_NSFW_ANILIST_ACCOUNT_ID)
+        else if (accountId > 0 && parseAccountsJson(prefs[KEY_ANILIST_ACCOUNTS]).any { it.id == accountId }) {
+            prefs[KEY_NSFW_ANILIST_ACCOUNT_ID] = accountId
+        }
     }
     val anilistScoreFormat: Flow<String> = context.dataStore.data.map { it[KEY_ANILIST_SCORE_FMT] ?: "POINT_100" }
     val extensionType: Flow<String> = context.dataStore.data.map { it[KEY_EXT_TYPE] ?: EXT_STREMIO }
@@ -115,6 +168,7 @@ class MAnimePrefs(private val context: Context) {
     val subtitleSize: Flow<String> = context.dataStore.data.map { it[KEY_SUBTITLE_SIZE] ?: "MEDIUM" }
     val persistentDurationLine: Flow<Boolean> = context.dataStore.data.map { it[KEY_PERSISTENT_DURATION_LINE] ?: false }
     val myListsSortOption: Flow<String> = context.dataStore.data.map { it[KEY_MY_LISTS_SORT_OPTION] ?: "RECENTLY_ADDED" }
+    val hideNsfwContent: Flow<Boolean> = context.dataStore.data.map { it[KEY_HIDE_NSFW_CONTENT] ?: true }
 
     // --- Suspend setters ---
     suspend fun setAnilistSession(token: String, viewer: AniListUser) = context.dataStore.edit { prefs ->
@@ -126,7 +180,8 @@ class MAnimePrefs(private val context: Context) {
             username = viewer.name,
             avatarUrl = viewer.avatarUrl,
             scoreFormat = viewer.scoreFormat,
-            token = token
+            token = token,
+            contentOptions = viewer.contentOptions
         )
         val existingIdx = list.indexOfFirst {
             (viewer.id > 0 && it.id == viewer.id) || it.username.equals(viewer.name, ignoreCase = true)
@@ -141,7 +196,7 @@ class MAnimePrefs(private val context: Context) {
         val idx = list.indexOfFirst {
             it.token == token || it.username.equals(viewer.name, ignoreCase = true)
         }
-        val updated = SavedAniListAccount(viewer.id, viewer.name, viewer.avatarUrl, viewer.scoreFormat, token)
+        val updated = SavedAniListAccount(viewer.id, viewer.name, viewer.avatarUrl, viewer.scoreFormat, token, viewer.contentOptions)
         if (idx >= 0) list[idx] = updated else if (prefs[KEY_ANILIST_TOKEN] == token) list.add(updated)
         if (list.isNotEmpty()) prefs[KEY_ANILIST_ACCOUNTS] = encodeAccountsJson(list)
     }
@@ -150,6 +205,7 @@ class MAnimePrefs(private val context: Context) {
         prefs[KEY_ANILIST_TOKEN] = account.token
         prefs[KEY_ANILIST_USERNAME] = account.username
         prefs[KEY_ANILIST_SCORE_FMT] = account.scoreFormat
+        prefs.writeAniListContentOptions(account.contentOptions)
         if (account.avatarUrl.isNullOrBlank()) prefs.remove(KEY_ANILIST_AVATAR)
         else prefs[KEY_ANILIST_AVATAR] = account.avatarUrl
     }
@@ -158,6 +214,7 @@ class MAnimePrefs(private val context: Context) {
         val remaining = parseAccountsJson(prefs[KEY_ANILIST_ACCOUNTS])
             .filterNot { it.username.equals(username, ignoreCase = true) }
         prefs[KEY_ANILIST_ACCOUNTS] = encodeAccountsJson(remaining)
+        prefs.clearRemovedNsfwAccount(remaining)
 
         val currentActive = prefs[KEY_ANILIST_USERNAME].orEmpty()
         if (currentActive.equals(username, ignoreCase = true)) {
@@ -166,6 +223,7 @@ class MAnimePrefs(private val context: Context) {
                 prefs[KEY_ANILIST_TOKEN] = next.token
                 prefs[KEY_ANILIST_USERNAME] = next.username
                 prefs[KEY_ANILIST_SCORE_FMT] = next.scoreFormat
+                prefs.writeAniListContentOptions(next.contentOptions)
                 if (next.avatarUrl.isNullOrBlank()) prefs.remove(KEY_ANILIST_AVATAR)
                 else prefs[KEY_ANILIST_AVATAR] = next.avatarUrl
             } else {
@@ -183,11 +241,13 @@ class MAnimePrefs(private val context: Context) {
             val remaining = parseAccountsJson(prefs[KEY_ANILIST_ACCOUNTS])
                 .filterNot { it.username.equals(activeName, ignoreCase = true) }
             prefs[KEY_ANILIST_ACCOUNTS] = encodeAccountsJson(remaining)
+            prefs.clearRemovedNsfwAccount(remaining)
             val fallback = remaining.firstOrNull()
             if (fallback != null) {
                 prefs[KEY_ANILIST_TOKEN] = fallback.token
                 prefs[KEY_ANILIST_USERNAME] = fallback.username
                 prefs[KEY_ANILIST_SCORE_FMT] = fallback.scoreFormat
+                prefs.writeAniListContentOptions(fallback.contentOptions)
                 if (fallback.avatarUrl.isNullOrBlank()) prefs.remove(KEY_ANILIST_AVATAR)
                 else prefs[KEY_ANILIST_AVATAR] = fallback.avatarUrl
                 return@edit
@@ -200,18 +260,33 @@ class MAnimePrefs(private val context: Context) {
         prefs.clearActiveSessionFields()
     }
 
+    private fun MutablePreferences.clearRemovedNsfwAccount(remaining: List<SavedAniListAccount>) {
+        val id = this[KEY_NSFW_ANILIST_ACCOUNT_ID] ?: return
+        if (remaining.none { it.id == id }) remove(KEY_NSFW_ANILIST_ACCOUNT_ID)
+    }
+
     private fun MutablePreferences.clearActiveSessionFields() {
         remove(KEY_ANILIST_TOKEN)
         remove(KEY_ANILIST_USERNAME)
         remove(KEY_ANILIST_AVATAR)
         remove(KEY_ANILIST_SCORE_FMT)
+        remove(KEY_ANILIST_CONTENT_OPTIONS)
     }
 
     private fun MutablePreferences.writeAniListViewer(viewer: AniListUser) {
         this[KEY_ANILIST_USERNAME] = viewer.name
         this[KEY_ANILIST_SCORE_FMT] = viewer.scoreFormat
+        writeAniListContentOptions(viewer.contentOptions)
         val avatar = viewer.avatarUrl
         if (avatar.isNullOrBlank()) remove(KEY_ANILIST_AVATAR) else this[KEY_ANILIST_AVATAR] = avatar
+    }
+
+    private fun Preferences.readAniListContentOptions(): AniListContentOptions? =
+        this[KEY_ANILIST_CONTENT_OPTIONS]?.let { runCatching { parseAniListContentOptions(JSONObject(it)) }.getOrNull() }
+
+    private fun MutablePreferences.writeAniListContentOptions(options: AniListContentOptions?) {
+        if (options == null) remove(KEY_ANILIST_CONTENT_OPTIONS)
+        else this[KEY_ANILIST_CONTENT_OPTIONS] = options.toJson().toString()
     }
 
     suspend fun setExtensionType(value: String) = context.dataStore.edit { it[KEY_EXT_TYPE] = value }
@@ -230,6 +305,7 @@ class MAnimePrefs(private val context: Context) {
     suspend fun setSubtitleSize(value: String) = context.dataStore.edit { it[KEY_SUBTITLE_SIZE] = value }
     suspend fun setPersistentDurationLine(value: Boolean) = context.dataStore.edit { it[KEY_PERSISTENT_DURATION_LINE] = value }
     suspend fun setMyListsSortOption(value: String) = context.dataStore.edit { it[KEY_MY_LISTS_SORT_OPTION] = value }
+    suspend fun setHideNsfwContent(value: Boolean) = context.dataStore.edit { it[KEY_HIDE_NSFW_CONTENT] = value }
 
     // Episode watch position cache: "mediaId:ep" -> seconds
     private fun posKey(mediaId: Int, ep: Int) = longPreferencesKey("pos_${mediaId}_$ep")
@@ -255,7 +331,8 @@ internal fun parseAccountsJson(raw: String?): List<SavedAniListAccount> {
                         username = username,
                         avatarUrl = o.optString("avatarUrl", "").trim().takeIf { it.isNotEmpty() },
                         scoreFormat = o.optString("scoreFormat", "POINT_100").ifBlank { "POINT_100" },
-                        token = token
+                        token = token,
+                        contentOptions = o.optJSONObject("contentOptions")?.let(::parseAniListContentOptions)
                     )
                 )
             }
@@ -274,7 +351,14 @@ internal fun encodeAccountsJson(accounts: List<SavedAniListAccount>): String {
             put("avatarUrl", acc.avatarUrl ?: "")
             put("scoreFormat", acc.scoreFormat)
             put("token", acc.token)
+            acc.contentOptions?.let { put("contentOptions", it.toJson()) }
         })
     }
     return arr.toString()
+}
+
+private fun AniListContentOptions.toJson() = JSONObject().apply {
+    put("displayAdultContent", displayAdultContent)
+    put("includeAdultContentInSearch", includeAdultContentInSearch)
+    put("displayAdultActivities", displayAdultActivities)
 }

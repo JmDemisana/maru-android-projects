@@ -16,11 +16,24 @@ internal fun aniListVariables(variables: Map<String, Any?>): JSONObject = JSONOb
     for ((key, value) in variables) if (value != null) put(key, JSONObject.wrap(value))
 }
 
+data class AniListContentOptions(
+    val displayAdultContent: Boolean,
+    val includeAdultContentInSearch: Boolean,
+    val displayAdultActivities: Boolean
+)
+
+internal fun parseAniListContentOptions(json: JSONObject) = AniListContentOptions(
+    displayAdultContent = json.optBoolean("displayAdultContent"),
+    includeAdultContentInSearch = json.optBoolean("includeAdultContentInSearch"),
+    displayAdultActivities = json.optBoolean("displayAdultActivities")
+)
+
 data class AniListUser(
     val id: Int,
     val name: String,
     val avatarUrl: String?,
-    val scoreFormat: String = "POINT_100" // POINT_100 | POINT_10_DECIMAL | POINT_10 | POINT_5 | POINT_3
+    val scoreFormat: String = "POINT_100", // POINT_100 | POINT_10_DECIMAL | POINT_10 | POINT_5 | POINT_3
+    val contentOptions: AniListContentOptions? = null
 )
 
 data class AniListProfile(
@@ -73,7 +86,8 @@ data class AnimeMedia(
     val startDateYear: Int? = null,
     val startDateMonth: Int? = null,
     val startDateDay: Int? = null,
-    val createdAt: Long? = null
+    val createdAt: Long? = null,
+    val hasKnownAdultRating: Boolean = true
 ) {
     val releaseSortKey: Long
         get() {
@@ -113,6 +127,9 @@ data class AnimeMedia(
 
     val hasEnglishDub: Boolean get() = hasEnglishDubCast || KnownDubRegistry.isKnownDub(mediaId) || externalLinks.any { it.isEnglishDub }
 
+    internal val isVisibleWithNsfwHidden: Boolean
+        get() = hasKnownAdultRating && !isExplicitAdultAnime(isAdult, genres)
+
     val contentAdvisory: ContentAdvisory get() = deriveContentAdvisory(isAdult, genres, tags)
 
     val isMusicOrConcert: Boolean
@@ -137,6 +154,9 @@ data class AnimeMedia(
         return latestReleasedEpisode(status, episodes, nextEpisode)
     }
 }
+
+internal fun List<AnimeMedia>.filterNsfw(hideNsfwContent: Boolean): List<AnimeMedia> =
+    if (hideNsfwContent) filter { it.isVisibleWithNsfwHidden } else this
 
 data class ExternalLink(
     val id: Int,
@@ -450,7 +470,8 @@ object AniListClient {
             startDateYear = startYear,
             startDateMonth = startMonth,
             startDateDay = startDay,
-            createdAt     = entryCreatedAt
+            createdAt     = entryCreatedAt,
+            hasKnownAdultRating = obj.opt("isAdult") is Boolean
         )
     }
 
@@ -534,6 +555,7 @@ object AniListClient {
                 id name
                 avatar { medium }
                 mediaListOptions { scoreFormat }
+                options { displayAdultContent includeAdultContentInSearch displayAdultActivities }
               }
             }
         """, token = token)
@@ -543,7 +565,8 @@ object AniListClient {
             id          = v.getInt("id"),
             name        = v.getString("name"),
             avatarUrl   = v.optJSONObject("avatar")?.optNullableString("medium"),
-            scoreFormat = scoreFmt
+            scoreFormat = scoreFmt,
+            contentOptions = v.optJSONObject("options")?.let(::parseAniListContentOptions)
         )
     }
 
@@ -845,6 +868,28 @@ object AniListClient {
         return mapMedia(data.getJSONObject("Media"))
     }
 
+    internal suspend fun getAdultContentRatings(mediaIds: List<Int>, token: String?): Map<Int, Boolean> = buildMap {
+        for (ids in mediaIds.distinct().chunked(50)) {
+            val data = query("""
+                query (${'$'}ids: [Int!]!) {
+                  Page(page: 1, perPage: 50) {
+                    media(id_in: ${'$'}ids, type: ANIME) { id isAdult genres }
+                  }
+                }
+            """, mapOf("ids" to ids), token)
+            val media = data.optJSONObject("Page")?.optJSONArray("media") ?: continue
+            for (index in 0 until media.length()) {
+                val item = media.optJSONObject(index) ?: continue
+                val rating = item.opt("isAdult") as? Boolean ?: continue
+                val genres = item.optJSONArray("genres")
+                val hasHentaiGenre = genres != null && (0 until genres.length()).any {
+                    genres.optString(it).equals("Hentai", ignoreCase = true)
+                }
+                put(item.getInt("id"), rating || hasHentaiGenre)
+            }
+        }
+    }
+
     suspend fun getSimulcastSchedule(perPage: Int = 20): List<AnimeMedia> {
         val data = query("""
             query {
@@ -860,13 +905,15 @@ object AniListClient {
         queryStr: String,
         page: Int = 1,
         perPage: Int = 20,
-        token: String? = null
+        token: String? = null,
+        hideNsfwContent: Boolean = false
     ): SearchPage {
+        val adultFilter = if (hideNsfwContent) ", isAdult: false" else ""
         val data = query("""
             query (${'$'}search: String, ${'$'}page: Int, ${'$'}perPage: Int) {
               Page(page: ${'$'}page, perPage: ${'$'}perPage) {
                 pageInfo { total hasNextPage }
-                media(search: ${'$'}search, type: ANIME, sort: [SEARCH_MATCH, POPULARITY_DESC]) { ${mediaFields()} }
+                media(search: ${'$'}search, type: ANIME$adultFilter, sort: [SEARCH_MATCH, POPULARITY_DESC]) { ${mediaFields()} }
               }
             }
         """, mapOf("search" to queryStr, "page" to page, "perPage" to perPage), token)
@@ -874,7 +921,7 @@ object AniListClient {
         val page0 = data.getJSONObject("Page")
         val info = page0.optJSONObject("pageInfo")
         return SearchPage(
-            results     = parseMediaArray(page0.optJSONArray("media")),
+            results     = parseMediaArray(page0.optJSONArray("media")).filterNsfw(hideNsfwContent),
             hasNextPage = info?.optBoolean("hasNextPage") ?: false,
             total       = info?.optInt("total")?.takeIf { it > 0 }
         )

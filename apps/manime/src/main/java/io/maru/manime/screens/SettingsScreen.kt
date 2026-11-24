@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -11,13 +12,17 @@ import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -32,6 +37,11 @@ fun SettingsScreen(
     anilistUsername: String,
     isLoggedIn: Boolean,
     savedAccounts: List<SavedAniListAccount> = emptyList(),
+    hideNsfwContent: Boolean = true,
+    canShowNsfwContent: Boolean = false,
+    onToggleHideNsfwContent: (Boolean) -> Unit = {},
+    nsfwAnilistAccountId: Int? = null,
+    onSelectNsfwAnilistAccount: (Int?) -> Unit = {},
     pendingSyncCount: Int = 0,
     isSyncingQueue: Boolean = false,
     onSyncNow: () -> Unit = {},
@@ -311,6 +321,18 @@ fun SettingsScreen(
             }
         }
 
+        item(key = "nsfw_content") {
+            NsfwContentSettings(
+                isLoggedIn = isLoggedIn,
+                savedAccounts = savedAccounts,
+                hideNsfwContent = hideNsfwContent,
+                canShowNsfwContent = canShowNsfwContent,
+                onToggleHideNsfwContent = onToggleHideNsfwContent,
+                nsfwAnilistAccountId = nsfwAnilistAccountId,
+                onSelectNsfwAnilistAccount = onSelectNsfwAnilistAccount
+            )
+        }
+
         // 2. Stream & Audio Preferences
         item(key = "stream_prefs") {
             GlassCard(modifier = Modifier.fillMaxWidth()) {
@@ -478,6 +500,111 @@ fun SettingsScreen(
                         color = MaruTextStrong,
                         fontWeight = FontWeight.Bold
                     )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NsfwContentSettings(
+    isLoggedIn: Boolean,
+    savedAccounts: List<SavedAniListAccount>,
+    hideNsfwContent: Boolean,
+    canShowNsfwContent: Boolean,
+    onToggleHideNsfwContent: (Boolean) -> Unit,
+    nsfwAnilistAccountId: Int?,
+    onSelectNsfwAnilistAccount: (Int?) -> Unit
+) {
+    val hideContent = hideNsfwContent || !canShowNsfwContent
+    val trackingAccounts = savedAccounts.filter { it.id > 0 }
+    val selectedAccount = trackingAccounts.firstOrNull { it.id == nsfwAnilistAccountId }
+    val canSelectTrackingAccount = isLoggedIn && trackingAccounts.isNotEmpty()
+    var accountMenuExpanded by remember(canSelectTrackingAccount) { mutableStateOf(false) }
+
+    GlassCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            GlassSectionHeader(
+                title = "NSFW Content",
+                icon = Icons.Default.VisibilityOff,
+                color = CrunchyOrange
+            )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .toggleable(
+                        value = hideContent,
+                        enabled = canShowNsfwContent,
+                        role = Role.Switch,
+                        onValueChange = onToggleHideNsfwContent
+                    )
+                    .padding(vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Hide NSFW content", color = MaruTextStrong, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        text = when {
+                            !isLoggedIn -> "NSFW titles stay hidden in Guest Mode."
+                            !canShowNsfwContent -> "Enable Adult Content in your active AniList account to change this setting."
+                            else -> "Hide adult titles from discovery and playback."
+                        },
+                        color = MaruTextMuted,
+                        fontSize = 11.5.sp,
+                        lineHeight = 15.sp
+                    )
+                }
+                Switch(
+                    checked = hideContent,
+                    enabled = canShowNsfwContent,
+                    onCheckedChange = null,
+                    colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = CrunchyOrange)
+                )
+            }
+
+            HorizontalDivider(color = CrunchyBorder)
+            Text("NSFW tracking account", color = MaruTextStrong, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text(
+                "Choose which saved AniList account receives NSFW list updates and watch progress.",
+                color = MaruTextMuted,
+                fontSize = 11.5.sp,
+                lineHeight = 15.sp
+            )
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { accountMenuExpanded = true },
+                    enabled = canSelectTrackingAccount,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(selectedAccount?.let { "@${it.username}" } ?: "Use active account", modifier = Modifier.weight(1f))
+                    Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                }
+                DropdownMenu(expanded = accountMenuExpanded, onDismissRequest = { accountMenuExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Use active account") },
+                        modifier = Modifier.semantics { selected = selectedAccount == null },
+                        onClick = {
+                            accountMenuExpanded = false
+                            onSelectNsfwAnilistAccount(null)
+                        }
+                    )
+                    trackingAccounts.forEach { account ->
+                        DropdownMenuItem(
+                            text = { Text("@${account.username}") },
+                            modifier = Modifier.semantics { selected = selectedAccount == account },
+                            onClick = {
+                                accountMenuExpanded = false
+                                onSelectNsfwAnilistAccount(account.id)
+                            }
+                        )
+                    }
                 }
             }
         }
