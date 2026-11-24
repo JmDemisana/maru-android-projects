@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 25
         uses: actions/setup-java@v5
@@ -41,10 +43,11 @@ jobs:
 
       - name: Resolve rotator version
         run: |
-          VERSION_NAME="2.1.0-rotator.${GITHUB_RUN_NUMBER}"
+          VERSION_NAME="2.1.1-rotator.${GITHUB_RUN_NUMBER}"
           echo "NANAMI_ANIME_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
-          echo "NANAMI_ANIME_VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
-          echo "Building Nanami Anime Rotator $VERSION_NAME (code ${GITHUB_RUN_NUMBER})"
+          VERSION_CODE=$((1000 + 2 * $(git rev-list --count HEAD)))
+          echo "NANAMI_ANIME_VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "Building Nanami Anime Rotator $VERSION_NAME (code $VERSION_CODE)"
 
       - name: Prepare signing key
         env:

@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. nanami-anime-v2.1.0)"
+        description: "Release tag (e.g. nanami-anime-v2.1.1)"
         required: true
-        default: "nanami-anime-v2.1.0"
+        default: "nanami-anime-v2.1.1"
   push:
     tags:
       - "nanami-anime-v*"
@@ -23,6 +23,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         with:
+          fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Set up JDK 25
@@ -58,8 +59,10 @@ jobs:
           fi
           echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
           echo "NANAMI_ANIME_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
-          echo "NANAMI_ANIME_VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
-          echo "Building Nanami Anime Release $VERSION_NAME from tag $TAG (code ${GITHUB_RUN_NUMBER})"
+          # Stable builds are one code above a rotator build from the same commit.
+          VERSION_CODE=$((1001 + 2 * $(git rev-list --count HEAD)))
+          echo "NANAMI_ANIME_VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "Building Nanami Anime Release $VERSION_NAME from tag $TAG (code $VERSION_CODE)"
 
       - name: Prepare signing key
         env:
@@ -118,14 +121,4 @@ jobs:
           files: |
             out/nanami-anime-${{ env.NANAMI_ANIME_VERSION_NAME }}.apk
             out/SHA256SUMS.txt
-          body: |
-            Official release for **Nanami Anime ${{ env.NANAMI_ANIME_VERSION_NAME }}**.
-
-            ### What's Inside
-            - **Crunchyroll-Styled Streaming & AniList Companion**: Full-bleed dark `#0B0C0F` + `#F47521` orange + `#2ABDBB` simulcast teal UI, wrapped titles, and `My Lists` with `Downloads` first, 6 sort modes, `Random` / `Random Dub` quick picks, and preserved split AniList Completed lists (`Completed TV`, `Completed Movie`, `Completed OVA`, etc.).
-            - **Romanized Title Matching First**: Stream resolvers (`Stremio`/`Kitsu`, `Hstream`, `Sukebei`/`Nyaa`, `Cloudstream`, `Aniyomi`) prioritize Romanized `titleRomaji`, symbol-normalized variants, and synonyms ahead of localized Western/English titles. Dynamic `Hstream` slug + search resolution with sequel/edition guards and concurrent `Sukebei` fallback.
-            - **Combined & Split Season Resolution**: Walks AniList `PREQUEL` series chains and translates between combined vs. split Kitsu/IMDb seasons (fixing mismatches like *Sailor Moon Crystal* Seasons 1–2 vs. Season 3) while filtering out mismatched season files.
-            - **Custom Player & Remembered Speed**: 60fps Canvas seekbar, AniSkip OP/ED markers, brightness/volume vertical swipes, double-tap seek, Crunchyroll-style black subtitle fill + live subtitle size, persistent bottom progress bar, Chromecast casting, and **remembered playback speed** across episodes and sessions.
-            - **Flexible Progress & NSFW Controls**: Configurable **Track watched at N%** threshold (default `80%`) with slider & presets, offline AniList sync queue, multi-account AniList switcher, **Do not track NSFW anime** toggle, separate NSFW tracking account selector, and guest mode.
-            - **3-Tap Hentai Suggestions Pill**: Hidden whenever NSFW is disabled; placed at the very end of the empty-search category row and requires 3 consecutive taps to confirm NSFW anime suggestions.
-            - **Private Offline Vault & Series Downloads**: Encrypted/hidden app-only `.nanami` + `.nomedia` storage with flexible **Download All Unwatched**, **Download Next 5 Episodes**, and custom episode stepper, **Allow Download with Cellular** guard, and zero-extra-storage **Seed My Download on WiFi** to keep rare/older anime alive for fellow viewers.
+          body_path: apps/manime/README.md
