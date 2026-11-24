@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.sp
 import io.maru.manime.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -86,17 +87,19 @@ fun UserProfileScreen(
 
     LaunchedEffect(profile?.id, selectedTab, anilistToken, retryPeople) {
         val userId = profile?.id ?: return@LaunchedEffect
-        val tab = selectedTab
-        if (tab == 0 || (tab == 1 && following != null) || (tab == 2 && followers != null)) return@LaunchedEffect
+        if (selectedTab == 0) return@LaunchedEffect
+        if (following != null && followers != null) return@LaunchedEffect
         peopleLoadFailed = false
         try {
-            val list = withContext(Dispatchers.IO) {
-                val token = anilistToken.ifEmpty { null }
-                if (tab == 1) AniListClient.getUserFollowing(userId, 1, token)
-                else AniListClient.getUserFollowers(userId, 1, token)
+            val token = anilistToken.ifEmpty { null }
+            withContext(Dispatchers.IO) {
+                val f1 = async { if (following == null) AniListClient.getUserFollowing(userId, 1, token) else following }
+                val f2 = async { if (followers == null) AniListClient.getUserFollowers(userId, 1, token) else followers }
+                val r1 = f1.await()
+                val r2 = f2.await()
+                if (r1 != null) following = r1.distinctBy { it.id }
+                if (r2 != null) followers = r2.distinctBy { it.id }
             }
-            if (tab == 1) following = list.distinctBy { it.id }
-            else followers = list.distinctBy { it.id }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -226,12 +229,32 @@ fun UserProfileScreen(
                     }
 
                     Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                            text = u.name,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color.White
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = u.name,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White
+                            )
+                            if (u.isFollowing && u.isFollower) {
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = CrunchyTeal.copy(alpha = 0.2f),
+                                    border = BorderStroke(1.dp, CrunchyTeal)
+                                ) {
+                                    Text(
+                                        text = "Mutual",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = CrunchyTeal,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text("${u.animeCount} anime", fontSize = 11.5.sp, color = MaruTextMuted)
                             val daysWatched = (u.minutesWatched / 1440.0)
@@ -377,6 +400,9 @@ fun UserProfileScreen(
 
                 1, 2 -> {
                     val people = if (selectedTab == 1) following else followers
+                    val followingIds = remember(following) { following?.map { it.id }?.toSet().orEmpty() }
+                    val followerIds = remember(followers) { followers?.map { it.id }?.toSet().orEmpty() }
+
                     if (peopleLoadFailed) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -405,7 +431,12 @@ fun UserProfileScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             items(people, key = { it.id }) { userItem ->
-                                UserCardRow(user = userItem, onClick = { onUserClick(userItem.name) })
+                                val isMutual = (userItem.id in followingIds && userItem.id in followerIds) || (userItem.isFollowing && userItem.isFollower)
+                                UserCardRow(
+                                    user = userItem,
+                                    isMutual = isMutual,
+                                    onClick = { onUserClick(userItem.name) }
+                                )
                             }
                         }
                     }
@@ -418,6 +449,7 @@ fun UserProfileScreen(
 @Composable
 fun UserCardRow(
     user: AniListProfile,
+    isMutual: Boolean = false,
     onClick: () -> Unit
 ) {
     GlassCard(
@@ -451,12 +483,33 @@ fun UserCardRow(
             }
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = user.name,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaruTextStrong
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = user.name,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaruTextStrong
+                    )
+                    if (isMutual) {
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = CrunchyTeal.copy(alpha = 0.18f),
+                            border = BorderStroke(1.dp, CrunchyTeal.copy(alpha = 0.7f))
+                        ) {
+                            Text(
+                                text = "Mutual",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = CrunchyTeal,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(2.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("${user.animeCount} anime", fontSize = 11.sp, color = MaruTextMuted)
                     if (user.meanScore > 0) {

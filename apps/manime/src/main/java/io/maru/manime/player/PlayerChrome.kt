@@ -786,3 +786,51 @@ internal fun formatPlayerTime(ms: Long): String {
     val minutes = totalSeconds / 60 % 60
     return if (hours > 0) "$hours:${minutes.toString().padStart(2, '0')}:$seconds" else "$minutes:$seconds"
 }
+
+@Composable
+internal fun PersistentMiniProgressBar(
+    position: Long,
+    bufferedPosition: Long,
+    duration: Long,
+    visible: Boolean,
+    modifier: Modifier = Modifier
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(160)),
+        exit = fadeOut(tween(140)),
+        modifier = modifier
+    ) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(2.5.dp)
+        ) {
+            val total = duration.coerceAtLeast(1L).toFloat()
+            val playedFraction = (position.toFloat() / total).coerceIn(0f, 1f)
+            val bufferedFraction = (bufferedPosition.toFloat() / total).coerceIn(0f, 1f)
+
+            // Dark semi-transparent background track
+            drawRect(
+                color = Color.Black.copy(alpha = 0.50f),
+                size = size
+            )
+
+            // Buffered line
+            if (bufferedFraction > 0f) {
+                drawRect(
+                    color = Color.White.copy(alpha = 0.35f),
+                    size = size.copy(width = size.width * bufferedFraction)
+                )
+            }
+
+            // Played orange progress line
+            if (playedFraction > 0f) {
+                drawRect(
+                    color = CrunchyOrange,
+                    size = size.copy(width = size.width * playedFraction)
+                )
+            }
+        }
+    }
+}

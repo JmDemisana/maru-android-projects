@@ -84,6 +84,39 @@ private fun OfflineEpisodeEntry.toAnimeSummary() = AnimeMedia(
 
 private val defaultAniListTabs = listOf("Watching", "Planning", "Completed", "Paused", "Dropped")
 
+enum class ListSortOption(val displayName: String) {
+    RECENTLY_ADDED("Recently Added"),
+    RECENTLY_RELEASED("Recently Released"),
+    RATING_THEN_RECENTLY_RELEASED("Rating, Then Released"),
+    RATING_THEN_RECENTLY_ADDED("Rating, Then Added"),
+    RATING_THEN_ALPHABETICAL("Rating, Then A-Z"),
+    ALPHABETICAL("Alphabetical (A-Z)");
+
+    fun sort(items: List<AnimeMedia>): List<AnimeMedia> {
+        return when (this) {
+            RECENTLY_ADDED -> items.sortedByDescending { it.addedToListSortKey }
+            RECENTLY_RELEASED -> items.sortedWith(
+                compareByDescending<AnimeMedia> { it.releaseSortKey }
+                    .thenByDescending { it.addedToListSortKey }
+            )
+            RATING_THEN_RECENTLY_RELEASED -> items.sortedWith(
+                compareByDescending<AnimeMedia> { it.score ?: 0.0 }
+                    .thenByDescending { it.releaseSortKey }
+                    .thenByDescending { it.addedToListSortKey }
+            )
+            RATING_THEN_RECENTLY_ADDED -> items.sortedWith(
+                compareByDescending<AnimeMedia> { it.score ?: 0.0 }
+                    .thenByDescending { it.addedToListSortKey }
+            )
+            RATING_THEN_ALPHABETICAL -> items.sortedWith(
+                compareByDescending<AnimeMedia> { it.score ?: 0.0 }
+                    .thenBy { it.title.lowercase() }
+            )
+            ALPHABETICAL -> items.sortedBy { it.title.lowercase() }
+        }
+    }
+}
+
 @Composable
 fun ProfileScreen(
     allLists: Map<String, List<AnimeMedia>>,
@@ -107,6 +140,17 @@ fun ProfileScreen(
     var selectedCategory by rememberSaveable { mutableStateOf("Downloads") }
     var isVaultLoading by remember { mutableStateOf(true) }
     val retryingDownloads = remember { mutableStateMapOf<Pair<Int, Int>, Boolean>() }
+
+    val savedSortStr by prefs?.myListsSortOption?.collectAsState(initial = ListSortOption.RECENTLY_ADDED.name)
+        ?: remember { mutableStateOf(ListSortOption.RECENTLY_ADDED.name) }
+    var selectedSortOption by rememberSaveable { mutableStateOf(ListSortOption.RECENTLY_ADDED) }
+
+    LaunchedEffect(savedSortStr) {
+        val found = runCatching { ListSortOption.valueOf(savedSortStr) }.getOrNull()
+        if (found != null && found != selectedSortOption) {
+            selectedSortOption = found
+        }
+    }
 
     val notifyPlaybackVisibility by rememberUpdatedState(onPlaybackVisibilityChange)
     val isOfflinePlayerVisible = activeOfflinePlaying != null && prefs != null
@@ -624,20 +668,150 @@ fun ProfileScreen(
                         }
                     }
                 } else {
-                    LazyVerticalGrid(
-                        columns = GridCells.Adaptive(140.dp),
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 16.dp),
-                        contentPadding = PaddingValues(top = 16.dp, bottom = 28.dp),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(18.dp)
-                    ) {
-                        items(listForTab, key = { "lib_${activeCat}_${it.mediaId}" }) { media ->
-                            PosterCard(
-                                media = media,
-                                onClick = { onAnimeClick(media) }
-                            )
+                    val sortedList = remember(listForTab, selectedSortOption) {
+                        selectedSortOption.sort(listForTab)
+                    }
+
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Box {
+                                var showSortMenu by remember { mutableStateOf(false) }
+                                Surface(
+                                    onClick = { showSortMenu = true },
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = CrunchyCardBg,
+                                    border = BorderStroke(1.dp, CrunchyBorder)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Sort,
+                                            contentDescription = "Sort Options",
+                                            tint = CrunchyOrange,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = selectedSortOption.displayName,
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                        Icon(
+                                            Icons.Default.ArrowDropDown,
+                                            contentDescription = null,
+                                            tint = MaruTextMuted,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+
+                                DropdownMenu(
+                                    expanded = showSortMenu,
+                                    onDismissRequest = { showSortMenu = false },
+                                    modifier = Modifier.background(CrunchySurface)
+                                ) {
+                                    ListSortOption.values().forEach { opt ->
+                                        val isChosen = selectedSortOption == opt
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = opt.displayName,
+                                                    fontWeight = if (isChosen) FontWeight.ExtraBold else FontWeight.Medium,
+                                                    color = if (isChosen) CrunchyOrange else Color.White,
+                                                    fontSize = 12.5.sp
+                                                )
+                                            },
+                                            leadingIcon = {
+                                                if (isChosen) {
+                                                    Icon(Icons.Default.Check, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(16.dp))
+                                                } else {
+                                                    Spacer(Modifier.size(16.dp))
+                                                }
+                                            },
+                                            onClick = {
+                                                selectedSortOption = opt
+                                                showSortMenu = false
+                                                prefs?.let { p ->
+                                                    scope.launch { p.setMyListsSortOption(opt.name) }
+                                                }
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Surface(
+                                    onClick = {
+                                        if (sortedList.isNotEmpty()) {
+                                            onAnimeClick(sortedList.random())
+                                        } else {
+                                            Toast.makeText(context, "No anime in this list!", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = CrunchyCardBg,
+                                    border = BorderStroke(1.dp, CrunchyBorder)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                                    ) {
+                                        Icon(Icons.Default.Shuffle, contentDescription = "Random Anime", tint = CrunchyOrange, modifier = Modifier.size(14.dp))
+                                        Text("Random", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                    }
+                                }
+
+                                Surface(
+                                    onClick = {
+                                        val dubbed = sortedList.filter { it.hasEnglishDub }
+                                        if (dubbed.isNotEmpty()) {
+                                            onAnimeClick(dubbed.random())
+                                        } else {
+                                            Toast.makeText(context, "No dubbed anime found in this list!", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = CrunchyCardBg,
+                                    border = BorderStroke(1.dp, CrunchyBorder)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                                    ) {
+                                        Icon(Icons.Default.RecordVoiceOver, contentDescription = "Random Dub", tint = CrunchyTeal, modifier = Modifier.size(14.dp))
+                                        Text("Random Dub", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = CrunchyTeal)
+                                    }
+                                }
+                            }
+                        }
+
+                        LazyVerticalGrid(
+                            columns = GridCells.Adaptive(140.dp),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 16.dp),
+                            contentPadding = PaddingValues(top = 8.dp, bottom = 28.dp),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(18.dp)
+                        ) {
+                            items(sortedList, key = { "lib_${activeCat}_${it.mediaId}" }) { media ->
+                                PosterCard(
+                                    media = media,
+                                    onClick = { onAnimeClick(media) }
+                                )
+                            }
                         }
                     }
                 }

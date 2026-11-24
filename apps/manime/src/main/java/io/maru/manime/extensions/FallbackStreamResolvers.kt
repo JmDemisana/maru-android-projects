@@ -141,18 +141,15 @@ internal object FallbackStreamResolvers {
                 }
             }
 
-            // 3. Music Videos, Idol Concerts & Specials -> Internet Archive CDN + Official YouTube/Piped Direct Streams
-            if (isMusicOrConcert || isStandalone || isAdult) {
+            // 3. Music Videos, Idol Concerts & Specials ONLY -> Internet Archive CDN + Official YouTube/Piped Direct Streams
+            if (isMusicOrConcert) {
                 add(async(Dispatchers.IO) {
                     searchInternetArchive(
                         cleanTitles = cleanTitles,
                         episodeNum = episodeNum,
-                        isStandalone = isStandalone || isMusicOrConcert
+                        isStandalone = true
                     )
                 })
-            }
-
-            if (isMusicOrConcert) {
                 add(async(Dispatchers.IO) {
                     resolveYoutubeMusicOrConcertStreams(
                         displayTitle = displayTitle,
@@ -542,6 +539,12 @@ internal object FallbackStreamResolvers {
             lower.endsWith(".cbz")
     }
 
+    private val GENERIC_STOP_WORDS = setOf(
+        "ova", "oad", "ona", "tv", "movie", "special", "specials", "the", "and", "an", "a",
+        "season", "complete", "batch", "bd", "bluray", "dvd", "raw", "sub", "dub",
+        "remake", "uncensored", "animation", "part", "vol", "volume", "edition", "series"
+    )
+
     internal fun matchesTitleAndEpisode(
         releaseTitle: String,
         candidateTitles: List<String>,
@@ -549,10 +552,19 @@ internal object FallbackStreamResolvers {
         isStandalone: Boolean
     ): Boolean {
         if (!matchesAnyTitleWords(releaseTitle, candidateTitles)) return false
-        if (isStandalone) return true
 
         val parsedEp = torrentEpisodeNumber(releaseTitle)
-        if (parsedEp != null) return parsedEp == episodeNum
+        if (parsedEp != null) {
+            return parsedEp == episodeNum
+        }
+
+        if (isStandalone) {
+            val lower = releaseTitle.lowercase()
+            val hasExplicitOtherEp = Regex("(?i)\\b(?:ep|episode|vol)\\.?\\s*(\\d{1,3})\\b").find(lower)?.let {
+                it.groupValues.getOrNull(1)?.toIntOrNull()
+            }
+            return hasExplicitOtherEp == null || hasExplicitOtherEp == episodeNum || hasExplicitOtherEp == 1
+        }
 
         val lower = releaseTitle.lowercase()
         val isBatchOrComplete = lower.contains("batch") ||
@@ -565,26 +577,28 @@ internal object FallbackStreamResolvers {
             lower.contains("s1") ||
             Regex("全\\s*\\d+\\s*話").containsMatchIn(releaseTitle) ||
             Regex("\\b0*1\\s*[-~]\\s*\\d{1,3}\\b").containsMatchIn(lower) ||
-            Regex("(?i)vol\\.?\\s*0*1\\s*[-~]\\s*\\d{1,3}").containsMatchIn(lower) ||
-            (episodeNum == 1 && (lower.contains("ova") || lower.contains("oad") || lower.contains("bd") || lower.contains("uncensored")))
+            Regex("(?i)vol\\.?\\s*0*1\\s*[-~]\\s*\\d{1,3}").containsMatchIn(lower)
         return isBatchOrComplete
     }
 
     internal fun matchesAnyTitleWords(releaseTitle: String, candidateTitles: List<String>): Boolean {
         val normRelease = normalizeKey(releaseTitle)
-        val normalizedReleaseWords = normalizeWords(releaseTitle)
-        if (normRelease.isEmpty() && normalizedReleaseWords.isEmpty()) return false
+        val releaseWords = normalizeWords(releaseTitle)
+        if (normRelease.isEmpty() && releaseWords.isEmpty()) return false
 
         return candidateTitles.any { candidate ->
             val normCandidate = normalizeKey(candidate)
-            if (normCandidate.length >= 3 && normRelease.contains(normCandidate)) {
+            // 1. Direct key match (e.g. "kissxsis", "キスシス", "eromangasensei"): must be >= 4 chars and not a generic keyword
+            if (normCandidate !in GENERIC_STOP_WORDS && normCandidate.length >= 4 && normRelease.contains(normCandidate)) {
                 return@any true
             }
 
-            val words = normalizeWords(candidate).filter { it.length >= 3 || it.all(Char::isDigit) }
-            if (words.isNotEmpty() && normalizedReleaseWords.isNotEmpty()) {
-                val hits = words.count { it in normalizedReleaseWords }
-                if (hits >= maxOf(1, (words.size * 0.6).toInt())) {
+            // 2. Meaningful words overlap
+            val meaningful = normalizeWords(candidate).filter { it !in GENERIC_STOP_WORDS && it.length >= 3 }
+            if (meaningful.isNotEmpty() && releaseWords.isNotEmpty()) {
+                val hits = meaningful.count { it in releaseWords }
+                val required = if (meaningful.size <= 2) meaningful.size else maxOf(2, (meaningful.size * 0.75).toInt())
+                if (hits >= required) {
                     return@any true
                 }
             }

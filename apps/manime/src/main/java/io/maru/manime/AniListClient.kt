@@ -33,6 +33,7 @@ data class AniListProfile(
     val minutesWatched: Int,
     val meanScore: Double,
     val isFollowing: Boolean = false,
+    val isFollower: Boolean = false,
     val userLists: Map<String, List<AnimeMedia>> = emptyMap()
 )
 
@@ -68,8 +69,28 @@ data class AnimeMedia(
     val relationType: String? = null,
     val tags: List<MediaTag> = emptyList(),
     val trailerYoutubeId: String? = null,
-    val titleNative: String? = null
+    val titleNative: String? = null,
+    val startDateYear: Int? = null,
+    val startDateMonth: Int? = null,
+    val startDateDay: Int? = null,
+    val createdAt: Long? = null
 ) {
+    val releaseSortKey: Long
+        get() {
+            val y = startDateYear ?: seasonYear ?: 0
+            val m = startDateMonth ?: when (season?.uppercase()) {
+                "WINTER" -> 1
+                "SPRING" -> 4
+                "SUMMER" -> 7
+                "FALL" -> 10
+                else -> 0
+            }
+            val d = startDateDay ?: 1
+            return if (y > 0) y.toLong() * 10000L + m * 100L + d else 0L
+        }
+
+    val addedToListSortKey: Long
+        get() = createdAt?.takeIf { it > 0 } ?: updatedAt?.takeIf { it > 0 } ?: listEntryId?.toLong() ?: 0L
     val candidateTitlesForStream: List<String>
         get() = buildList {
             titleRomaji?.takeIf { it.isNotBlank() }?.let { add(it) }
@@ -388,6 +409,12 @@ object AniListClient {
             trailerObj.optNullableString("id")
         } else null
 
+        val startDateObj = obj.optJSONObject("startDate")
+        val startYear = startDateObj?.optInt("year")?.takeIf { it > 0 }
+        val startMonth = startDateObj?.optInt("month")?.takeIf { it > 0 }
+        val startDay = startDateObj?.optInt("day")?.takeIf { it > 0 }
+        val entryCreatedAt = le?.optLong("createdAt")?.takeIf { it > 0L }
+
         return AnimeMedia(
             mediaId       = mediaId,
             title         = displayTitle,
@@ -419,12 +446,17 @@ object AniListClient {
             updatedAt     = le?.optLong("updatedAt")?.takeIf { it > 0 },
             hasEnglishDubCast = hasEngVa,
             tags          = mediaTags,
-            trailerYoutubeId = trailerYtId
+            trailerYoutubeId = trailerYtId,
+            startDateYear = startYear,
+            startDateMonth = startMonth,
+            startDateDay = startDay,
+            createdAt     = entryCreatedAt
         )
     }
 
     private fun mediaFields(includeDubCast: Boolean = true) = """
         id episodes format status season seasonYear meanScore averageScore isAdult siteUrl bannerImage
+        startDate { year month day }
         title { userPreferred english romaji native }
         coverImage { large color }
         nextAiringEpisode { episode airingAt }
@@ -434,7 +466,7 @@ object AniListClient {
         genres
         tags { name rank isAdult isMediaSpoiler }
         description(asHtml: false)
-        mediaListEntry { id status score progress private notes updatedAt }
+        mediaListEntry { id status score progress private notes updatedAt createdAt }
     """.trimIndent()
 
     private suspend fun hydrateDubCastMap(mediaIds: Collection<Int>): Map<Int, Boolean> = coroutineScope {
@@ -587,7 +619,7 @@ object AniListClient {
                 lists {
                   name status isCustomList
                   entries {
-                    id status score progress private notes updatedAt
+                    id status score progress private notes updatedAt createdAt
                     media { ${mediaFields(includeDubCast = false)} }
                   }
                 }
@@ -619,6 +651,7 @@ object AniListClient {
                     id name bannerImage about(asHtml: false)
                     avatar { large medium }
                     isFollowing
+                    isFollower
                     statistics {
                       anime {
                         count
@@ -652,6 +685,7 @@ object AniListClient {
                 minutesWatched = stats?.optInt("minutesWatched") ?: 0,
                 meanScore = stats?.optDouble("meanScore") ?: 0.0,
                 isFollowing = u.optBoolean("isFollowing"),
+                isFollower = u.optBoolean("isFollower"),
                 userLists = lists
             )
         } catch (e: CancellationException) {
@@ -669,6 +703,7 @@ object AniListClient {
                   id name bannerImage
                   avatar { large medium }
                   isFollowing
+                  isFollower
                   statistics {
                     anime { count minutesWatched meanScore }
                   }
@@ -693,7 +728,8 @@ object AniListClient {
                     animeCount = stats?.optInt("count") ?: 0,
                     minutesWatched = stats?.optInt("minutesWatched") ?: 0,
                     meanScore = stats?.optDouble("meanScore") ?: 0.0,
-                    isFollowing = u.optBoolean("isFollowing")
+                    isFollowing = u.optBoolean("isFollowing"),
+                    isFollower = u.optBoolean("isFollower")
                 )
             )
         }
@@ -702,12 +738,13 @@ object AniListClient {
 
     suspend fun getUserFollowers(userId: Int, page: Int = 1, token: String? = null): List<AniListProfile> {
         val data = query("""
-            query (${'$'}userId: Int, ${'$'}page: Int) {
-              Page(page: ${'$'}page, perPage: 25) {
+            query (${'$'}userId: Int!, ${'$'}page: Int) {
+              Page(page: ${'$'}page, perPage: 50) {
                 followers(userId: ${'$'}userId) {
                   id name bannerImage
                   avatar { large medium }
                   isFollowing
+                  isFollower
                   statistics { anime { count minutesWatched meanScore } }
                 }
               }
@@ -730,7 +767,8 @@ object AniListClient {
                     animeCount = stats?.optInt("count") ?: 0,
                     minutesWatched = stats?.optInt("minutesWatched") ?: 0,
                     meanScore = stats?.optDouble("meanScore") ?: 0.0,
-                    isFollowing = u.optBoolean("isFollowing")
+                    isFollowing = u.optBoolean("isFollowing"),
+                    isFollower = u.optBoolean("isFollower")
                 )
             )
         }
@@ -739,12 +777,13 @@ object AniListClient {
 
     suspend fun getUserFollowing(userId: Int, page: Int = 1, token: String? = null): List<AniListProfile> {
         val data = query("""
-            query (${'$'}userId: Int, ${'$'}page: Int) {
-              Page(page: ${'$'}page, perPage: 25) {
+            query (${'$'}userId: Int!, ${'$'}page: Int) {
+              Page(page: ${'$'}page, perPage: 50) {
                 following(userId: ${'$'}userId) {
                   id name bannerImage
                   avatar { large medium }
                   isFollowing
+                  isFollower
                   statistics { anime { count minutesWatched meanScore } }
                 }
               }
@@ -767,7 +806,8 @@ object AniListClient {
                     animeCount = stats?.optInt("count") ?: 0,
                     minutesWatched = stats?.optInt("minutesWatched") ?: 0,
                     meanScore = stats?.optDouble("meanScore") ?: 0.0,
-                    isFollowing = u.optBoolean("isFollowing")
+                    isFollowing = u.optBoolean("isFollowing"),
+                    isFollower = u.optBoolean("isFollower")
                 )
             )
         }

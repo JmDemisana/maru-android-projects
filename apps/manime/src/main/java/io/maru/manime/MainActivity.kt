@@ -137,6 +137,7 @@ fun AppNavigation(prefs: MAnimePrefs) {
     val swipeGesturesEnabled by prefs.swipeGesturesEnabled.collectAsStateWithLifecycle(initialValue = true)
     val subtitleBlackFill by prefs.subtitleBlackFill.collectAsStateWithLifecycle(initialValue = true)
     val subtitleSize by prefs.subtitleSize.collectAsStateWithLifecycle(initialValue = "MEDIUM")
+    val persistentDurationLine by prefs.persistentDurationLine.collectAsStateWithLifecycle(initialValue = false)
 
     val localEntries by LocalLibraryStore.localEntries.collectAsStateWithLifecycle()
     val pendingQueue by LocalLibraryStore.pendingQueue.collectAsStateWithLifecycle()
@@ -660,6 +661,8 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     onToggleAutoSkipIntro = { scope.launch { prefs.setAutoSkipIntro(it) } },
                                     swipeGesturesEnabled = swipeGesturesEnabled,
                                     onToggleSwipeGestures = { scope.launch { prefs.setSwipeGesturesEnabled(it) } },
+                                    persistentDurationLine = persistentDurationLine,
+                                    onTogglePersistentDurationLine = { scope.launch { prefs.setPersistentDurationLine(it) } },
                                     subtitleBlackFill = subtitleBlackFill,
                                     onToggleSubtitleBlackFill = { scope.launch { prefs.setSubtitleBlackFill(it) } },
                                     subtitleSize = subtitleSize,

@@ -398,7 +398,35 @@ fun PosterCard(
 ) {
     val knownDubs by KnownDubRegistry.dubbedIds.collectAsState()
     val isDubbed = media.hasEnglishDub || media.mediaId in knownDubs
-    val subOrDubLabel = subtitleOverride ?: if (isDubbed) "Dub | Sub" else "Subtitled"
+
+    val subtitleText = remember(media, subtitleOverride, isDubbed) {
+        if (subtitleOverride != null) {
+            subtitleOverride
+        } else {
+            val parts = mutableListOf<String>()
+            parts += if (isDubbed) "Dub | Sub" else "Subtitled"
+
+            val scoreVal = media.score
+            if (scoreVal != null && scoreVal > 0.0) {
+                val formattedScore = if (scoreVal % 1.0 == 0.0) {
+                    "${scoreVal.toInt()}*"
+                } else {
+                    String.format(java.util.Locale.US, "%.1f*", scoreVal)
+                }
+                parts += formattedScore
+            }
+
+            val seasonName = media.season?.lowercase()?.replaceFirstChar { it.uppercase() }
+            val yearVal = media.seasonYear ?: media.startDateYear
+            if (seasonName != null && yearVal != null && yearVal > 0) {
+                parts += "$seasonName $yearVal"
+            } else if (yearVal != null && yearVal > 0) {
+                parts += "$yearVal"
+            }
+
+            parts.joinToString(" | ")
+        }
+    }
 
     Column(
         modifier = modifier
@@ -433,10 +461,11 @@ fun PosterCard(
         Spacer(modifier = Modifier.height(3.dp))
 
         Text(
-            text = subOrDubLabel,
+            text = subtitleText,
             fontSize = 11.5.sp,
             color = if (isDubbed && subtitleOverride == null) CrunchyTeal else MaruTextMuted,
-            lineHeight = 15.sp
+            lineHeight = 15.sp,
+            maxLines = 2
         )
     }
 }

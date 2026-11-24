@@ -50,6 +50,8 @@ class MAnimePrefs(private val context: Context) {
         val KEY_SWIPE_GESTURES      = booleanPreferencesKey("player_swipe_gestures")
         val KEY_SUBTITLE_BLACK_FILL = booleanPreferencesKey("subtitle_black_fill")
         val KEY_SUBTITLE_SIZE       = stringPreferencesKey("subtitle_size") // "SMALL" | "MEDIUM" | "LARGE" | "EXTRA_LARGE"
+        val KEY_PERSISTENT_DURATION_LINE = booleanPreferencesKey("persistent_duration_line")
+        val KEY_MY_LISTS_SORT_OPTION = stringPreferencesKey("my_lists_sort_option")
 
         const val EXT_CLOUDSTREAM = "CLOUDSTREAM"
         const val EXT_ANIYOMI     = "ANIYOMI"
@@ -111,6 +113,8 @@ class MAnimePrefs(private val context: Context) {
     val swipeGesturesEnabled: Flow<Boolean> = context.dataStore.data.map { it[KEY_SWIPE_GESTURES] ?: true }
     val subtitleBlackFill: Flow<Boolean> = context.dataStore.data.map { it[KEY_SUBTITLE_BLACK_FILL] ?: true }
     val subtitleSize: Flow<String> = context.dataStore.data.map { it[KEY_SUBTITLE_SIZE] ?: "MEDIUM" }
+    val persistentDurationLine: Flow<Boolean> = context.dataStore.data.map { it[KEY_PERSISTENT_DURATION_LINE] ?: false }
+    val myListsSortOption: Flow<String> = context.dataStore.data.map { it[KEY_MY_LISTS_SORT_OPTION] ?: "RECENTLY_ADDED" }
 
     // --- Suspend setters ---
     suspend fun setAnilistSession(token: String, viewer: AniListUser) = context.dataStore.edit { prefs ->
@@ -224,6 +228,8 @@ class MAnimePrefs(private val context: Context) {
     suspend fun setSwipeGesturesEnabled(value: Boolean) = context.dataStore.edit { it[KEY_SWIPE_GESTURES] = value }
     suspend fun setSubtitleBlackFill(value: Boolean) = context.dataStore.edit { it[KEY_SUBTITLE_BLACK_FILL] = value }
     suspend fun setSubtitleSize(value: String) = context.dataStore.edit { it[KEY_SUBTITLE_SIZE] = value }
+    suspend fun setPersistentDurationLine(value: Boolean) = context.dataStore.edit { it[KEY_PERSISTENT_DURATION_LINE] = value }
+    suspend fun setMyListsSortOption(value: String) = context.dataStore.edit { it[KEY_MY_LISTS_SORT_OPTION] = value }
 
     // Episode watch position cache: "mediaId:ep" -> seconds
     private fun posKey(mediaId: Int, ep: Int) = longPreferencesKey("pos_${mediaId}_$ep")

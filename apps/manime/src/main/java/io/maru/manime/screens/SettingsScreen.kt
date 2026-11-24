@@ -45,6 +45,8 @@ fun SettingsScreen(
     onToggleAutoSkipIntro: (Boolean) -> Unit = {},
     swipeGesturesEnabled: Boolean = true,
     onToggleSwipeGestures: (Boolean) -> Unit = {},
+    persistentDurationLine: Boolean = false,
+    onTogglePersistentDurationLine: (Boolean) -> Unit = {},
     subtitleBlackFill: Boolean = true,
     onToggleSubtitleBlackFill: (Boolean) -> Unit = {},
     subtitleSize: String = "MEDIUM",
@@ -374,6 +376,13 @@ fun SettingsScreen(
                         subtitle = "Left side adjusts screen brightness, right side adjusts volume",
                         checked = swipeGesturesEnabled,
                         onCheckedChange = onToggleSwipeGestures
+                    )
+
+                    GlassFeatureRow(
+                        label = "Persistent bottom progress bar",
+                        subtitle = "Shows a slim elapsed ratio line at the bottom like YouTube when controls are hidden",
+                        checked = persistentDurationLine,
+                        onCheckedChange = onTogglePersistentDurationLine
                     )
 
                     HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)

@@ -284,6 +284,7 @@ private fun EpisodePlayerScreen(
     val swipeGesturesEnabled by prefs.swipeGesturesEnabled.collectAsState(initial = true)
     val subtitleBlackFill by prefs.subtitleBlackFill.collectAsState(initial = true)
     val subtitleSize by prefs.subtitleSize.collectAsState(initial = "MEDIUM")
+    val persistentDurationLine by prefs.persistentDurationLine.collectAsState(initial = false)
 
     var advisoryMedia by remember(media.mediaId) { mutableStateOf(media) }
     var showOpeningAdvisory by remember { mutableStateOf(false) }
@@ -1580,6 +1581,19 @@ private fun EpisodePlayerScreen(
             )
         }
 
+        // YouTube-style Persistent Bottom Progress Bar (slim elapsed ratio line when controls are hidden)
+        if (persistentDurationLine && !isInPipMode && !showFullSettingsPage && (hasRenderedFrame || isCasting) && resolveError == null) {
+            PersistentMiniProgressBar(
+                position = currentPosition.longValue,
+                bufferedPosition = bufferedPosition.longValue,
+                duration = totalDuration.longValue,
+                visible = !controlsShowing,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+            )
+        }
+
         // Sleek Translucent Playback Settings Sheet (keeps live video visible behind!)
         AnimatedVisibility(
             visible = showFullSettingsPage && !isInPipMode,
@@ -1703,6 +1717,15 @@ private fun EpisodePlayerScreen(
                                         checked = swipeGesturesEnabled,
                                         onCheckedChange = { enabled ->
                                             scope.launch { prefs.setSwipeGesturesEnabled(enabled) }
+                                        }
+                                    )
+
+                                    GlassFeatureRow(
+                                        label = "Persistent bottom progress bar",
+                                        subtitle = "Shows a slim elapsed ratio line at the bottom like YouTube when controls are hidden",
+                                        checked = persistentDurationLine,
+                                        onCheckedChange = { enabled ->
+                                            scope.launch { prefs.setPersistentDurationLine(enabled) }
                                         }
                                     )
                                 }
