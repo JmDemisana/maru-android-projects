@@ -24,7 +24,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -238,7 +237,8 @@ class TorrentStreamService : Service() {
         val offlineEpisodes = OfflineVault.episodes
         private val offlineJobs = ConcurrentHashMap<Pair<Int, Int>, Job>()
         private val seedingJobs = ConcurrentHashMap<Pair<Int, Int>, Job>()
-        private val offlineDownloadSemaphore = Semaphore(2)
+        // Accessed under OfflineVault.lock to preserve request order across service jobs.
+        private var offlineDownloadTail = CompletableDeferred(Unit)
         private val wifiSeedSemaphore = Semaphore(2)
 
         fun isWifiOrEthernetActive(context: Context): Boolean {
@@ -841,6 +841,9 @@ class TorrentStreamService : Service() {
 
         synchronized(OfflineVault.lock) {
             if (offlineJobs[key]?.isActive == true) return
+            val previousDownload = offlineDownloadTail
+            val downloadFinished = CompletableDeferred<Unit>()
+            offlineDownloadTail = downloadFinished
             val job = serviceScope.launch(start = CoroutineStart.LAZY) {
                 if (OfflineVault.getCompleted(context, mediaId, episodeNum) != null) return@launch
 
@@ -918,23 +921,23 @@ class TorrentStreamService : Service() {
 
                 try {
                     publishEntry(entry.copy(statusText = "Queued for download…"))
+                    previousDownload.await()
+                    ensureActive()
                     OfflineVault.preparedDirectory(context)
-                    offlineDownloadSemaphore.withPermit {
-                        ensureActive()
-                        val prefsStore = MAnimePrefs(context)
-                        if (!canDownloadWithNetworkPolicy(context, prefsStore.allowCellularDownload.first())) {
-                            throw OfflineDownloadException(
-                                "Cellular downloads are disabled. Connect to Wi-Fi or allow cellular downloads, then tap Retry."
-                            )
-                        }
-                        publishEntry(entry.copy(statusText = "Connecting to source…"))
-                        updateNotification("Preparing download: $animeTitle • Ep $episodeNum", progressPercent = 0)
-                        val speedLimitKbps = prefsStore.torrentMaxSpeed.first()
+                    val prefsStore = MAnimePrefs(context)
+                    if (!canDownloadWithNetworkPolicy(context, prefsStore.allowCellularDownload.first())) {
+                        throw OfflineDownloadException(
+                            "Cellular downloads are disabled. Connect to Wi-Fi or allow cellular downloads, then tap Retry."
+                        )
+                    }
+                    publishEntry(entry.copy(statusText = "Connecting to source…"))
+                    updateNotification("Preparing download: $animeTitle • Ep $episodeNum", progressPercent = 0)
+                    val speedLimitKbps = prefsStore.torrentMaxSpeed.first()
 
-                        var lastFailureMessage = "Could not connect to any download source. Try again."
-                        var succeeded = false
+                    var lastFailureMessage = "Could not connect to any download source. Try again."
+                    var succeeded = false
 
-                        for ((index, candidate) in candidates.withIndex()) {
+                    for ((index, candidate) in candidates.withIndex()) {
                         ensureActive()
                         val hasMoreCandidates = index < candidates.lastIndex
                         val sourceTag = if (candidates.size > 1) " (source ${index + 1}/${candidates.size})" else ""
@@ -1177,7 +1180,6 @@ class TorrentStreamService : Service() {
                         throw OfflineDownloadException(lastFailureMessage)
                     }
                     updateNotification("Download complete: $animeTitle • Ep $episodeNum")
-                    }
                 } catch (e: CancellationException) {
                     synchronized(OfflineVault.lock) {
                         if (offlineJobs[key] === coroutineContext.job && OfflineVault.episodes.value.contains(entry) &&
@@ -1208,6 +1210,8 @@ class TorrentStreamService : Service() {
             }
             offlineJobs[key] = job
             job.invokeOnCompletion {
+                // A canceled queue entry must still wait its turn before releasing the next one.
+                previousDownload.invokeOnCompletion { downloadFinished.complete(Unit) }
                 offlineJobs.remove(key, job)
                 serviceScope.launch(Dispatchers.Main.immediate) { stopIfIdle() }
             }
