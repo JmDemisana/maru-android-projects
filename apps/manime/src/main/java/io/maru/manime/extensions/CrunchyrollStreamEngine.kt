@@ -579,94 +579,99 @@ object CrunchyrollStreamEngine {
 
         val displayName = URLEncoder.encode("$animeTitle - Episode $episodeNum", "UTF-8")
 
-        val jobs = BUILTIN_PROVIDERS.flatMap { providerUrl ->
+        val jobs = mutableListOf<Deferred<List<StreamLink>>>()
+        BUILTIN_PROVIDERS.forEach { providerUrl ->
             val client = StremioAddonClient(providerUrl, streamHttpClient)
-            lookups.map { (type, id, priority) ->
-                async(Dispatchers.IO) {
-                    val found = mutableListOf<StreamLink>()
-                    try {
-                        val rawStreams = client.getStreams(type, id)
-                        for (s in rawStreams) {
-                            val combinedText = listOfNotNull(s.name, s.title, s.filename).joinToString(" ")
-                            val audio = detectAudioType(combinedText)
-                            val quality = detectQuality(combinedText)
-                            val seeds = detectSeeders(combinedText)
+            lookups.forEach { (type, id, priority) ->
+                jobs.add(
+                    async(Dispatchers.IO) {
+                        val found = mutableListOf<StreamLink>()
+                        try {
+                            val rawStreams = client.getStreams(type, id)
+                            for (s in rawStreams) {
+                                val combinedText = listOfNotNull(s.name, s.title, s.filename).joinToString(" ")
+                                val audio = detectAudioType(combinedText)
+                                val quality = detectQuality(combinedText)
+                                val seeds = detectSeeders(combinedText)
 
-                            val score = scoreStream(
-                                rawText = combinedText,
-                                audioType = audio,
-                                quality = quality,
-                                seeders = seeds,
-                                preferredAudio = preferredAudio,
-                                preferredQuality = preferredQuality
-                            ) + priority
+                                val score = scoreStream(
+                                    rawText = combinedText,
+                                    audioType = audio,
+                                    quality = quality,
+                                    seeders = seeds,
+                                    preferredAudio = preferredAudio,
+                                    preferredQuality = preferredQuality
+                                ) + priority
 
-                            if (!s.url.isNullOrBlank()) {
-                                found.add(
-                                    StreamLink(
-                                        url = s.url,
-                                        quality = quality,
-                                        sourceName = formatCleanSourceLabel(audio, quality),
-                                        isTorrent = false,
-                                        audioType = audio,
-                                        methodType = "DIRECT",
-                                        seeders = seeds,
-                                        filename = s.filename ?: s.title,
-                                        formatBadge = quality,
-                                        headers = s.headers,
-                                        subtitles = s.subtitles,
-                                        sizeBytes = s.sizeBytes,
-                                        score = score + 80
+                                if (!s.url.isNullOrBlank()) {
+                                    found.add(
+                                        StreamLink(
+                                            url = s.url,
+                                            quality = quality,
+                                            sourceName = formatCleanSourceLabel(audio, quality),
+                                            isTorrent = false,
+                                            audioType = audio,
+                                            methodType = "DIRECT",
+                                            seeders = seeds,
+                                            filename = s.filename ?: s.title,
+                                            formatBadge = quality,
+                                            headers = s.headers,
+                                            subtitles = s.subtitles,
+                                            sizeBytes = s.sizeBytes,
+                                            score = score + 80
+                                        )
                                     )
-                                )
-                            } else if (!s.infoHash.isNullOrBlank()) {
-                                val hash = s.infoHash.lowercase().trim()
-                                val allTrackers = (s.sources + FAST_TRACKERS).distinct()
-                                val trackerParams = allTrackers.joinToString("") { "&tr=${URLEncoder.encode(it, "UTF-8")}" }
-                                val magnet = "magnet:?xt=urn:btih:$hash&dn=$displayName$trackerParams"
-                                found.add(
-                                    StreamLink(
-                                        url = magnet,
-                                        quality = quality,
-                                        sourceName = formatCleanSourceLabel(audio, quality),
-                                        isTorrent = true,
-                                        infoHash = hash,
-                                        fileIdx = s.fileIdx,
-                                        audioType = audio,
-                                        methodType = "BUILTIN",
-                                        seeders = seeds,
-                                        filename = s.filename ?: s.title,
-                                        formatBadge = quality,
-                                        subtitles = s.subtitles,
-                                        sizeBytes = s.sizeBytes,
-                                        score = score
+                                } else if (!s.infoHash.isNullOrBlank()) {
+                                    val hash = s.infoHash.lowercase().trim()
+                                    val allTrackers = (s.sources + FAST_TRACKERS).distinct()
+                                    val trackerParams = allTrackers.joinToString("") { "&tr=${URLEncoder.encode(it, "UTF-8")}" }
+                                    val magnet = "magnet:?xt=urn:btih:$hash&dn=$displayName$trackerParams"
+                                    found.add(
+                                        StreamLink(
+                                            url = magnet,
+                                            quality = quality,
+                                            sourceName = formatCleanSourceLabel(audio, quality),
+                                            isTorrent = true,
+                                            infoHash = hash,
+                                            fileIdx = s.fileIdx,
+                                            audioType = audio,
+                                            methodType = "BUILTIN",
+                                            seeders = seeds,
+                                            filename = s.filename ?: s.title,
+                                            formatBadge = quality,
+                                            subtitles = s.subtitles,
+                                            sizeBytes = s.sizeBytes,
+                                            score = score
+                                        )
                                     )
-                                )
+                                }
                             }
-                        }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (_: Exception) {}
-                    found
-                }
-            }
-        }.toMutableList()
-
-        if (runFallbackImmediately) {
-            jobs += async(Dispatchers.IO) {
-                FallbackStreamResolvers.resolveFallbackStreams(
-                    titles = candidateTitles,
-                    episodeNum = episodeNum,
-                    isStandalone = isStandalone,
-                    isAdult = isAdult,
-                    isEcchi = isEcchi,
-                    isMusicOrConcert = isMusicOrConcert,
-                    preferredAudio = preferredAudio,
-                    preferredQuality = preferredQuality,
-                    trailerYoutubeId = trailerYoutubeId,
-                    externalLinks = externalLinks
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {}
+                        found.toList()
+                    }
                 )
             }
+        }
+
+        if (runFallbackImmediately) {
+            jobs.add(
+                async(Dispatchers.IO) {
+                    FallbackStreamResolvers.resolveFallbackStreams(
+                        titles = candidateTitles,
+                        episodeNum = episodeNum,
+                        isStandalone = isStandalone,
+                        isAdult = isAdult,
+                        isEcchi = isEcchi,
+                        isMusicOrConcert = isMusicOrConcert,
+                        preferredAudio = preferredAudio,
+                        preferredQuality = preferredQuality,
+                        trailerYoutubeId = trailerYoutubeId,
+                        externalLinks = externalLinks
+                    )
+                }
+            )
         }
 
         val initial = if (jobs.isEmpty()) emptyList() else collectRankedStreams(jobs, onStreamsUpdated)
