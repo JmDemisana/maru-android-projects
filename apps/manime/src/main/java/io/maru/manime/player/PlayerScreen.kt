@@ -30,7 +30,8 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -85,11 +86,13 @@ import io.maru.manime.extensions.AniSkipInterval
 import io.maru.manime.extensions.CrunchyrollStreamEngine
 import io.maru.manime.extensions.ExternalSubtitleItem
 import io.maru.manime.extensions.AdultStreamFallback
+import io.maru.manime.extensions.PlaybackSourcePreference
 import io.maru.manime.extensions.StreamLink
 import io.maru.manime.extensions.StreamMatchUnverifiedException
 import io.maru.manime.extensions.StreamSearchIncompleteException
 import io.maru.manime.extensions.SubtitleTrack
 import io.maru.manime.extensions.playbackIdentity
+import io.maru.manime.extensions.sourceFamilyLabel
 import io.maru.manime.torrent.STREAM_READ_TIMEOUT_MS
 import io.maru.manime.torrent.TorrentStreamService
 import io.maru.manime.torrent.canPlayWithRating
@@ -270,6 +273,7 @@ private fun EpisodePlayerScreen(
     var activeSkipInterval by remember { mutableStateOf<AniSkipInterval?>(null) }
 
     var showFullSettingsPage by remember { mutableStateOf(false) }
+    var showVideoSourcesFirst by remember { mutableStateOf(false) }
     var showCastDialog by remember { mutableStateOf(false) }
 
     // Gallery MP4 snippet clipper state
@@ -636,6 +640,26 @@ private fun EpisodePlayerScreen(
         }
     }
 
+    fun openPlaybackSettings(videoSourcesFirst: Boolean = false) {
+        showVideoSourcesFirst = videoSourcesFirst
+        showFullSettingsPage = true
+    }
+
+    fun selectVideoSource(stream: StreamLink) {
+        showFullSettingsPage = false
+        val audio = activeAudioMode
+        val preference = PlaybackSourcePreference.from(stream, audio)
+        persistenceScope.launch {
+            prefs.savePlaybackSourcePreference(media.mediaId, episodeNum, audio, preference)
+        }
+        if (stream.playbackIdentity != selectedStream?.playbackIdentity ||
+            resolveError != null || waitingForAlternative != null
+        ) {
+            attemptedSources.clear()
+            playStream(stream)
+        }
+    }
+
     var streamReload by remember { mutableIntStateOf(0) }
     val isExplicitAdult = isExplicitAdultAnime(media.isAdult, media.genres)
     var triedAdultFallback by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
@@ -655,6 +679,7 @@ private fun EpisodePlayerScreen(
     }
 
     LaunchedEffect(streamReload) {
+        var startFallback: Job? = null
         try {
             isResolvingStreams = true
             resolveError = null
@@ -709,7 +734,7 @@ private fun EpisodePlayerScreen(
 
             isOfflinePlayback = false
             val prefQual = prefs.preferredQuality.first()
-            var startFallback: Job? = null
+            val savedSource = prefs.playbackSourcePreference(media.mediaId, episodeNum, activeAudioMode).first()
             val streams = CrunchyrollStreamEngine.resolveRankedStreams(
                 anilistId = media.mediaId,
                 animeTitle = media.title,
@@ -733,19 +758,24 @@ private fun EpisodePlayerScreen(
                         it.playbackIdentity !in attemptedSources && (!it.isTorrent || it.seeders != 0)
                     }
                     if (selectedStream == null || waitingForAlternative != null) {
-                        val preferred = candidates.firstOrNull {
-                            it.audioType == activeAudioMode || it.audioType == "DUAL_AUDIO"
+                        val remembered = savedSource.takeIf { selectedStream == null }
+                        val preferred = if (remembered != null) {
+                            remembered.pick(candidates, partial = true)
+                        } else {
+                            candidates.firstOrNull { it.audioType == activeAudioMode || it.audioType == "DUAL_AUDIO" }
                         }
                         if (preferred != null) {
                             startFallback?.cancel()
                             playStream(preferred)
                         } else if (candidates.isNotEmpty() && startFallback?.isActive != true) {
                             startFallback = launch {
-                                delay(750)
+                                delay(if (remembered == null) 750L else 3_000L)
                                 if (selectedStream == null || waitingForAlternative != null) {
-                                    rankedStreams.firstOrNull {
+                                    val available = rankedStreams.filter {
                                         it.playbackIdentity !in attemptedSources && (!it.isTorrent || it.seeders != 0)
-                                    }?.let(::playStream)
+                                    }
+                                    (remembered.takeIf { selectedStream == null }?.pick(available)
+                                        ?: available.firstOrNull())?.let(::playStream)
                                 }
                             }
                         }
@@ -758,7 +788,7 @@ private fun EpisodePlayerScreen(
                 streams.none { !it.isTorrent || it.seeders != 0 }
             isResolvingStreams = false
             if (selectedStream == null || waitingForAlternative != null) {
-                val remaining = nextUntriedSource(streams)
+                val remaining = savedSource.takeIf { selectedStream == null }?.pick(streams) ?: nextUntriedSource(streams)
                 if (remaining != null) playStream(remaining)
                 else {
                     isPlayerBuffering = false
@@ -783,6 +813,7 @@ private fun EpisodePlayerScreen(
                 waitingForAlternative = null
             }
         } finally {
+            startFallback?.cancel()
             isResolvingStreams = false
         }
     }
@@ -804,8 +835,9 @@ private fun EpisodePlayerScreen(
             return@LaunchedEffect
         }
         triedAdultFallback = true
+        val failedAttempt = playbackAttempt
         val sources = AdultStreamFallback.resolve(media.mediaId, episodeNum, media.candidateTitlesForStream)
-        if (sources.isNotEmpty()) {
+        if (sources.isNotEmpty() && resolveError != null && playbackAttempt == failedAttempt) {
             rankedStreams = (rankedStreams + sources).distinctBy { it.playbackIdentity }
             playStream(sources.first())
         }
@@ -1514,7 +1546,10 @@ private fun EpisodePlayerScreen(
                 onRetry = {
                     skipOffline = isOfflinePlayback && !offlineOnly
                     streamReload++
-                }
+                },
+                onSettings = if (!isOfflinePlayback && rankedStreams.isNotEmpty()) {
+                    { openPlaybackSettings(videoSourcesFirst = true) }
+                } else null
             )
         }
 
@@ -1529,7 +1564,8 @@ private fun EpisodePlayerScreen(
                 lookingForSource = waitingForAlternative != null || (selectedStream == null && isResolvingStreams),
                 torrentRequest = expectedTorrentRequest,
                 serviceStatus = serviceStatus,
-                onBack = onBack
+                onBack = onBack,
+                onSettings = { openPlaybackSettings(videoSourcesFirst = !offlineOnly && !isOfflinePlayback) }
             )
         }
 
@@ -1588,7 +1624,7 @@ private fun EpisodePlayerScreen(
                     onPipClick = if (!isCasting && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         { enterPip() }
                     } else null,
-                    onSettings = { showFullSettingsPage = true }
+                    onSettings = { openPlaybackSettings() }
                 )
 
                 BoxWithConstraints(
@@ -1722,7 +1758,7 @@ private fun EpisodePlayerScreen(
                         if (!scrubbing) controlsInteraction++
                     },
                     onSeek = ::performSeekTo,
-                    onOpenSettings = { showFullSettingsPage = true }
+                    onOpenSettings = { openPlaybackSettings() }
                 )
             }
         }
@@ -2019,6 +2055,10 @@ private fun EpisodePlayerScreen(
                             contentPadding = PaddingValues(top = 16.dp, bottom = 36.dp),
                             verticalArrangement = Arrangement.spacedBy(18.dp)
                         ) {
+                            if (showVideoSourcesFirst && !isOfflinePlayback) {
+                                videoSourceItems(rankedStreams, selectedStream, isResolvingStreams, ::selectVideoSource)
+                            }
+
                             item(key = "section_playback") {
                                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                     Text("Playback & Gestures", color = CrunchyOrange, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
@@ -2312,40 +2352,8 @@ private fun EpisodePlayerScreen(
                                 }
                             }
 
-                            if (!isOfflinePlayback && rankedStreams.size > 1) {
-                                item(key = "section_quality_header") {
-                                    Text("Video Sources", color = CrunchyOrange, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
-                                }
-                                items(rankedStreams.withIndex().toList(), key = { it.value.playbackIdentity.toString() }) { (idx, stream) ->
-                                    val isCurrent = stream.playbackIdentity == selectedStream?.playbackIdentity
-                                    Surface(
-                                        onClick = {
-                                            showFullSettingsPage = false
-                                            if (!isCurrent) {
-                                                attemptedSources.clear()
-                                                playStream(stream)
-                                            }
-                                        },
-                                        shape = RoundedCornerShape(4.dp),
-                                        color = if (isCurrent) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
-                                        border = BorderStroke(1.dp, if (isCurrent) CrunchyOrange else CrunchyBorder),
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(14.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text("Source ${idx + 1} • ${stream.quality}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                                Text(stream.sourceName, color = MaruTextMuted, fontSize = 12.sp)
-                                            }
-                                            if (isCurrent) {
-                                                Icon(Icons.Default.Check, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(18.dp))
-                                            }
-                                        }
-                                    }
-                                }
+                            if (!showVideoSourcesFirst && !isOfflinePlayback && rankedStreams.isNotEmpty()) {
+                                videoSourceItems(rankedStreams, selectedStream, isResolvingStreams, ::selectVideoSource)
                             }
                         }
                     }
@@ -2362,6 +2370,56 @@ private fun EpisodePlayerScreen(
                 onDisconnect = { castController.disconnect() },
                 onDismiss = { showCastDialog = false }
             )
+        }
+    }
+}
+
+private fun LazyListScope.videoSourceItems(
+    streams: List<StreamLink>,
+    current: StreamLink?,
+    searching: Boolean,
+    onSelect: (StreamLink) -> Unit
+) {
+    item(key = "section_video_sources") {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Video Sources", color = CrunchyOrange, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+            if (streams.isEmpty()) {
+                Text(
+                    if (searching) "Looking for video sources…" else "No video sources available.",
+                    color = MaruTextMuted,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+    }
+    itemsIndexed(streams, key = { _, stream -> stream.playbackIdentity.toString() }) { index, stream ->
+        val isCurrent = stream.playbackIdentity == current?.playbackIdentity
+        val seedCount = stream.seeders?.takeIf { stream.isTorrent }
+        val sourceDetails = listOfNotNull(
+            stream.sourceName,
+            stream.sourceFamilyLabel(),
+            seedCount?.let { "$it ${if (it == 1) "seed" else "seeds"}" }
+        ).distinct().joinToString(" • ")
+        Surface(
+            onClick = { onSelect(stream) },
+            shape = RoundedCornerShape(4.dp),
+            color = if (isCurrent) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
+            border = BorderStroke(1.dp, if (isCurrent) CrunchyOrange else CrunchyBorder),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier.padding(14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Source ${index + 1} • ${stream.quality}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text(sourceDetails, color = MaruTextMuted, fontSize = 12.sp)
+                }
+                if (isCurrent) {
+                    Icon(Icons.Default.Check, contentDescription = "Current source", tint = CrunchyOrange, modifier = Modifier.size(18.dp))
+                }
+            }
         }
     }
 }

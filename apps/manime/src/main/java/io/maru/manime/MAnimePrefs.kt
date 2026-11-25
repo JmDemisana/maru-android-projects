@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
+import io.maru.manime.extensions.PlaybackSourcePreference
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -353,6 +354,28 @@ class MAnimePrefs(private val context: Context) {
         context.dataStore.edit { it[posKey(mediaId, ep)] = seconds }
     fun getPositionFlow(mediaId: Int, ep: Int): Flow<Long> =
         context.dataStore.data.map { it[posKey(mediaId, ep)] ?: 0L }
+
+    private fun sourcePreferenceKey(mediaId: Int, audio: String, episode: Int? = null) =
+        stringPreferencesKey("player_source_${mediaId}_${audio}_${episode ?: "series"}")
+
+    internal fun playbackSourcePreference(mediaId: Int, episode: Int, audio: String): Flow<PlaybackSourcePreference?> =
+        context.dataStore.data.map { prefs ->
+            PlaybackSourcePreference.decode(prefs[sourcePreferenceKey(mediaId, audio, episode)])
+                ?: PlaybackSourcePreference.decode(prefs[sourcePreferenceKey(mediaId, audio)])
+        }
+
+    internal suspend fun savePlaybackSourcePreference(
+        mediaId: Int,
+        episode: Int,
+        audio: String,
+        preference: PlaybackSourcePreference
+    ) = context.dataStore.edit { prefs ->
+        prefs[sourcePreferenceKey(mediaId, audio, episode)] = preference.encode()
+        val seriesKey = sourcePreferenceKey(mediaId, audio)
+        val seriesPreference = preference.forSeries()
+        if (seriesPreference != null) prefs[seriesKey] = seriesPreference.encode()
+        else prefs.remove(seriesKey)
+    }
 
     // Per-episode snippet clipper config: "mediaId:ep" -> JSON
     private fun snippetConfigKey(mediaId: Int, ep: Int) = stringPreferencesKey("snippet_cfg_${mediaId}_$ep")

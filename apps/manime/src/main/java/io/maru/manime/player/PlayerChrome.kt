@@ -145,9 +145,10 @@ internal fun PlayerLoading(
     lookingForSource: Boolean,
     torrentRequest: String?,
     serviceStatus: State<ActiveStreamStatus>,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onSettings: () -> Unit
 ) {
-    PlayerStatusLayout(title, episode, onBack) {
+    PlayerStatusLayout(title, episode, onBack, onSettings) {
         val status = if (torrentRequest == null) null
         else serviceStatus.value.takeIf { it.requestId == torrentRequest && !it.isReady }
         val stateLabel = when {
@@ -187,9 +188,10 @@ internal fun PlayerProblem(
     message: String,
     retryLabel: String,
     onBack: () -> Unit,
-    onRetry: () -> Unit
+    onRetry: () -> Unit,
+    onSettings: (() -> Unit)? = null
 ) {
-    PlayerStatusLayout(title, episode, onBack) {
+    PlayerStatusLayout(title, episode, onBack, onSettings) {
         Icon(Icons.Default.ErrorOutline, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(36.dp))
         Text(
             text = message,
@@ -216,6 +218,7 @@ private fun PlayerStatusLayout(
     title: String,
     episode: String,
     onBack: () -> Unit,
+    onSettings: (() -> Unit)?,
     content: @Composable ColumnScope.() -> Unit
 ) {
     Column(
@@ -224,7 +227,7 @@ private fun PlayerStatusLayout(
             .background(Color(0xEB08090C))
             .windowInsetsPadding(WindowInsets.safeDrawing)
     ) {
-        PlayerHeader(title, episode, onBack)
+        PlayerHeader(title, episode, onBack, onSettings = onSettings)
         Box(
             Modifier
                 .weight(1f)
