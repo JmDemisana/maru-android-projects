@@ -1,17 +1,21 @@
-name: Nanami Anime Release
+name: Nanami Anime Completer
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. nanami-anime-v2.1.1)"
+        description: "Stable release tag (e.g. nanami-anime-v2.1.2)"
         required: true
+      rotator_run:
+        description: "Successful Rotator run ID to promote (leave blank for an existing stable tag)"
+        required: false
   push:
     tags:
       - "nanami-anime-v*"
       - "!*rotator*"
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
@@ -27,7 +31,56 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.rotator_run == '' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+
+      - name: Resolve release source and version
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+          ROTATOR_RUN: ${{ inputs.rotator_run }}
+        run: |
+          set -euo pipefail
+          TAG="${REQUESTED_TAG:-$GITHUB_REF_NAME}"
+          if ! [[ "$TAG" =~ ^nanami-anime-v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$ ]]; then
+            echo "::error::Expected a stable tag in the form nanami-anime-vX.Y.Z"
+            exit 1
+          fi
+
+          if [ -n "$ROTATOR_RUN" ]; then
+            if ! [[ "$ROTATOR_RUN" =~ ^[0-9]+$ ]]; then
+              echo "::error::Enter the numeric run ID from the Rotator release notes."
+              exit 1
+            fi
+            if ! SOURCE=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ROTATOR_RUN" |
+              jq -er --arg repo "$GITHUB_REPOSITORY" '
+                select(.path == ".github/workflows/nanami-anime-rotator.yml" and
+                  .head_branch == "main" and .head_repository.full_name == $repo and
+                  .status == "completed" and .conclusion == "success") |
+                .head_sha | select(test("^[0-9a-f]{40}$"))'); then
+              echo "::error::That run must be a successful Nanami Anime Rotator build from main."
+              exit 1
+            fi
+            git checkout --detach "$SOURCE"
+          fi
+
+          SOURCE=$(git rev-parse HEAD)
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            if [ "$(git rev-parse "refs/tags/$TAG^{commit}")" != "$SOURCE" ]; then
+              echo "::error::$TAG already points to a different commit."
+              exit 1
+            fi
+          else
+            echo "create_tag=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha=$SOURCE" >> "$GITHUB_OUTPUT"
+          VERSION_NAME="${TAG#nanami-anime-v}"
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "NANAMI_ANIME_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          # The stable build can update the Rotator built from the same commit.
+          VERSION_CODE=$((1001 + 2 * $(git rev-list --count HEAD)))
+          echo "NANAMI_ANIME_VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "Building Nanami Anime $VERSION_NAME from $SOURCE (code $VERSION_CODE)"
 
       - name: Set up JDK 25
         uses: actions/setup-java@v5
@@ -47,27 +100,6 @@ jobs:
           "$SDKMANAGER" --sdk_root="$SDK" "platforms;android-36" "build-tools;36.1.0" > /dev/null
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-
-      - name: Resolve release version
-        env:
-          REQUESTED_TAG: ${{ inputs.tag }}
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            TAG="$REQUESTED_TAG"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          if ! [[ "$TAG" =~ ^nanami-anime-v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$ ]]; then
-            echo "::error::Expected a stable tag in the form nanami-anime-vX.Y.Z"
-            exit 1
-          fi
-          VERSION_NAME="${TAG#nanami-anime-v}"
-          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
-          echo "NANAMI_ANIME_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
-          # Stable builds are one code above a rotator build from the same commit.
-          VERSION_CODE=$((1001 + 2 * $(git rev-list --count HEAD)))
-          echo "NANAMI_ANIME_VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
-          echo "Building Nanami Anime Release $VERSION_NAME from tag $TAG (code $VERSION_CODE)"
 
       - name: Prepare signing key
         env:
@@ -131,13 +163,20 @@ jobs:
           name: nanami-anime-${{ env.NANAMI_ANIME_VERSION_NAME }}
           path: out/*
 
+      - name: Create the version tag for a promoted Rotator
+        if: steps.source.outputs.create_tag == 'true'
+        run: git push origin "HEAD:refs/tags/$RELEASE_TAG"
+
       - name: Publish official GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ steps.source.outputs.sha }}
           name: Nanami Anime ${{ env.NANAMI_ANIME_VERSION_NAME }}
+          draft: false
           prerelease: false
           make_latest: "false"
+          fail_on_unmatched_files: true
           files: |
             out/nanami-anime-${{ env.NANAMI_ANIME_VERSION_NAME }}.apk
             out/SHA256SUMS.txt
@@ -146,28 +185,59 @@ jobs:
 
       - name: Prepare the stable download link
         id: stable_link
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          LATEST_TAG=$(git tag --list 'nanami-anime-v*' --sort=-version:refname |
-            awk '/^nanami-anime-v[0-9]+\.[0-9]+\.[0-9]+$/ && !found { print; found=1 }')
+          set -euo pipefail
+          LATEST_TAG=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' |
+            awk '/^nanami-anime-v[0-9]+\.[0-9]+\.[0-9]+$/' | sort -V | tail -n 1)
           if [ "$LATEST_TAG" = "$RELEASE_TAG" ]; then
-            mkdir -p stable
-            cp "out/nanami-anime-${NANAMI_ANIME_VERSION_NAME}.apk" stable/nanami-anime-stable.apk
+            mkdir -p latest stable
+            APK="out/nanami-anime-${NANAMI_ANIME_VERSION_NAME}.apk"
+            cp "$APK" latest/nanami-anime-latest.apk
+            cp "$APK" stable/nanami-anime-stable.apk
+            (cd latest && sha256sum nanami-anime-latest.apk > SHA256SUMS.txt)
             (cd stable && sha256sum nanami-anime-stable.apk > SHA256SUMS.txt)
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Refresh the Nanami Anime stable APK link
+      - name: Update the latest stable release
+        if: steps.stable_link.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nanami-anime-latest
+          target_commitish: ${{ steps.source.outputs.sha }}
+          name: Nanami Anime Latest Stable (${{ env.NANAMI_ANIME_VERSION_NAME }})
+          draft: false
+          prerelease: false
+          make_latest: "false"
+          fail_on_unmatched_files: true
+          files: |
+            latest/nanami-anime-latest.apk
+            latest/SHA256SUMS.txt
+          body: |
+            Current stable release: **${{ env.NANAMI_ANIME_VERSION_NAME }}**.
+            [Release notes](https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }})
+
+      - name: Refresh the existing website download link
         if: steps.stable_link.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: nanami-anime-stable
-          target_commitish: ${{ github.sha }}
+          target_commitish: ${{ steps.source.outputs.sha }}
           name: Nanami Anime Stable Download
-          prerelease: true
+          draft: false
+          prerelease: false
           make_latest: "false"
+          fail_on_unmatched_files: true
           files: |
             stable/nanami-anime-stable.apk
             stable/SHA256SUMS.txt
           body: |
-            Stable APK link for the Maru website. Current version: ${{ env.NANAMI_ANIME_VERSION_NAME }}.
-            [Release details](https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }})
+            Compatibility download for the Maru website. Current version: **${{ env.NANAMI_ANIME_VERSION_NAME }}**.
+            [Current stable release](https://github.com/${{ github.repository }}/releases/tag/nanami-anime-latest)
+
+      - name: Point both stable download tags at the published commit
+        if: steps.stable_link.outputs.publish == 'true'
+        run: git push --atomic origin "+HEAD:refs/tags/nanami-anime-latest" "+HEAD:refs/tags/nanami-anime-stable"

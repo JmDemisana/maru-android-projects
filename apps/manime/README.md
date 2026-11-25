@@ -1,8 +1,8 @@
-# Nanami Anime 2.1.2
+# Nanami Anime
 
 Nanami Anime is an Android anime player and AniList companion.
 
-[Download the latest signed Android APK](https://github.com/JmDemisana/maru-android-projects/releases/download/nanami-anime-stable/nanami-anime-stable.apk)
+[Download the latest stable APK](https://github.com/JmDemisana/maru-android-projects/releases/download/nanami-anime-latest/nanami-anime-latest.apk) · [Download the Rotator APK](https://github.com/JmDemisana/maru-android-projects/releases/download/nanami-anime-rotator/nanami-anime-rotator.apk)
 
 ## What's new in 2.1.2
 
@@ -26,12 +26,15 @@ Nanami Anime is an Android anime player and AniList companion.
 
 ## Installation
 
-Open the APK on your Android device. Android may ask you to allow installation from the browser or file manager you used to open it. The release includes [a SHA-256 checksum](https://github.com/JmDemisana/maru-android-projects/releases/download/nanami-anime-stable/SHA256SUMS.txt).
+Open the APK on your Android device. Android may ask you to allow installation from the browser or file manager you used to open it. The stable APK includes [a SHA-256 checksum](https://github.com/JmDemisana/maru-android-projects/releases/download/nanami-anime-latest/SHA256SUMS.txt).
 
 ## Updates and diagnostics
 
-In Settings, go to **Private Offline Vault & About**. **Check for Updates** finds official Nanami Anime releases and hands a verified APK to Android's installer. **Copy Log Dump to Clipboard** checks the app's online services and tries to render the first frame of sample episodes. The report stays on your device until you share it.
+Starting in 2.1.2, go to **Settings → Private Offline Vault & About**. **Check for Updates** finds official Nanami Anime releases and hands a verified APK to Android's installer. **Copy Log Dump to Clipboard** checks the app's online services and tries to render the first frame of sample episodes. The report stays on your device until you share it.
 
-- Stable releases have their own `nanami-anime-vX.Y.Z` tags and publish a signed APK, checksum, and `update.json`.
-- The `nanami-anime-stable` download link tracks the latest stable APK.
-- Preview releases have their own `nanami-anime-preview-vX.Y.Z.N` tags. The `nanami-anime-latest` prerelease continues to serve the rolling preview APK. The app updater follows stable tags.
+## Release channels
+
+- **Stable.** Each version has a `nanami-anime-vX.Y.Z` tag with a signed APK, checksum, and `update.json`. The in-app updater reads these versioned releases. The `nanami-anime-latest` tag tracks the current stable APK.
+- **Rotator.** Successful development builds from `main` replace the APK and checksum on the single `nanami-anime-rotator` prerelease. Its notes list the exact commit and Actions run.
+
+To promote a tested build, open **Actions → Nanami Anime Completer → Run workflow** on `main`. Enter the next stable tag, such as `nanami-anime-v2.1.2`, and the run ID from the tested Rotator. Completer checks out that exact commit, runs the tests, and signs a fresh APK with the stable version. It publishes the versioned release and updates the stable download.

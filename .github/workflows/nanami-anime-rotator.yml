@@ -12,8 +12,13 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: nanami-anime-rotator
+  cancel-in-progress: false
+
 jobs:
   build:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
 
     steps:
@@ -21,6 +26,14 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
+      - name: Check the rolling tag
+        run: |
+          if git show-ref --verify --quiet refs/tags/nanami-anime-rotator &&
+             ! git merge-base --is-ancestor refs/tags/nanami-anime-rotator HEAD; then
+            echo "::error::This run is older than the published Rotator. Run the workflow from main."
+            exit 1
+          fi
 
       - name: Set up JDK 25
         uses: actions/setup-java@v5
@@ -46,9 +59,9 @@ jobs:
           set -euo pipefail
           BASE_VERSION=$(git tag --merged HEAD --list 'nanami-anime-v*' --sort=-version:refname |
             awk '/^nanami-anime-v[0-9]+\.[0-9]+\.[0-9]+$/ && !found { sub(/^nanami-anime-v/, ""); print; found=1 }')
-          VERSION_NAME="${BASE_VERSION:-2.1.1}-rotator.${GITHUB_RUN_NUMBER}"
+          IFS=. read -r major minor patch <<< "${BASE_VERSION:-2.1.1}"
+          VERSION_NAME="$major.$minor.$((10#$patch + 1))-rotator.$GITHUB_RUN_NUMBER"
           echo "NANAMI_ANIME_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
-          echo "NANAMI_ANIME_ROTATOR_TAG=nanami-anime-preview-v${BASE_VERSION:-2.1.1}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
           VERSION_CODE=$((1000 + 2 * $(git rev-list --count HEAD)))
           echo "NANAMI_ANIME_VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "Building Nanami Anime Rotator $VERSION_NAME (code $VERSION_CODE)"
@@ -58,20 +71,19 @@ jobs:
           MARU_STUDY_KEYSTORE_B64: ${{ secrets.MARU_STUDY_KEYSTORE_B64 }}
         run: |
           set -euo pipefail
-          if [ -n "${MARU_STUDY_KEYSTORE_B64:-}" ]; then
-            mkdir -p apps/manime/keystore
-            KEYSTORE=apps/manime/keystore/nanami-anime-release.jks
-            printf '%s' "$MARU_STUDY_KEYSTORE_B64" | base64 --decode > "$KEYSTORE"
-            cat > apps/manime/keystore.properties <<'EOF'
+          if [ -z "${MARU_STUDY_KEYSTORE_B64:-}" ]; then
+            echo "::error::Missing MARU_STUDY_KEYSTORE_B64 repository secret."
+            exit 1
+          fi
+          mkdir -p apps/manime/keystore
+          KEYSTORE=apps/manime/keystore/nanami-anime-release.jks
+          printf '%s' "$MARU_STUDY_KEYSTORE_B64" | base64 --decode > "$KEYSTORE"
+          cat > apps/manime/keystore.properties <<'EOF'
           storeFile=keystore/nanami-anime-release.jks
           storePassword=maru-study-release
           keyAlias=maru-study
           keyPassword=maru-study-release
           EOF
-            echo "Configured permanent release keystore."
-          else
-            echo "Using fallback debug signing key."
-          fi
 
       - name: Test and build Nanami Anime rotator APK
         run: |
@@ -89,10 +101,8 @@ jobs:
       - name: Stage APK
         run: |
           mkdir -p out
-          cp "$BUILT_APK" "out/nanami-anime-${NANAMI_ANIME_VERSION_NAME}.apk"
-          cp "$BUILT_APK" "out/nanami-anime-latest.apk"
-          (cd out && sha256sum "nanami-anime-${NANAMI_ANIME_VERSION_NAME}.apk" > SHA256SUMS.txt)
-          (cd out && sha256sum nanami-anime-latest.apk > SHA256SUMS-latest.txt)
+          cp "$BUILT_APK" out/nanami-anime-rotator.apk
+          (cd out && sha256sum nanami-anime-rotator.apk > SHA256SUMS.txt)
           ls -lh out
 
       - name: Upload artifact
@@ -101,32 +111,26 @@ jobs:
           name: nanami-anime-rotator-${{ env.NANAMI_ANIME_VERSION_NAME }}
           path: out/*
 
-      - name: Publish versioned rotator prerelease
+      - name: Update the rolling Rotator prerelease
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.NANAMI_ANIME_ROTATOR_TAG }}
+          tag_name: nanami-anime-rotator
           target_commitish: ${{ github.sha }}
-          name: Nanami Anime ${{ env.NANAMI_ANIME_VERSION_NAME }}
-          prerelease: true
-          make_latest: "false"
-          files: |
-            out/nanami-anime-${{ env.NANAMI_ANIME_VERSION_NAME }}.apk
-            out/SHA256SUMS.txt
-
-      - name: Refresh the rolling preview download link
-        run: cp out/SHA256SUMS-latest.txt out/SHA256SUMS.txt
-
-      - name: Update rolling nanami-anime-latest pre-release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: nanami-anime-latest
           name: Nanami Anime Rotator (${{ env.NANAMI_ANIME_VERSION_NAME }})
+          draft: false
           prerelease: true
           make_latest: "false"
+          fail_on_unmatched_files: true
           files: |
-            out/nanami-anime-latest.apk
+            out/nanami-anime-rotator.apk
             out/SHA256SUMS.txt
           body: |
-            Rolling Rotator pre-release build for **Nanami Anime** (`${{ env.NANAMI_ANIME_VERSION_NAME }}`, commit `${{ github.sha }}`).
+            Rolling development build for **Nanami Anime** (`${{ env.NANAMI_ANIME_VERSION_NAME }}`).
 
-            This preview has its own release at [${{ env.NANAMI_ANIME_ROTATOR_TAG }}](https://github.com/${{ github.repository }}/releases/tag/${{ env.NANAMI_ANIME_ROTATOR_TAG }}).
+            [GitHub Actions run ${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) built and tested commit `${{ github.sha }}`.
+            Once verified on a device, use that run ID in **Nanami Anime Completer** to publish a stable version.
+
+            [Latest stable build](https://github.com/${{ github.repository }}/releases/tag/nanami-anime-latest)
+
+      - name: Point the rolling tag at the published commit
+        run: git push origin "+HEAD:refs/tags/nanami-anime-rotator"
