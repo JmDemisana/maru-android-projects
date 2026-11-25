@@ -3,50 +3,26 @@ package io.maru.manime
 import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.SurfaceTexture
 import android.media.MediaCodecList
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import android.net.Uri
 import android.os.Build
 import android.os.StatFs
 import android.os.SystemClock
 import android.system.Os
 import android.system.OsConstants
-import android.view.Surface
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.exoplayer.DefaultRenderersFactory
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import io.maru.manime.extensions.CrunchyrollStreamEngine
-import io.maru.manime.extensions.StreamLink
-import io.maru.manime.extensions.StreamMatchUnverifiedException
-import io.maru.manime.extensions.StreamSearchIncompleteException
-import io.maru.manime.player.PlayerForegroundService
 import io.maru.manime.torrent.TorrentStreamService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.selects.select
-import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.libtorrent4j.LibTorrent
 import java.time.Instant
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 
-@OptIn(UnstableApi::class)
 internal object NanamiDiagnostics {
     private const val MIB = 1024L * 1024L
-    private const val PLAYBACK_TIMEOUT_MS = 85_000L
 
     data class Progress(val completed: Int, val total: Int, val label: String)
 
@@ -57,29 +33,11 @@ internal object NanamiDiagnostics {
         val status: String? = null
     )
 
-    private data class PlaybackCase(val label: String, val id: Int, val episode: Int, val adult: Boolean = false)
     private data class Check(val label: String, val timeoutMs: Long = 12_000L, val action: suspend () -> String)
-
-    private val playbackCases = listOf(
-        PlaybackCase("One Piece E1", 21, 1),
-        PlaybackCase("One Piece E2", 21, 2),
-        PlaybackCase("Sailor Moon Crystal Seasons 1–2 E1", 14751, 1),
-        PlaybackCase("Sailor Moon Crystal Seasons 1–2 E18", 14751, 18),
-        PlaybackCase("Sailor Moon Crystal Season 3 E1", 21462, 1),
-        PlaybackCase("Your Name", 21519, 1),
-        PlaybackCase("Rune's Pharmacy E1", 105562, 1, adult = true),
-        PlaybackCase("euphoria E1", 10851, 1, adult = true),
-        PlaybackCase("Otome Domain E1", 99441, 1, adult = true)
-    )
 
     private class ProbeFailure(message: String) : Exception(message)
 
-    suspend fun collect(
-        context: Context,
-        includeAdult: Boolean,
-        startTorrent: (StreamLink, Int) -> String?,
-        progress: (Progress) -> Unit
-    ): String {
+    suspend fun collect(context: Context, progress: (Progress) -> Unit): String {
         val prefs = MAnimePrefs(context.applicationContext)
         val lines = deviceInfo(context).toMutableList()
 
@@ -91,12 +49,6 @@ internal object NanamiDiagnostics {
                 throw e
             } catch (e: ProbeFailure) {
                 "FAIL: ${e.message}"
-            } catch (_: StreamMatchUnverifiedException) {
-                "FAIL: listings found but episode did not match"
-            } catch (_: StreamSearchIncompleteException) {
-                "FAIL: provider search incomplete"
-            } catch (e: PlaybackException) {
-                "FAIL: ${e.errorCodeName}"
             } catch (e: LinkageError) {
                 "FAIL: native library couldn't load (${e.javaClass.simpleName})"
             } catch (e: Exception) {
@@ -113,7 +65,7 @@ internal object NanamiDiagnostics {
             null
         }
         val token = session?.token?.takeIf(String::isNotBlank)
-        val serviceChecks = listOf(
+        val checks = listOf(
             Check("Preferences") { if (session != null) "PASS" else "FAIL: settings didn't load" },
             Check("AniList anime search") {
                 val results = AniListClient.search("One Piece", perPage = 5, hideNsfwContent = true).results
@@ -182,171 +134,12 @@ internal object NanamiDiagnostics {
             }
         )
 
-        val details = mutableMapOf<Int, AnimeMedia>()
-        val allowedAdult = includeAdult && token != null && session?.contentOptions?.displayAdultContent == true
-        val playbackChecks = playbackCases.filter { !it.adult || allowedAdult }.map { sample ->
-            Check("Playback ${sample.label}", PLAYBACK_TIMEOUT_MS + 5_000L) {
-                unlessPlayerOpen {
-                    val attempts = mutableListOf<String>()
-                    var stage = "AniList title details"
-                    val result = withTimeoutOrNull(PLAYBACK_TIMEOUT_MS) playback@{
-                        val media = details[sample.id] ?: AniListClient.getMediaDetail(sample.id, token.takeIf { sample.adult })
-                            .also { details[sample.id] = it }
-                        if ((sample.adult || isExplicitAdultAnime(media.isAdult, media.genres)) && !allowedAdult) {
-                            return@playback "SKIP: adult content hidden"
-                        }
-                        stage = "source lookup"
-                        val streams = withTimeoutOrNull(28_000L) {
-                            CrunchyrollStreamEngine.resolveRankedStreams(
-                                anilistId = media.mediaId,
-                                animeTitle = media.title,
-                                episodeNum = sample.episode,
-                                preferredAudio = prefs.preferredAudio.first(),
-                                preferredQuality = prefs.preferredQuality.first(),
-                                isMovie = media.format == "MOVIE",
-                                altTitles = media.candidateTitlesForStream,
-                                isStandalone = media.isStandaloneFeature,
-                                isAdult = media.isAdult,
-                                genres = media.genres,
-                                isMusicOrConcert = media.isMusicOrConcert,
-                                trailerYoutubeId = media.trailerYoutubeId,
-                                externalLinks = media.externalLinks
-                            )
-                        } ?: return@playback "TIMEOUT: source lookup"
-                        if (streams.isEmpty()) throw ProbeFailure("no playable source found")
-                        val torrentAllowed = TorrentStreamService.isWifiOrEthernetActive(context)
-                        val eligible = streams.filter { !it.isTorrent || (torrentAllowed && it.seeders != 0) }
-                        if (eligible.isEmpty()) {
-                            return@playback if (!torrentAllowed) "SKIP: torrent checks require Wi-Fi or Ethernet"
-                            else "FAIL: all listed torrents reported zero seeds"
-                        }
-                        for ((index, source) in eligible.take(2).withIndex()) {
-                            val transport = if (source.isTorrent) "torrent" else "HTTP"
-                            val label = "source ${index + 1} ($transport, ${source.quality})"
-                            try {
-                                renderSource(context, source, sample.episode, startTorrent) { phase ->
-                                    stage = "$label $phase"
-                                }
-                                return@playback "PASS: first frame via $transport, ${source.quality}"
-                            } catch (e: PlaybackException) {
-                                attempts += "$label: ${e.errorCodeName}"
-                            } catch (e: ProbeFailure) {
-                                attempts += "$label: ${e.message}"
-                            }
-                        }
-                        "FAIL: ${attempts.joinToString(" | ")}"
-                    }
-                    result ?: (listOf("TIMEOUT: $stage") + attempts).joinToString(" | ")
-                }
-            }
-        }
-        val checks = serviceChecks + playbackChecks
         for ((index, check) in checks.withIndex()) {
-            if (index == serviceChecks.size && !allowedAdult) lines += "Adult playback samples: SKIP: adult content hidden"
             progress(Progress(index, checks.size, check.label))
             execute(check)
         }
-        lines += "A rendered frame confirms startup and decoding. Episode identity still needs a visual check."
         return lines.joinToString("\n")
     }
-
-    private suspend fun unlessPlayerOpen(action: suspend () -> String): String = supervisorScope {
-        if (PlayerForegroundService.playerOpen.value) return@supervisorScope "SKIP: another video is open"
-        val opened = async { PlayerForegroundService.playerOpen.first { it } }
-        val check = async { action() }
-        try {
-            select {
-                opened.onAwait { "SKIP: another video opened during this check" }
-                check.onAwait { it }
-            }
-        } finally {
-            opened.cancel()
-            check.cancel()
-        }
-    }
-
-    private suspend fun renderSource(
-        context: Context,
-        source: StreamLink,
-        episodeNum: Int,
-        startTorrent: (StreamLink, Int) -> String?,
-        onPhase: (String) -> Unit
-    ) {
-        if (!source.isTorrent) {
-            onPhase("waiting for the first frame")
-            renderFirstFrame(context, source.url, source.headers)
-            return
-        }
-        onPhase("waiting for torrent startup")
-        if (!TorrentStreamService.isWifiOrEthernetActive(context)) throw ProbeFailure("Wi-Fi or Ethernet disconnected")
-        val request = startTorrent(source, episodeNum) ?: throw ProbeFailure("another torrent stream is active")
-        try {
-            val state = withTimeoutOrNull(45_000L) {
-                TorrentStreamService.streamStatus.first { it.requestId != request || it.isReady || it.error != null }
-            }
-            if (state == null) {
-                val latest = TorrentStreamService.streamStatus.value
-                throw ProbeFailure("torrent startup timed out at ${latest.phase} (${latest.connectedPeers} peers)")
-            }
-            if (state.requestId != request) throw ProbeFailure("torrent yielded to another stream")
-            val url = state.streamUrl ?: throw ProbeFailure("torrent failed at ${state.phase} (${state.connectedPeers} peers)")
-            onPhase("waiting for the first frame")
-            renderFirstFrame(context, url, emptyMap())
-        } finally {
-            TorrentStreamService.stopStream(request)
-        }
-    }
-
-    private suspend fun renderFirstFrame(context: Context, url: String, headers: Map<String, String>) =
-        withContext(Dispatchers.Main.immediate) {
-            val texture = SurfaceTexture(false)
-            val surface = Surface(texture)
-            try {
-                val dataSource = DefaultDataSource.Factory(
-                    context, DefaultHttpDataSource.Factory().setDefaultRequestProperties(headers)
-                )
-                val renderers = DefaultRenderersFactory(context)
-                    .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
-                    .setEnableDecoderFallback(true)
-                val player = ExoPlayer.Builder(context, renderers)
-                    .setMediaSourceFactory(DefaultMediaSourceFactory(dataSource))
-                    .build()
-                try {
-                    val rendered = withTimeoutOrNull(16_000L) {
-                        suspendCancellableCoroutine { continuation ->
-                            player.addListener(object : Player.Listener {
-                                override fun onRenderedFirstFrame() {
-                                    if (continuation.isActive) continuation.resume(true)
-                                }
-
-                                override fun onPlayerError(error: PlaybackException) {
-                                    if (continuation.isActive) continuation.resumeWithException(error)
-                                }
-                            })
-                            player.volume = 0f
-                            player.setVideoSurface(surface)
-                            player.setMediaItem(MediaItem.fromUri(Uri.parse(url)))
-                            player.prepare()
-                            player.play()
-                        }
-                    }
-                    if (rendered != true) {
-                        val state = when (player.playbackState) {
-                            Player.STATE_BUFFERING -> "buffering"
-                            Player.STATE_READY -> "ready"
-                            Player.STATE_ENDED -> "ended"
-                            else -> "idle"
-                        }
-                        throw ProbeFailure("first-frame check timed out after 16 s ($state)")
-                    }
-                } finally {
-                    player.release()
-                }
-            } finally {
-                surface.release()
-                texture.release()
-            }
-        }
 
     @Suppress("DEPRECATION")
     private fun deviceInfo(context: Context): List<String> {

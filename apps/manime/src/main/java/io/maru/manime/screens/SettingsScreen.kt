@@ -586,7 +586,7 @@ fun SettingsScreen(
                         color = MaruTextStrong,
                         fontWeight = FontWeight.Bold
                     )
-                    NanamiSupportActions(hideNsfwContent)
+                    NanamiSupportActions()
                 }
             }
         }

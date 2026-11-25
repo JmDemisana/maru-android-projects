@@ -9,7 +9,7 @@ Nanami Anime is an Android anime player and AniList companion.
 - **Smarter source lookup.** Nanami tries romanized, English, and Japanese titles, punctuation variants, and shortened search terms. Playback still checks the episode and edition. An unconfirmed match, a failed provider request, and an empty search now have separate explanations.
 - **Broader device support.** The torrent engine includes all four Android architectures, with 16 KB page alignment on the 64-bit builds. Android 8 and 9 prompt for Gallery permission when exporting clips.
 - **AniList profiles and cast.** Followers and Following load independently with advanced pages and retry. The Cast tab activates when cast data is available.
-- **Updates and diagnostics.** Check for stable updates and copy a device and service report from **Settings → Private Offline Vault & About**.
+- **Updates and diagnostics.** Check for stable updates or generate a device and service report in the background. A progress bar shows each check, and you can copy the report when it’s ready.
 
 ## What’s new in 2.1.1
 
@@ -30,7 +30,9 @@ Open the APK on your Android device. Android may ask you to allow installation f
 
 ## Updates and diagnostics
 
-Starting in 2.1.2, go to **Settings → Private Offline Vault & About**. **Check for Updates** finds official Nanami Anime releases and hands a verified APK to Android's installer. **Generate Log Dump** checks online services and tries to render the first frame of sample episodes. Check its progress in Settings or leave it running while browsing or minimizing the app. Select **Copy Generated Log Dump to Clipboard** when the report is ready.
+Starting in 2.1.2, go to **Settings → Private Offline Vault & About**. **Check for Updates** finds official Nanami Anime releases and hands a verified APK to Android's installer. If you use 2.1.1 or earlier, download and install this release to get the built-in updater.
+
+**Generate Log Dump** collects device information and checks AniList, episode mapping, subtitles, and other app services. Check its progress in Settings or leave it running while browsing or minimizing the app. Choose **Copy Generated Log Dump to Clipboard** when the report is ready. If you're reporting a playback problem, include the anime, episode, and what happened.
 
 ## Release channels
 

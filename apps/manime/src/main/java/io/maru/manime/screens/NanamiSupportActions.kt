@@ -35,7 +35,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 @Composable
-internal fun NanamiSupportActions(hideNsfwContent: Boolean) {
+internal fun NanamiSupportActions() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val diagnostics by TorrentStreamService.diagnosticState.collectAsStateWithLifecycle()
@@ -158,13 +158,13 @@ internal fun NanamiSupportActions(hideNsfwContent: Boolean) {
             onDismissRequest = { confirmDiagnostics = false },
             title = { Text("Run diagnostic checks?") },
             text = {
-                Text("Nanami checks its online services and tries to render the first frame of each sample. This can take several minutes and use data. Torrent checks require Wi-Fi or Ethernet. The report stays on your device and excludes account names and tokens.")
+                Text("Nanami collects device details and checks app services. The report stays on your device and excludes account names and tokens.")
             },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDiagnostics = false
                     clipboardStatus = null
-                    TorrentStreamService.generateLogDump(context, includeAdult = !hideNsfwContent)
+                    TorrentStreamService.generateLogDump(context)
                 }) { Text("Generate") }
             },
             dismissButton = { TextButton(onClick = { confirmDiagnostics = false }) { Text("Cancel") } }

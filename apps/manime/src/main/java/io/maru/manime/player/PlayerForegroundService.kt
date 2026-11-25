@@ -10,8 +10,6 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
 
 class PlayerForegroundService : Service() {
 
@@ -21,11 +19,7 @@ class PlayerForegroundService : Service() {
         const val EXTRA_TITLE = "extra_title"
         const val EXTRA_EPISODE = "extra_episode"
 
-        private val _playerOpen = MutableStateFlow(false)
-        internal val playerOpen = _playerOpen.asStateFlow()
-
         fun start(context: Context, title: String, episode: Int) {
-            _playerOpen.value = true
             val intent = Intent(context, PlayerForegroundService::class.java).apply {
                 putExtra(EXTRA_TITLE, title)
                 putExtra(EXTRA_EPISODE, episode)
@@ -42,7 +36,6 @@ class PlayerForegroundService : Service() {
         }
 
         fun stop(context: Context) {
-            _playerOpen.value = false
             val intent = Intent(context, PlayerForegroundService::class.java)
             context.stopService(intent)
         }
