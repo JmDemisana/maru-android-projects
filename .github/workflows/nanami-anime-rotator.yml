@@ -43,8 +43,12 @@ jobs:
 
       - name: Resolve rotator version
         run: |
-          VERSION_NAME="2.1.1-rotator.${GITHUB_RUN_NUMBER}"
+          set -euo pipefail
+          BASE_VERSION=$(git tag --merged HEAD --list 'nanami-anime-v*' --sort=-version:refname |
+            awk '/^nanami-anime-v[0-9]+\.[0-9]+\.[0-9]+$/ && !found { sub(/^nanami-anime-v/, ""); print; found=1 }')
+          VERSION_NAME="${BASE_VERSION:-2.1.1}-rotator.${GITHUB_RUN_NUMBER}"
           echo "NANAMI_ANIME_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "NANAMI_ANIME_ROTATOR_TAG=nanami-anime-preview-v${BASE_VERSION:-2.1.1}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
           VERSION_CODE=$((1000 + 2 * $(git rev-list --count HEAD)))
           echo "NANAMI_ANIME_VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "Building Nanami Anime Rotator $VERSION_NAME (code $VERSION_CODE)"
@@ -87,7 +91,8 @@ jobs:
           mkdir -p out
           cp "$BUILT_APK" "out/nanami-anime-${NANAMI_ANIME_VERSION_NAME}.apk"
           cp "$BUILT_APK" "out/nanami-anime-latest.apk"
-          sha256sum out/*.apk > out/SHA256SUMS.txt
+          (cd out && sha256sum "nanami-anime-${NANAMI_ANIME_VERSION_NAME}.apk" > SHA256SUMS.txt)
+          (cd out && sha256sum nanami-anime-latest.apk > SHA256SUMS-latest.txt)
           ls -lh out
 
       - name: Upload artifact
@@ -95,6 +100,21 @@ jobs:
         with:
           name: nanami-anime-rotator-${{ env.NANAMI_ANIME_VERSION_NAME }}
           path: out/*
+
+      - name: Publish versioned rotator prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.NANAMI_ANIME_ROTATOR_TAG }}
+          target_commitish: ${{ github.sha }}
+          name: Nanami Anime ${{ env.NANAMI_ANIME_VERSION_NAME }}
+          prerelease: true
+          make_latest: "false"
+          files: |
+            out/nanami-anime-${{ env.NANAMI_ANIME_VERSION_NAME }}.apk
+            out/SHA256SUMS.txt
+
+      - name: Refresh the rolling preview download link
+        run: cp out/SHA256SUMS-latest.txt out/SHA256SUMS.txt
 
       - name: Update rolling nanami-anime-latest pre-release
         uses: softprops/action-gh-release@v2
@@ -105,9 +125,8 @@ jobs:
           make_latest: "false"
           files: |
             out/nanami-anime-latest.apk
-            out/nanami-anime-${{ env.NANAMI_ANIME_VERSION_NAME }}.apk
             out/SHA256SUMS.txt
           body: |
             Rolling Rotator pre-release build for **Nanami Anime** (`${{ env.NANAMI_ANIME_VERSION_NAME }}`, commit `${{ github.sha }}`).
 
-            Official versioned releases live on separate `nanami-anime-v*` tags without being overwritten by rotator builds.
+            This preview has its own release at [${{ env.NANAMI_ANIME_ROTATOR_TAG }}](https://github.com/${{ github.repository }}/releases/tag/${{ env.NANAMI_ANIME_ROTATOR_TAG }}).

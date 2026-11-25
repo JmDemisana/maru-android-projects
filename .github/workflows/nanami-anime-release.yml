@@ -6,7 +6,6 @@ on:
       tag:
         description: "Release tag (e.g. nanami-anime-v2.1.1)"
         required: true
-        default: "nanami-anime-v2.1.1"
   push:
     tags:
       - "nanami-anime-v*"
@@ -14,6 +13,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: nanami-anime-stable-release
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -46,17 +49,19 @@ jobs:
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
       - name: Resolve release version
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$REQUESTED_TAG"
           else
             TAG="${GITHUB_REF_NAME}"
           fi
-          VERSION_NAME="${TAG#nanami-anime-v}"
-          if [ -z "$VERSION_NAME" ] || [ "$VERSION_NAME" = "$TAG" ]; then
-            echo "::error::Invalid release tag '$TAG'. Expected nanami-anime-vX.Y.Z"
+          if ! [[ "$TAG" =~ ^nanami-anime-v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$ ]]; then
+            echo "::error::Expected a stable tag in the form nanami-anime-vX.Y.Z"
             exit 1
           fi
+          VERSION_NAME="${TAG#nanami-anime-v}"
           echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
           echo "NANAMI_ANIME_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
           # Stable builds are one code above a rotator build from the same commit.
@@ -101,7 +106,22 @@ jobs:
         run: |
           mkdir -p out
           cp "$BUILT_APK" "out/nanami-anime-${NANAMI_ANIME_VERSION_NAME}.apk"
-          sha256sum "out/nanami-anime-${NANAMI_ANIME_VERSION_NAME}.apk" > out/SHA256SUMS.txt
+          (cd out && sha256sum "nanami-anime-${NANAMI_ANIME_VERSION_NAME}.apk" > SHA256SUMS.txt)
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          version = os.environ["NANAMI_ANIME_VERSION_NAME"]
+          apk = Path(f"out/nanami-anime-{version}.apk")
+          metadata = {
+              "versionName": version,
+              "versionCode": int(os.environ["NANAMI_ANIME_VERSION_CODE"]),
+              "sha256": Path("out/SHA256SUMS.txt").read_text().split()[0],
+              "apkSize": apk.stat().st_size,
+          }
+          Path("out/update.json").write_text(json.dumps(metadata, indent=2) + "\n")
+          PY
           ls -lh out
           cat out/SHA256SUMS.txt
 
@@ -117,8 +137,37 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Nanami Anime ${{ env.NANAMI_ANIME_VERSION_NAME }}
           prerelease: false
-          make_latest: "true"
+          make_latest: "false"
           files: |
             out/nanami-anime-${{ env.NANAMI_ANIME_VERSION_NAME }}.apk
             out/SHA256SUMS.txt
+            out/update.json
           body_path: apps/manime/README.md
+
+      - name: Prepare the stable download link
+        id: stable_link
+        run: |
+          LATEST_TAG=$(git tag --list 'nanami-anime-v*' --sort=-version:refname |
+            awk '/^nanami-anime-v[0-9]+\.[0-9]+\.[0-9]+$/ && !found { print; found=1 }')
+          if [ "$LATEST_TAG" = "$RELEASE_TAG" ]; then
+            mkdir -p stable
+            cp "out/nanami-anime-${NANAMI_ANIME_VERSION_NAME}.apk" stable/nanami-anime-stable.apk
+            (cd stable && sha256sum nanami-anime-stable.apk > SHA256SUMS.txt)
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Refresh the Nanami Anime stable APK link
+        if: steps.stable_link.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nanami-anime-stable
+          target_commitish: ${{ github.sha }}
+          name: Nanami Anime Stable Download
+          prerelease: true
+          make_latest: "false"
+          files: |
+            stable/nanami-anime-stable.apk
+            stable/SHA256SUMS.txt
+          body: |
+            Stable APK link for the Maru website. Current version: ${{ env.NANAMI_ANIME_VERSION_NAME }}.
+            [Release details](https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }})
