@@ -20,7 +20,6 @@ import org.json.JSONObject
 import org.jsoup.Jsoup
 import java.io.IOException
 import java.net.URLDecoder
-import java.text.Normalizer
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -42,8 +41,6 @@ internal object HstreamResolver {
     private val slugEpisodeRegex = Regex("^/hentai/([a-z0-9]+(?:-[a-z0-9]+)*)-(\\d{1,3})/?$", RegexOption.IGNORE_CASE)
     private val videoEpisodeSuffixRegex = Regex("^(.*?)\\s+Episode\\s+(\\d{1,3})$", RegexOption.IGNORE_CASE)
     private val cardEpisodeSuffix = Regex("\\s*(?:-|Episode)\\s*\\d{1,3}$", RegexOption.IGNORE_CASE)
-    private val animationSuffix = Regex("\\s+the\\s+animation$", RegexOption.IGNORE_CASE)
-    private val separators = Regex("[^\\p{L}\\p{N}]+")
 
     private data class Series(val slug: String, val title: String, val episodes: Int)
 
@@ -63,43 +60,58 @@ internal object HstreamResolver {
     suspend fun resolve(
         anilistId: Int,
         episode: Int,
-        candidateTitles: List<String> = emptyList()
+        candidateTitles: List<String> = emptyList(),
+        lookupHealth: StreamLookupHealth? = null
     ): List<StreamLink> = withContext(Dispatchers.IO) {
         if (episode <= 0) return@withContext emptyList()
 
         val pinned = verifiedByAniListId[anilistId]
         if (pinned != null) {
             if (episode !in 1..pinned.episodes) return@withContext emptyList()
-            return@withContext resolveEpisodeSlug(pinned.slug, episode, listOf(pinned.title))
+            return@withContext resolveEpisodeSlug(pinned.slug, episode, listOf(pinned.title), lookupHealth)
         }
 
         if (candidateTitles.none { it.isNotBlank() }) return@withContext emptyList()
 
         discoveredSlugByAniListId[anilistId]?.let { cachedSlug ->
-            val fromCached = resolveEpisodeSlug(cachedSlug, episode, candidateTitles)
+            val fromCached = resolveEpisodeSlug(cachedSlug, episode, candidateTitles, lookupHealth)
             if (fromCached.isNotEmpty()) return@withContext fromCached
             discoveredSlugByAniListId.remove(anilistId, cachedSlug)
         }
 
-        val slug = searchCandidateSlugs(candidateTitles, episode).singleOrNull() ?: return@withContext emptyList()
-        val streams = resolveEpisodeSlug(slug, episode, candidateTitles)
-        if (streams.isNotEmpty()) discoveredSlugByAniListId[anilistId] = slug
-        streams
+        val attemptedSlugs = mutableSetOf<String>()
+        for (queries in buildSearchQueries(candidateTitles).take(24).chunked(6)) {
+            val slugs = coroutineScope {
+                queries.map { query -> async { searchEpisodeSlugs(query, candidateTitles, episode, lookupHealth) } }
+                    .awaitAll().flatten().distinct()
+            }
+            if (slugs.size > 1) {
+                lookupHealth?.recordUnverifiedMatch()
+                return@withContext emptyList()
+            }
+            val slug = slugs.singleOrNull() ?: continue
+            if (!attemptedSlugs.add(slug)) continue
+            val streams = resolveEpisodeSlug(slug, episode, candidateTitles, lookupHealth)
+            if (streams.isNotEmpty()) {
+                discoveredSlugByAniListId[anilistId] = slug
+                return@withContext streams
+            }
+        }
+        emptyList()
     }
 
-    private suspend fun searchCandidateSlugs(candidateTitles: List<String>, targetEpisode: Int): List<String> =
-        coroutineScope {
-            buildSearchQueries(candidateTitles).take(8).map { query ->
-                async { searchEpisodeSlugs(query, candidateTitles, targetEpisode) }
-            }.awaitAll().flatten().distinct()
-        }
-
-    private suspend fun searchEpisodeSlugs(query: String, aliases: List<String>, episode: Int): List<String> {
+    private suspend fun searchEpisodeSlugs(
+        query: String,
+        aliases: List<String>,
+        episode: Int,
+        lookupHealth: StreamLookupHealth?
+    ): List<String> {
         val url = site.newBuilder().addPathSegment("search").addQueryParameter("search", query).build()
         val request = Request.Builder().url(url).header("User-Agent", StremioAddonClient.BROWSER_UA).build()
         val html = try {
-            client.fetch(request)
+            client.fetch(request, lookupHealth)
         } catch (_: IOException) {
+            lookupHealth?.recordFailure()
             null
         } ?: return emptyList()
         return Jsoup.parse(html, site.toString()).select("a[href*='/hentai/']").mapNotNull { anchor ->
@@ -110,46 +122,19 @@ internal object HstreamResolver {
             val slug = match.groupValues[1].lowercase(Locale.ROOT)
             val imageLabel = anchor.selectFirst("img[alt]")?.attr("alt").orEmpty()
             val title = cardEpisodeSuffix.replace(imageLabel, "").trim()
-            slug.takeIf { matchesHstreamSeriesTitle(title, aliases) || matchesHstreamSeriesTitle(slug, aliases) }
+            if (matchesHstreamSeriesTitle(title, aliases) || matchesHstreamSeriesTitle(slug, aliases)) {
+                slug
+            } else {
+                lookupHealth?.recordUnverifiedMatch()
+                null
+            }
         }
     }
 
-    internal fun buildSearchQueries(candidateTitles: List<String>): List<String> {
-        val exactTitles = candidateTitles.map { raw ->
-            Normalizer.normalize(raw, Normalizer.Form.NFKC)
-                .replace('×', 'x')
-                .replace('✕', 'x')
-                .replace(Regex("\\s+"), " ")
-                .trim()
-                .replace(animationSuffix, "")
-                .trim()
-        }.filter { it.length >= 2 }
+    internal fun buildSearchQueries(candidateTitles: List<String>): List<String> = sourceTitleQueries(candidateTitles)
 
-        // Keep punctuation in the first pass: some source search indexes distinguish
-        // possessives ("Rune's Pharmacy" works, while "Rune s Pharmacy" does not).
-        // Then try the punctuation-folded variants for providers that ignore it.
-        val normalizedTitles = exactTitles.map { title ->
-            title.replace(separators, " ").replace(Regex("\\s+"), " ").trim()
-        }
-        return (exactTitles + normalizedTitles)
-            .filter { it.length >= 2 }
-            .distinctBy { it.lowercase(Locale.ROOT) }
-    }
-
-    internal fun matchesHstreamSeriesTitle(hstreamSeriesTitle: String, candidateTitles: List<String>): Boolean {
-        val title = normalizeSeriesKey(hstreamSeriesTitle)
-        return title.isNotEmpty() && candidateTitles.any { normalizeSeriesKey(it) == title }
-    }
-
-    private fun normalizeSeriesKey(title: String): String =
-        normalizeTitleWords(title).replace(animationSuffix, "").replace(" ", "").lowercase(Locale.ROOT)
-
-    private fun normalizeTitleWords(title: String): String =
-        Normalizer.normalize(title, Normalizer.Form.NFKC)
-            .replace('×', 'x')
-            .replace('✕', 'x')
-            .replace(separators, " ")
-            .trim()
+    internal fun matchesHstreamSeriesTitle(hstreamSeriesTitle: String, candidateTitles: List<String>): Boolean =
+        matchesSourceSeriesTitle(hstreamSeriesTitle, candidateTitles)
 
     internal fun validatedAssetPath(raw: String): String? =
         raw.trim('/').takeIf { path -> path.split('/').all(assetSegment::matches) }
@@ -157,14 +142,15 @@ internal object HstreamResolver {
     private suspend fun resolveEpisodeSlug(
         seriesSlug: String,
         episode: Int,
-        candidateTitles: List<String>
+        candidateTitles: List<String>,
+        lookupHealth: StreamLookupHealth?
     ): List<StreamLink> {
         val episodeUrl = site.resolve("hentai/$seriesSlug-$episode") ?: return emptyList()
         val cookieJar = EpisodeCookies()
         val session = client.newBuilder().cookieJar(cookieJar).build()
         return try {
-            val html = session.fetch(Request.Builder().url(episodeUrl).header("User-Agent", StremioAddonClient.BROWSER_UA).build())
-                ?: return emptyList()
+            val pageRequest = Request.Builder().url(episodeUrl).header("User-Agent", StremioAddonClient.BROWSER_UA).build()
+            val html = session.fetch(pageRequest, lookupHealth) ?: return emptyList()
             val document = Jsoup.parse(html, episodeUrl.toString())
             val exactEpisode = document.select("script[type='application/ld+json']").any { node ->
                 val metadata = runCatching { JSONObject(node.data()) }.getOrNull() ?: return@any false
@@ -176,7 +162,10 @@ internal object HstreamResolver {
                 val epNum = match.groupValues[2].toIntOrNull() ?: return@any false
                 epNum == episode && matchesHstreamSeriesTitle(seriesName, candidateTitles)
             }
-            if (!exactEpisode) return emptyList()
+            if (!exactEpisode) {
+                lookupHealth?.recordUnverifiedMatch()
+                return emptyList()
+            }
             val episodeId = document.selectFirst("input#e_id")?.attr("value")?.toLongOrNull()
                 ?: return emptyList()
             val csrf = cookieJar.loadForRequest(playbackEndpoint).firstOrNull { it.name == "XSRF-TOKEN" }
@@ -190,7 +179,7 @@ internal object HstreamResolver {
                 .header("X-XSRF-TOKEN", URLDecoder.decode(csrf.value, "UTF-8"))
                 .post(JSONObject().put("episode_id", episodeId.toString()).toString().toRequestBody("application/json".toMediaType()))
                 .build()
-            val payload = session.fetch(request)?.let(::JSONObject) ?: return emptyList()
+            val payload = session.fetch(request, lookupHealth)?.let(::JSONObject) ?: return emptyList()
             val path = validatedAssetPath(payload.optString("stream_url")) ?: return emptyList()
             val domains = payload.optJSONArray("stream_domains") ?: return emptyList()
             (0 until domains.length()).mapNotNull { index ->
@@ -214,17 +203,25 @@ internal object HstreamResolver {
         } catch (e: CancellationException) {
             throw e
         } catch (_: IOException) {
+            lookupHealth?.recordFailure()
             emptyList()
         } catch (_: org.json.JSONException) {
+            lookupHealth?.recordFailure()
             emptyList()
         } catch (_: IllegalArgumentException) {
             emptyList()
         }
     }
 
-    private suspend fun OkHttpClient.fetch(request: Request): String? = newCall(request).readResponse { response ->
-        if (response.isSuccessful) response.body?.string() else null
-    }
+    private suspend fun OkHttpClient.fetch(request: Request, lookupHealth: StreamLookupHealth?): String? =
+        newCall(request).readResponse { response ->
+            if (response.isSuccessful) {
+                response.body?.string()
+            } else {
+                if (response.code != 404) lookupHealth?.recordFailure()
+                null
+            }
+        }
 
     private class EpisodeCookies : CookieJar {
         private val cookies = linkedMapOf<String, Cookie>()

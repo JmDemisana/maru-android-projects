@@ -1,8 +1,15 @@
-# Nanami Anime 2.1.1
+# Nanami Anime 2.1.2
 
-Nanami Anime is an Android anime player and AniList companion. Version 2.1.1 is the first definitive release of the relaunched app.
+Nanami Anime is an Android anime player and AniList companion.
 
-[Download the signed Android APK](https://github.com/JmDemisana/maru-android-projects/releases/download/nanami-anime-v2.1.1/nanami-anime-2.1.1.apk)
+[Download the latest signed Android APK](https://github.com/JmDemisana/maru-android-projects/releases/download/nanami-anime-stable/nanami-anime-stable.apk)
+
+## What's new in 2.1.2
+
+- **Smarter source lookup.** Nanami tries romanized, English, and Japanese titles, punctuation variants, and shortened search terms. Playback still checks the episode and edition. An unconfirmed match, a failed provider request, and an empty search now have separate explanations.
+- **Broader device support.** The torrent engine includes all four Android architectures, with 16 KB page alignment on the 64-bit builds. Android 8 and 9 prompt for Gallery permission when exporting clips.
+- **AniList profiles and cast.** Followers and Following load independently with advanced pages and retry. The Cast tab activates when cast data is available.
+- **Updates and diagnostics.** Check for stable updates and copy a device and service report from **Settings → Private Offline Vault & About**.
 
 ## What’s new in 2.1.1
 
@@ -19,4 +26,12 @@ Nanami Anime is an Android anime player and AniList companion. Version 2.1.1 is 
 
 ## Installation
 
-Open the APK on your Android device. Android may ask you to allow installation from the browser or file manager you used to open it. The release includes [a SHA-256 checksum](https://github.com/JmDemisana/maru-android-projects/releases/download/nanami-anime-v2.1.1/SHA256SUMS.txt).
+Open the APK on your Android device. Android may ask you to allow installation from the browser or file manager you used to open it. The release includes [a SHA-256 checksum](https://github.com/JmDemisana/maru-android-projects/releases/download/nanami-anime-stable/SHA256SUMS.txt).
+
+## Updates and diagnostics
+
+In Settings, go to **Private Offline Vault & About**. **Check for Updates** finds official Nanami Anime releases and hands a verified APK to Android's installer. **Copy Log Dump to Clipboard** checks the app's online services and tries to render the first frame of sample episodes. The report stays on your device until you share it.
+
+- Stable releases have their own `nanami-anime-vX.Y.Z` tags and publish a signed APK, checksum, and `update.json`.
+- The `nanami-anime-stable` download link tracks the latest stable APK.
+- Preview releases have their own `nanami-anime-preview-vX.Y.Z.N` tags. The `nanami-anime-latest` prerelease continues to serve the rolling preview APK. The app updater follows stable tags.

@@ -1,9 +1,11 @@
 package io.maru.manime.player
 
+import android.Manifest
 import android.app.Activity
 import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.media.AudioManager
 import android.net.Uri
@@ -15,6 +17,8 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -50,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.util.Consumer
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -81,6 +86,8 @@ import io.maru.manime.extensions.CrunchyrollStreamEngine
 import io.maru.manime.extensions.ExternalSubtitleItem
 import io.maru.manime.extensions.AdultStreamFallback
 import io.maru.manime.extensions.StreamLink
+import io.maru.manime.extensions.StreamMatchUnverifiedException
+import io.maru.manime.extensions.StreamSearchIncompleteException
 import io.maru.manime.extensions.SubtitleTrack
 import io.maru.manime.extensions.playbackIdentity
 import io.maru.manime.torrent.STREAM_READ_TIMEOUT_MS
@@ -634,6 +641,19 @@ private fun EpisodePlayerScreen(
     var triedAdultFallback by remember(media.mediaId, episodeNum) { mutableStateOf(false) }
     val canTryAdultFallback = isExplicitAdult && !triedAdultFallback &&
         AdultStreamFallback.supports(media.mediaId, episodeNum, media.candidateTitlesForStream)
+
+    fun emptySearchMessage(incomplete: Boolean): String = when {
+        !LocalLibraryStore.isNetworkAvailable(context) -> "You're offline. Reconnect to search for sources."
+        incomplete -> "Couldn't finish checking sources for episode $episodeNum. Try again."
+        isExplicitAdult -> "No verified source for episode $episodeNum."
+        else -> "No playable source found for episode $episodeNum."
+    }
+
+    fun nextUntriedSource(streams: List<StreamLink>): StreamLink? {
+        val untried = streams.filter { it.playbackIdentity !in attemptedSources }
+        return untried.firstOrNull { !it.isTorrent || it.seeders != 0 } ?: untried.firstOrNull()
+    }
+
     LaunchedEffect(streamReload) {
         try {
             isResolvingStreams = true
@@ -709,11 +729,12 @@ private fun EpisodePlayerScreen(
                     if (options.any { it.audioType == "DUAL_AUDIO" || it.audioType == "DUB" }) {
                         detectedDualOrDubInStreams = true
                     }
-                    val candidates = options.filter { it.playbackIdentity !in attemptedSources }
+                    val candidates = options.filter {
+                        it.playbackIdentity !in attemptedSources && (!it.isTorrent || it.seeders != 0)
+                    }
                     if (selectedStream == null || waitingForAlternative != null) {
                         val preferred = candidates.firstOrNull {
-                            (it.audioType == activeAudioMode || it.audioType == "DUAL_AUDIO") &&
-                                (!it.isTorrent || it.seeders != 0)
+                            it.audioType == activeAudioMode || it.audioType == "DUAL_AUDIO"
                         }
                         if (preferred != null) {
                             startFallback?.cancel()
@@ -722,7 +743,9 @@ private fun EpisodePlayerScreen(
                             startFallback = launch {
                                 delay(750)
                                 if (selectedStream == null || waitingForAlternative != null) {
-                                    rankedStreams.firstOrNull { it.playbackIdentity !in attemptedSources }?.let(::playStream)
+                                    rankedStreams.firstOrNull {
+                                        it.playbackIdentity !in attemptedSources && (!it.isTorrent || it.seeders != 0)
+                                    }?.let(::playStream)
                                 }
                             }
                         }
@@ -735,20 +758,24 @@ private fun EpisodePlayerScreen(
                 streams.none { !it.isTorrent || it.seeders != 0 }
             isResolvingStreams = false
             if (selectedStream == null || waitingForAlternative != null) {
-                val remaining = streams.firstOrNull { it.playbackIdentity !in attemptedSources }
+                val remaining = nextUntriedSource(streams)
                 if (remaining != null) playStream(remaining)
                 else {
                     isPlayerBuffering = false
-                    resolveError = waitingForAlternative ?: if (isExplicitAdult) {
-                        "No verified source for episode $episodeNum."
-                    } else {
-                        "Episode $episodeNum is not available yet."
-                    }
+                    resolveError = waitingForAlternative ?: emptySearchMessage(incomplete = false)
                     waitingForAlternative = null
                 }
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (_: StreamSearchIncompleteException) {
+            isPlayerBuffering = false
+            resolveError = waitingForAlternative ?: emptySearchMessage(incomplete = true)
+            waitingForAlternative = null
+        } catch (_: StreamMatchUnverifiedException) {
+            isPlayerBuffering = false
+            resolveError = "Found listings, but couldn't confirm a match for episode $episodeNum."
+            waitingForAlternative = null
         } catch (_: Exception) {
             if (selectedStream == null || waitingForAlternative != null) {
                 isPlayerBuffering = false
@@ -761,7 +788,7 @@ private fun EpisodePlayerScreen(
     }
 
     fun handlePlaybackFailure(message: String) {
-        val next = rankedStreams.firstOrNull { it.playbackIdentity !in attemptedSources }
+        val next = nextUntriedSource(rankedStreams)
         if (!isOfflinePlayback && next != null) {
             playStream(next)
         } else {
@@ -785,14 +812,22 @@ private fun EpisodePlayerScreen(
     }
 
     val hasFallback = canTryAdultFallback || rankedStreams.any { it.playbackIdentity !in attemptedSources }
-    LaunchedEffect(playbackAttempt, hasRenderedFrame, hasFallback) {
+    val torrentReady = torrentConnection?.isReady == true
+    LaunchedEffect(playbackAttempt, hasRenderedFrame, hasFallback, torrentReady, isCasting) {
         val source = selectedStream ?: return@LaunchedEffect
+        if (hasRenderedFrame || isCasting || resolveError != null || waitingForAlternative != null) {
+            return@LaunchedEffect
+        }
+        val timeoutMs = when {
+            source.isTorrent && hasFallback -> 45_000L
+            source.isTorrent && !torrentReady -> return@LaunchedEffect
+            hasFallback -> 15_000L
+            else -> 30_000L
+        }
         val attempt = playbackAttempt
-        if (!hasRenderedFrame && hasFallback && resolveError == null && waitingForAlternative == null) {
-            delay(if (source.isTorrent) 45_000 else 15_000)
-            if (attempt == playbackAttempt && !hasRenderedFrame) {
-                handlePlaybackFailure("This source is taking too long to start.")
-            }
+        delay(timeoutMs)
+        if (attempt == playbackAttempt && !hasRenderedFrame && resolveError == null && waitingForAlternative == null) {
+            handlePlaybackFailure("This source took too long to start.")
         }
     }
 
@@ -800,7 +835,7 @@ private fun EpisodePlayerScreen(
         val connection = torrentConnection ?: return@LaunchedEffect
         if (connection.error != null) {
             android.util.Log.w("NanamiPlayer", "Source failed: ${connection.phase}")
-            handlePlaybackFailure("Couldn't start this source. Try another source.")
+            handlePlaybackFailure(connection.error)
         } else if (connection.isReady && connection.url != null &&
             exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString() != connection.url
         ) {
@@ -895,7 +930,17 @@ private fun EpisodePlayerScreen(
                     return@launch
                 }
                 android.util.Log.w("NanamiPlayer", "Playback failed: ${error.errorCodeName} (${torrentConnection?.phase ?: "media"})")
-                handlePlaybackFailure("This source stopped playing. Try another source.")
+                val reason = when (error.errorCode) {
+                    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+                    PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+                    PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ->
+                        "This device couldn't decode this source."
+                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ->
+                        "Couldn't connect to this playback source."
+                    else -> "Couldn't play this source."
+                }
+                handlePlaybackFailure(reason)
             }
         }
     })
@@ -1163,6 +1208,24 @@ private fun EpisodePlayerScreen(
                     ?: "Could not export snippet from this stream."
                 snippetExportState = SnippetExportState.Error(msg)
             }
+        }
+    }
+
+    val galleryPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (showSnippetEditor) {
+            if (granted) startSnippetExport()
+            else snippetExportState = SnippetExportState.Error("Allow storage access to save clips to your Gallery.")
+        }
+    }
+
+    fun exportSnippetToGallery() {
+        val permission = Manifest.permission.WRITE_EXTERNAL_STORAGE
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED
+        ) {
+            galleryPermission.launch(permission)
+        } else {
+            startSnippetExport()
         }
     }
 
@@ -1446,22 +1509,11 @@ private fun EpisodePlayerScreen(
                 title = media.title,
                 episode = episodeLabel,
                 message = resolveError.orEmpty(),
-                retryLabel = when {
-                    isOfflinePlayback && !offlineOnly -> "Try Streaming Instead"
-                    rankedStreams.size > 1 -> "Try Another Source"
-                    else -> "Retry"
-                },
+                retryLabel = if (isOfflinePlayback && !offlineOnly) "Try Streaming Instead" else "Retry",
                 onBack = onBack,
                 onRetry = {
-                    val identity = selectedStream?.playbackIdentity
-                    if (!isOfflinePlayback && rankedStreams.size > 1) {
-                        val index = rankedStreams.indexOfFirst { it.playbackIdentity == identity }
-                        attemptedSources.clear()
-                        playStream(rankedStreams[(index + 1) % rankedStreams.size])
-                    } else {
-                        skipOffline = isOfflinePlayback && !offlineOnly
-                        streamReload++
-                    }
+                    skipOffline = isOfflinePlayback && !offlineOnly
+                    streamReload++
                 }
             )
         }
@@ -1891,7 +1943,7 @@ private fun EpisodePlayerScreen(
                         snippetPreviewPlaying = true
                     }
                 },
-                onExportClick = ::startSnippetExport,
+                onExportClick = ::exportSnippetToGallery,
                 onCancelExport = {
                     snippetExportJob?.cancel()
                     snippetExportJob = null

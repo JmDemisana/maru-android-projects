@@ -323,7 +323,8 @@ class TorrentStreamService : Service() {
                 _streamStatus.update { current ->
                     if (current.requestId != requestId) current else ActiveStreamStatus(
                         requestId = requestId, phase = "service_start",
-                        error = "Playback engine could not start [service_start].", statusMessage = "Playback failed"
+                        error = "Couldn't start the torrent engine. Try reopening the player.",
+                        statusMessage = "Playback failed"
                     )
                 }
             }
@@ -781,12 +782,12 @@ class TorrentStreamService : Service() {
                 ensureActive()
                 updateStreamStatus(requestId) {
                     val reason = when (phase) {
-                        "metadata" -> "Metadata timed out"
-                        "file_priorities" -> "Episode selection timed out"
-                        else -> "Verified media bytes timed out"
+                        "metadata" -> "Timed out waiting for torrent details from peers."
+                        "file_priorities" -> "Timed out selecting the episode in this torrent."
+                        else -> "Timed out waiting for enough data from this torrent to start playback."
                     }
                     it.copy(isReady = false, isBuffering = false, phase = phase, statusMessage = "Stream timed out",
-                        error = "$reason [$phase]. Try another source.")
+                        error = reason)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -794,10 +795,15 @@ class TorrentStreamService : Service() {
                 if (e !is Exception && e !is LinkageError) throw e
                 ensureActive()
                 Log.w("TorrentStreamService", "Playback engine failed in $phase", e)
+                val reason = when {
+                    e is LinkageError -> "The torrent engine couldn't load on this device."
+                    phase == "episode_file" -> "Couldn't identify a playable episode file in this torrent."
+                    else -> "Couldn't play this torrent."
+                }
                 updateStreamStatus(requestId) {
                     it.copy(isReady = false, isBuffering = false, streamUrl = null, phase = phase,
                         statusMessage = "Playback failed",
-                        error = "Playback engine failed [$phase/${if (e is LinkageError) "native_link" else "engine_error"}]. Try another source.")
+                        error = reason)
                 }
             } finally {
                 stream?.let { activeSession.compareAndSet(it, null) }

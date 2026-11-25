@@ -176,7 +176,13 @@ class StreamResolutionTest {
         assertFalse(HstreamResolver.matchesHstreamSeriesTitle("Oni Chichi Re-birth", oniChichiCandidates))
         assertFalse(HstreamResolver.matchesHstreamSeriesTitle("Oni Chichi Rebuild", oniChichiCandidates))
         assertTrue(HstreamResolver.matchesHstreamSeriesTitle("Otome Domain", listOf("Otome＊Domain THE ANIMATION")))
-        assertEquals(listOf("Oni Chichi", "Demon Father", "鬼父"), HstreamResolver.buildSearchQueries(oniChichiCandidates + "鬼父"))
+        assertEquals(listOf("Oni Chichi", "Demon Father", "鬼父"), HstreamResolver.buildSearchQueries(oniChichiCandidates + "鬼父").take(3))
+        val queries = HstreamResolver.buildSearchQueries(
+            listOf("Otome Domain The Animation", "Otome*Domain", "オトメ＊ドメイン")
+        )
+        assertTrue(queries.containsAll(listOf("Otome Domain", "OtomeDomain", "Domain Otome", "オトメ ドメイン", "オトメドメイン")))
+        assertTrue(HstreamResolver.matchesHstreamSeriesTitle("Domain Otome", listOf("Otome Domain The Animation")))
+        assertFalse(HstreamResolver.matchesHstreamSeriesTitle("Domain Otome 2", listOf("Otome Domain The Animation")))
         assertTrue(AdultStreamFallback.supports(99441, 1, emptyList()))
         assertFalse(AdultStreamFallback.supports(99441, 2, listOf("Otome Domain")))
     }

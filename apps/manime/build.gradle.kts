@@ -1,9 +1,9 @@
+import java.util.Properties
+
 plugins {
     id("maru.android.application")
     id("maru.android.compose")
 }
-
-import java.util.Properties
 
 android {
     namespace = "io.maru.manime"
@@ -52,7 +52,6 @@ android {
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
-            pickFirsts += "lib/arm64-v8a/libtorrent4j.so"
         }
     }
 }
@@ -89,8 +88,12 @@ dependencies {
     implementation("androidx.mediarouter:mediarouter:1.7.0")
     implementation("com.google.android.gms:play-services-cast-framework:21.5.0")
 
-    // Torrent streaming
-    implementation(libs.libtorrent4j)
+    // This release supports 16 KB pages and keeps compatibility with Android 8.
+    val torrentVersion = "2.1.0-38"
+    implementation("org.libtorrent4j:libtorrent4j:$torrentVersion")
+    for (arch in listOf("arm", "arm64", "x86", "x86_64")) {
+        runtimeOnly("org.libtorrent4j:libtorrent4j-android-$arch:$torrentVersion")
+    }
 
     implementation(project(":libs:shared-utils"))
     implementation(project(":libs:shared-ui"))

@@ -10,6 +10,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -33,6 +34,7 @@ internal object FallbackStreamResolvers {
     private val client = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
+        .callTimeout(12, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
 
@@ -79,7 +81,8 @@ internal object FallbackStreamResolvers {
         preferredAudio: String,
         preferredQuality: String,
         trailerYoutubeId: String? = null,
-        externalLinks: List<ExternalLink> = emptyList()
+        externalLinks: List<ExternalLink> = emptyList(),
+        lookupHealth: StreamLookupHealth? = null
     ): List<StreamLink> = coroutineScope {
         val cleanTitles = titles
             .flatMap { listOf(it, cleanAnimeTitle(it)) }
@@ -89,24 +92,26 @@ internal object FallbackStreamResolvers {
             .take(8)
         if (cleanTitles.isEmpty()) return@coroutineScope emptyList()
 
+        val queryGroups = sourceTitleQueries(titles).take(24)
+            .withIndex().groupBy({ it.index % 4 }, { it.value }).values
         val displayTitle = cleanTitles.first()
         val tasks = buildList {
             // 1. Uncensored Ecchi -> Sukebei Nyaa (Art - Anime c=1_1) using Romanized titles first
             if (isEcchi) {
-                for (t in cleanTitles.take(4)) {
-                    val cleanBase = cleanAnimeTitle(t).ifBlank { t }
+                for (queries in queryGroups) {
                     add(async(Dispatchers.IO) {
                         searchNyaaRss(
                             bases = SUKEBEI_BASES,
                             category = "1_1",
-                            queryTitle = cleanBase,
+                            queryTitles = queries,
                             allTitles = cleanTitles,
                             episodeNum = episodeNum,
                             isStandalone = isStandalone,
                             isEcchi = true,
                             preferredAudio = preferredAudio,
                             preferredQuality = preferredQuality,
-                            sourceLabelPrefix = "Uncensored Vault"
+                            sourceLabelPrefix = "Uncensored Vault",
+                            lookupHealth = lookupHealth
                         )
                     })
                 }
@@ -115,21 +120,21 @@ internal object FallbackStreamResolvers {
             // 2. Nyaa RSS (main anime index):
             // Catches English-translated anime (c=1_2) and general anime (c=1_0), or all categories (c=0_0) for concerts
             val nyaaCategories = if (isMusicOrConcert) listOf("0_0") else listOf("1_2", "1_0")
-            for (t in cleanTitles.take(3)) {
-                val cleanBase = cleanAnimeTitle(t).ifBlank { t }
+            for (queries in queryGroups) {
                 for (cat in nyaaCategories) {
                     add(async(Dispatchers.IO) {
                         searchNyaaRss(
                             bases = NYAA_BASES,
                             category = cat,
-                            queryTitle = cleanBase,
+                            queryTitles = queries,
                             allTitles = cleanTitles,
                             episodeNum = episodeNum,
                             isStandalone = isStandalone || isMusicOrConcert,
                             isEcchi = isEcchi,
                             preferredAudio = preferredAudio,
                             preferredQuality = preferredQuality,
-                            sourceLabelPrefix = if (isMusicOrConcert) "Concert / MV Archive" else if (isEcchi) "Ecchi / Archive" else "Archive"
+                            sourceLabelPrefix = if (isMusicOrConcert) "Concert / MV Archive" else if (isEcchi) "Ecchi / Archive" else "Archive",
+                            lookupHealth = lookupHealth
                         )
                     })
                 }
@@ -167,51 +172,62 @@ internal object FallbackStreamResolvers {
     private suspend fun searchNyaaRss(
         bases: List<String>,
         category: String,
-        queryTitle: String,
+        queryTitles: List<String>,
         allTitles: List<String>,
         episodeNum: Int,
         isStandalone: Boolean,
         isEcchi: Boolean,
         preferredAudio: String,
         preferredQuality: String,
-        sourceLabelPrefix: String
-    ): List<StreamLink> = withContext(Dispatchers.IO) {
-        val baseQuery = cleanAnimeTitle(queryTitle).ifBlank { queryTitle }
+        sourceLabelPrefix: String,
+        lookupHealth: StreamLookupHealth?
+    ): List<StreamLink> = withTimeoutOrNull(25_000L) {
         val queries = buildList {
+            val baseQuery = queryTitles.first()
             if (!isStandalone) {
                 add("$baseQuery ${episodeNum.toString().padStart(2, '0')}")
                 add("$baseQuery $episodeNum")
             }
-            add(baseQuery)
+            addAll(queryTitles)
         }.distinct()
 
         val found = mutableListOf<StreamLink>()
         for (q in queries) {
             val encoded = URLEncoder.encode(q, "UTF-8")
-            var xmlBody: String? = null
+            var feed: org.jsoup.nodes.Document? = null
             for (base in bases) {
-                xmlBody = try {
+                feed = try {
                     val req = Request.Builder()
                         .url("$base/?page=rss&c=$category&f=0&q=$encoded")
                         .header("User-Agent", StremioAddonClient.BROWSER_UA)
                         .build()
-                    client.newCall(req).readResponse { res -> if (res.isSuccessful) res.body?.string() else null }
+                    val xml = client.newCall(req).readResponse { res ->
+                        if (res.isSuccessful) res.body?.string() else null
+                    }
+                    xml?.let { Jsoup.parse(it, "", Parser.xmlParser()) }
+                        ?.takeIf { it.selectFirst("rss > channel") != null }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) {
                     null
                 }
-                if (!xmlBody.isNullOrBlank()) break
+                if (feed != null) break
             }
-            if (xmlBody.isNullOrBlank()) continue
+            if (feed == null) {
+                lookupHealth?.recordFailure()
+                break
+            }
 
-            val doc = runCatching { Jsoup.parse(xmlBody, "", Parser.xmlParser()) }.getOrNull() ?: continue
-            val items = doc.select("item")
+            val items = feed.select("item")
             for (el in items.take(35)) {
                 val releaseTitle = el.selectFirst("title")?.text()?.trim().orEmpty()
                 if (releaseTitle.isEmpty()) continue
                 if (isNonVideoRelease(releaseTitle)) continue
-                if (!matchesTitleAndEpisode(releaseTitle, allTitles, episodeNum, isStandalone)) continue
+                if (!matchesAnyTitleWords(releaseTitle, allTitles)) continue
+                if (!matchesReleaseEpisode(releaseTitle, episodeNum, isStandalone)) {
+                    lookupHealth?.recordUnverifiedMatch()
+                    continue
+                }
 
                 val hash = el.getElementsByTag("nyaa:infoHash").firstOrNull()?.text()?.trim()?.lowercase().orEmpty()
                 if (hash.length != 40) continue
@@ -248,6 +264,9 @@ internal object FallbackStreamResolvers {
             if (found.isNotEmpty()) break
         }
         found
+    } ?: run {
+        lookupHealth?.recordFailure()
+        emptyList()
     }
 
     /**
@@ -544,9 +563,10 @@ internal object FallbackStreamResolvers {
         candidateTitles: List<String>,
         episodeNum: Int,
         isStandalone: Boolean
-    ): Boolean {
-        if (!matchesAnyTitleWords(releaseTitle, candidateTitles)) return false
+    ): Boolean = matchesAnyTitleWords(releaseTitle, candidateTitles) &&
+        matchesReleaseEpisode(releaseTitle, episodeNum, isStandalone)
 
+    private fun matchesReleaseEpisode(releaseTitle: String, episodeNum: Int, isStandalone: Boolean): Boolean {
         val parsedEp = torrentEpisodeNumber(releaseTitle)
         if (parsedEp != null) {
             return parsedEp == episodeNum
@@ -595,9 +615,7 @@ internal object FallbackStreamResolvers {
             // 2. Meaningful words overlap
             val meaningful = normalizeWords(candidate).filter { it !in GENERIC_STOP_WORDS && it.length >= 3 }
             if (meaningful.isNotEmpty() && releaseWords.isNotEmpty()) {
-                val hits = meaningful.count { it in releaseWords }
-                val required = if (meaningful.size <= 2) meaningful.size else maxOf(2, (meaningful.size * 0.75).toInt())
-                if (hits >= required) {
+                if (meaningful.all { it in releaseWords }) {
                     return@any true
                 }
             }
@@ -609,7 +627,8 @@ internal object FallbackStreamResolvers {
         s.replace('×', 'x').replace('✕', 'x').lowercase().filter { it.isLetterOrDigit() }
 
     private fun normalizeWords(s: String): Set<String> =
-        s.replace('×', 'x').replace('✕', 'x').lowercase().split(Regex("[^a-z0-9]+")).filter { it.isNotBlank() }.toSet()
+        s.replace('×', 'x').replace('✕', 'x').replace("'", "").replace("’", "").lowercase()
+            .split(Regex("[^\\p{L}\\p{M}\\p{N}]+")).filter { it.isNotBlank() }.toSet()
 
     private fun detectFallbackQuality(raw: String): String {
         val lower = raw.lowercase()

@@ -1,5 +1,8 @@
 package io.maru.manime.extensions
 
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
+
 data class SearchResult(
     val id: String,
     val title: String,
@@ -42,6 +45,28 @@ data class StreamLink(
 
 internal val StreamLink.playbackIdentity: Pair<String, Int?>
     get() = (infoHash ?: url) to fileIdx
+
+internal class StreamSearchIncompleteException : IOException("A source request failed during the episode search")
+internal class StreamMatchUnverifiedException : IOException("No matching episode could be verified")
+
+internal class StreamLookupHealth {
+    private val incomplete = AtomicBoolean(false)
+    private val unverifiedMatch = AtomicBoolean(false)
+
+    fun recordFailure() {
+        incomplete.set(true)
+    }
+
+    fun recordUnverifiedMatch() {
+        unverifiedMatch.set(true)
+    }
+
+    fun checkResult(streams: List<StreamLink>): List<StreamLink> {
+        if (streams.isEmpty() && incomplete.get()) throw StreamSearchIncompleteException()
+        if (streams.isEmpty() && unverifiedMatch.get()) throw StreamMatchUnverifiedException()
+        return streams
+    }
+}
 
 sealed interface ExtensionSource {
     val name: String

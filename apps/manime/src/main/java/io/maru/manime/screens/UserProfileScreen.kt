@@ -4,7 +4,6 @@ import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -38,7 +37,6 @@ import androidx.compose.ui.unit.sp
 import io.maru.manime.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -46,6 +44,7 @@ import kotlinx.coroutines.withContext
 fun UserProfileScreen(
     username: String,
     anilistToken: String,
+    viewerUsername: String,
     isActive: Boolean = true,
     hideNsfwContent: Boolean = true,
     onBack: () -> Unit,
@@ -54,6 +53,7 @@ fun UserProfileScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val token = anilistToken.ifBlank { null }
 
     var profile by remember(username, anilistToken) { mutableStateOf<AniListProfile?>(null) }
     var isLoading by remember(username, anilistToken) { mutableStateOf(true) }
@@ -62,10 +62,13 @@ fun UserProfileScreen(
     var isTogglingFollow by remember { mutableStateOf(false) }
 
     var selectedTab by rememberSaveable(username) { mutableIntStateOf(0) }
-    var following by remember(username, anilistToken) { mutableStateOf<List<AniListProfile>?>(null) }
-    var followers by remember(username, anilistToken) { mutableStateOf<List<AniListProfile>?>(null) }
-    var peopleLoadFailed by remember(selectedTab, username, anilistToken) { mutableStateOf(false) }
-    var retryPeople by remember { mutableIntStateOf(0) }
+    var watchlist by remember(username, token) { mutableStateOf<Map<String, List<AnimeMedia>>?>(null) }
+    var watchlistLoadFailed by remember(username, token) { mutableStateOf(false) }
+    var retryWatchlist by remember { mutableIntStateOf(0) }
+    var followersRevision by remember { mutableIntStateOf(0) }
+    val showPeople = isActive && selectedTab != 0
+    val following = rememberProfilePeople(profile?.id, AniListPeopleList.FOLLOWING, token, showPeople)
+    val followers = rememberProfilePeople(profile?.id, AniListPeopleList.FOLLOWERS, token, showPeople, followersRevision)
 
     androidx.activity.compose.BackHandler(enabled = isActive) {
         onBack()
@@ -76,7 +79,7 @@ fun UserProfileScreen(
         profileLoadFailed = false
         try {
             profile = withContext(Dispatchers.IO) {
-                AniListClient.getUserProfile(username, anilistToken.ifEmpty { null })
+                AniListClient.getUserProfile(username, token)
             }
         } catch (e: CancellationException) {
             throw e
@@ -86,25 +89,18 @@ fun UserProfileScreen(
         isLoading = false
     }
 
-    LaunchedEffect(profile?.id, selectedTab, anilistToken, retryPeople) {
-        val userId = profile?.id ?: return@LaunchedEffect
-        if (selectedTab == 0) return@LaunchedEffect
-        if (following != null && followers != null) return@LaunchedEffect
-        peopleLoadFailed = false
+    val showWatchlist = isActive && selectedTab == 0
+    val profileName = profile?.name
+    LaunchedEffect(profileName, showWatchlist, token, retryWatchlist) {
+        if (profileName == null || !showWatchlist || watchlist != null || watchlistLoadFailed) return@LaunchedEffect
         try {
-            val token = anilistToken.ifEmpty { null }
-            withContext(Dispatchers.IO) {
-                val f1 = async { if (following == null) AniListClient.getUserFollowing(userId, 1, token) else following }
-                val f2 = async { if (followers == null) AniListClient.getUserFollowers(userId, 1, token) else followers }
-                val r1 = f1.await()
-                val r2 = f2.await()
-                if (r1 != null) following = r1.distinctBy { it.id }
-                if (r2 != null) followers = r2.distinctBy { it.id }
+            watchlist = withContext(Dispatchers.IO) {
+                AniListClient.getUserList(profileName, token)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
-            peopleLoadFailed = true
+            watchlistLoadFailed = true
         }
     }
 
@@ -148,20 +144,18 @@ fun UserProfileScreen(
         }
     } else {
         val u = profile!!
-        val visibleLists = remember(u.userLists, hideNsfwContent) {
-            u.userLists.mapValues { (_, entries) -> entries.filterNsfw(hideNsfwContent) }
+        val visibleLists = remember(watchlist, hideNsfwContent) {
+            watchlist.orEmpty().mapValues { (_, entries) -> entries.filterNsfw(hideNsfwContent) }
         }
-        val availableCategories = remember(visibleLists) {
-            if (visibleLists.isEmpty()) listOf("Watching", "Planning", "Completed")
-            else visibleLists.keys.toList()
-        }
-        var selectedCategory by rememberSaveable(availableCategories) { mutableStateOf(availableCategories.firstOrNull() ?: "Watching") }
-        val currentCategoryList = remember(visibleLists, selectedCategory) {
-            visibleLists[selectedCategory].orEmpty().distinctBy { it.mediaId }
+        val availableCategories = remember(visibleLists) { visibleLists.keys.toList() }
+        var selectedCategory by rememberSaveable(username) { mutableStateOf<String?>(null) }
+        val category = selectedCategory?.takeIf { it in availableCategories } ?: availableCategories.firstOrNull()
+        val currentCategoryList = remember(visibleLists, category) {
+            category?.let { visibleLists[it] }.orEmpty().distinctBy { it.mediaId }
         }
 
-        LaunchedEffect(currentCategoryList) {
-            if (currentCategoryList.isNotEmpty()) {
+        LaunchedEffect(currentCategoryList, showWatchlist) {
+            if (showWatchlist && currentCategoryList.isNotEmpty()) {
                 KnownDubRegistry.verifyCandidatesInBackground(context, currentCategoryList, maxProbes = 8)
             }
         }
@@ -272,7 +266,7 @@ fun UserProfileScreen(
                         }
                     }
 
-                    if (anilistToken.isNotBlank()) {
+                    if (token != null && !u.name.equals(viewerUsername, ignoreCase = true)) {
                         Surface(
                             onClick = {
                                 if (isTogglingFollow) return@Surface
@@ -280,9 +274,10 @@ fun UserProfileScreen(
                                 scope.launch {
                                     try {
                                         val next = withContext(Dispatchers.IO) {
-                                            AniListClient.toggleFollow(u.id, anilistToken)
+                                            AniListClient.toggleFollow(u.id, token)
                                         }
                                         profile = u.copy(isFollowing = next)
+                                        followersRevision++
                                     } catch (e: CancellationException) {
                                         throw e
                                     } catch (_: Exception) {
@@ -292,6 +287,7 @@ fun UserProfileScreen(
                                     }
                                 }
                             },
+                            enabled = !isTogglingFollow,
                             shape = RoundedCornerShape(4.dp),
                             color = if (u.isFollowing) CrunchyCardBg else CrunchyOrange,
                             border = BorderStroke(1.dp, CrunchyOrange)
@@ -354,17 +350,17 @@ fun UserProfileScreen(
                                     .padding(horizontal = 14.dp, vertical = 8.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                availableCategories.forEach { category ->
-                                    val isSelected = selectedCategory.equals(category, ignoreCase = true)
-                                    val count = visibleLists[category]?.size ?: 0
+                                availableCategories.forEach { listName ->
+                                    val isSelected = listName == category
+                                    val count = visibleLists[listName]?.size ?: 0
                                     Surface(
-                                        onClick = { selectedCategory = category },
+                                        onClick = { selectedCategory = listName },
                                         shape = MaruPillShape,
                                         color = if (isSelected) CrunchyOrange.copy(alpha = 0.2f) else CrunchyCardBg,
                                         border = BorderStroke(1.dp, if (isSelected) CrunchyOrange else CrunchyBorder)
                                     ) {
                                         Text(
-                                            text = if (count > 0) "$category ($count)" else category,
+                                            text = if (count > 0) "$listName ($count)" else listName,
                                             fontWeight = FontWeight.Bold,
                                             fontSize = 11.5.sp,
                                             color = if (isSelected) CrunchyOrange else Color.White,
@@ -378,7 +374,16 @@ fun UserProfileScreen(
                         }
                     }
 
-                    if (currentCategoryList.isEmpty()) {
+                    if (watchlistLoadFailed) {
+                        ProfileListError("Couldn't load this watchlist.") {
+                            watchlistLoadFailed = false
+                            retryWatchlist++
+                        }
+                    } else if (watchlist == null) {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = CrunchyOrange)
+                        }
+                    } else if (currentCategoryList.isEmpty()) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Text("No anime in this list.", color = MaruTextMuted, fontSize = 13.sp)
                         }
@@ -403,24 +408,22 @@ fun UserProfileScreen(
                 }
 
                 1, 2 -> {
-                    val people = if (selectedTab == 1) following else followers
-                    val followingIds = remember(following) { following?.map { it.id }?.toSet().orEmpty() }
-                    val followerIds = remember(followers) { followers?.map { it.id }?.toSet().orEmpty() }
+                    val list = if (selectedTab == 1) following else followers
+                    val people = list.users
+                    val followingUsers = following.users
+                    val followerUsers = followers.users
+                    val mutualIds = remember(followingUsers, followerUsers) {
+                        val followingIds = followingUsers.orEmpty().mapTo(mutableSetOf()) { it.id }
+                        followerUsers.orEmpty().mapNotNull { it.id.takeIf(followingIds::contains) }.toSet()
+                    }
 
-                    if (peopleLoadFailed) {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("Couldn't load this list.", color = MaruTextMuted)
-                                TextButton(onClick = { retryPeople++ }) {
-                                    Text("Try again", color = CrunchyOrange)
-                                }
-                            }
-                        }
+                    if (people == null && list.loadFailed) {
+                        ProfileListError("Couldn't load this list.", list::loadNextPage)
                     } else if (people == null) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             CircularProgressIndicator(color = CrunchyOrange)
                         }
-                    } else if (people.isEmpty()) {
+                    } else if (people.isEmpty() && list.nextPage == null) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Text(
                                 if (selectedTab == 1) "Not following anyone." else "No followers found.",
@@ -435,12 +438,24 @@ fun UserProfileScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             items(people, key = { it.id }) { userItem ->
-                                val isMutual = (userItem.id in followingIds && userItem.id in followerIds) || (userItem.isFollowing && userItem.isFollower)
                                 UserCardRow(
                                     user = userItem,
-                                    isMutual = isMutual,
+                                    isMutual = userItem.id in mutualIds,
                                     onClick = { onUserClick(userItem.name) }
                                 )
+                            }
+                            if (list.nextPage != null) {
+                                item(key = "more_people") {
+                                    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                        if (list.requestedPage != null) {
+                                            CircularProgressIndicator(color = CrunchyOrange, modifier = Modifier.size(24.dp))
+                                        } else {
+                                            TextButton(onClick = list::loadNextPage) {
+                                                Text(if (list.loadFailed) "Couldn't load more. Try again" else "Load more", color = CrunchyOrange)
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -448,6 +463,57 @@ fun UserProfileScreen(
             }
         }
     }
+}
+
+@Composable
+private fun ProfileListError(message: String, onRetry: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(message, color = MaruTextMuted)
+            TextButton(onClick = onRetry) { Text("Try again", color = CrunchyOrange) }
+        }
+    }
+}
+
+private class ProfilePeopleState {
+    var users by mutableStateOf<List<AniListProfile>?>(null)
+    var nextPage by mutableStateOf<Int?>(1)
+    var requestedPage by mutableStateOf<Int?>(1)
+    var loadFailed by mutableStateOf(false)
+
+    fun loadNextPage() {
+        if (requestedPage != null) return
+        loadFailed = false
+        requestedPage = nextPage
+    }
+}
+
+@Composable
+private fun rememberProfilePeople(
+    userId: Int?,
+    list: AniListPeopleList,
+    token: String?,
+    enabled: Boolean,
+    revision: Int = 0
+): ProfilePeopleState {
+    val state = remember(userId, list, token, revision) { ProfilePeopleState() }
+    val requestedPage = state.requestedPage
+    LaunchedEffect(state, enabled, requestedPage) {
+        if (!enabled || userId == null || requestedPage == null) return@LaunchedEffect
+        try {
+            val result = withContext(Dispatchers.IO) {
+                AniListClient.getUserPeople(userId, list, requestedPage, token)
+            }
+            state.users = (state.users.orEmpty() + result.users).distinctBy { it.id }
+            state.nextPage = (requestedPage + 1).takeIf { result.hasNextPage }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            state.loadFailed = true
+        }
+        state.requestedPage = null
+    }
+    return state
 }
 
 @Composable

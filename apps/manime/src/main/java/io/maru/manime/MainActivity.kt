@@ -642,6 +642,7 @@ fun AppNavigation(prefs: MAnimePrefs) {
                             UserProfileScreen(
                                 username = route.username,
                                 anilistToken = anilistToken,
+                                viewerUsername = anilistUsername,
                                 isActive = route == currentRoute,
                                 hideNsfwContent = hideNsfwContent,
                                 onBack = { closeRoute(route) },

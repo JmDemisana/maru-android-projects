@@ -45,6 +45,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -379,8 +381,10 @@ fun AnimeDetailScreen(
     }
 
     var streamingEpisodes by remember { mutableStateOf<List<StreamingEpisode>>(emptyList()) }
-    var castList by remember { mutableStateOf<List<CastMember>>(emptyList()) }
-    var isCastLoading by remember { mutableStateOf(true) }
+    var castList by remember(currentMedia.mediaId) { mutableStateOf<List<CastMember>>(emptyList()) }
+    var isCastLoading by remember(currentMedia.mediaId) { mutableStateOf(true) }
+    var castLoadFailed by remember(currentMedia.mediaId) { mutableStateOf(false) }
+    var retryCast by remember(currentMedia.mediaId) { mutableIntStateOf(0) }
     var fetchedSimilarAnime by remember { mutableStateOf<List<AnimeMedia>>(emptyList()) }
     val similarAnime = remember(fetchedSimilarAnime, hideNsfwContent) {
         fetchedSimilarAnime.filterNsfw(hideNsfwContent)
@@ -393,9 +397,10 @@ fun AnimeDetailScreen(
     var activeVoiceActor by remember { mutableStateOf<VoiceActor?>(null) }
     var activeStaffWorks by remember { mutableStateOf<StaffWorks?>(null) }
     var isStaffLoading by remember { mutableStateOf(false) }
+    var staffLoadFailed by remember { mutableStateOf(false) }
+    var retryStaff by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(currentMedia.mediaId) {
-        isCastLoading = true
         isSimilarLoading = true
         isEpisodeInfoLoading = true
         launch { TorrentStreamService.loadOfflineVault(context) }
@@ -433,17 +438,6 @@ fun AnimeDetailScreen(
         }
         launch {
             try {
-                castList = withContext(Dispatchers.IO) {
-                    AniListClient.getCast(currentMedia.mediaId)
-                }
-            } catch (_: Exception) {
-                castList = emptyList()
-            } finally {
-                isCastLoading = false
-            }
-        }
-        launch {
-            try {
                 fetchedSimilarAnime = withContext(Dispatchers.IO) {
                     AniListClient.getSimilarAnime(currentMedia.mediaId)
                 }
@@ -453,6 +447,19 @@ fun AnimeDetailScreen(
                 isSimilarLoading = false
             }
         }
+    }
+
+    LaunchedEffect(currentMedia.mediaId, retryCast) {
+        isCastLoading = true
+        castLoadFailed = false
+        try {
+            castList = withContext(Dispatchers.IO) { AniListClient.getCast(currentMedia.mediaId) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            castLoadFailed = true
+        }
+        isCastLoading = false
     }
 
     LaunchedEffect(similarAnime) {
@@ -523,7 +530,8 @@ fun AnimeDetailScreen(
     val isSingleStandalone = currentMedia.isStandaloneFeature && completeEpisodes.size <= 1
     val availableTabs = if (isSingleStandalone) listOf("Overview", "Cast") else listOf("Episodes", "Overview", "Cast")
     var selectedTabIndex by rememberSaveable(currentMedia.mediaId, isSingleStandalone) { mutableIntStateOf(0) }
-    val safeTabIndex = selectedTabIndex.coerceIn(availableTabs.indices)
+    val lastEnabledTabIndex = if (castList.isEmpty()) availableTabs.lastIndex - 1 else availableTabs.lastIndex
+    val safeTabIndex = selectedTabIndex.coerceIn(0, lastEnabledTabIndex)
     val detailScroll = rememberLazyListState()
 
     var selectedEpRangeIndex by rememberSaveable { mutableIntStateOf(0) }
@@ -540,16 +548,17 @@ fun AnimeDetailScreen(
         currentMedia.contentAdvisory
     }
 
-    LaunchedEffect(activeVoiceActor?.id) {
+    LaunchedEffect(activeVoiceActor?.id, retryStaff) {
         val actor = activeVoiceActor ?: return@LaunchedEffect
         activeStaffWorks = null
         isStaffLoading = true
+        staffLoadFailed = false
         try {
             activeStaffWorks = withContext(Dispatchers.IO) { AniListClient.getStaffWorks(actor.id) }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
-            activeStaffWorks = null
+            staffLoadFailed = true
         }
         isStaffLoading = false
     }
@@ -1158,9 +1167,20 @@ fun AnimeDetailScreen(
                     ) {
                         availableTabs.forEachIndexed { idx, title ->
                             val isSelected = safeTabIndex == idx
+                            val isTabEnabled = title != "Cast" || castList.isNotEmpty()
+                            val disabledDescription = when {
+                                isTabEnabled -> null
+                                isCastLoading -> "Loading cast"
+                                castLoadFailed -> "Cast couldn't load"
+                                else -> "No cast listed"
+                            }
                             val label = if (!isSingleStandalone && idx == 0) "$title (${completeEpisodes.size})" else title
                             val tabColor by animateColorAsState(
-                                targetValue = if (isSelected) Color.White else MaruTextMuted,
+                                targetValue = when {
+                                    isSelected -> Color.White
+                                    isTabEnabled -> MaruTextMuted
+                                    else -> MaruTextMuted.copy(alpha = 0.45f)
+                                },
                                 animationSpec = tween(160),
                                 label = "detail_tab_text"
                             )
@@ -1176,7 +1196,15 @@ fun AnimeDetailScreen(
                                 modifier = Modifier
                                     .weight(1f)
                                     .heightIn(min = 48.dp)
-                                    .selectable(selected = isSelected, role = Role.Tab, onClick = { selectedTabIndex = idx })
+                                    .then(if (disabledDescription != null) {
+                                        Modifier.semantics { stateDescription = disabledDescription }
+                                    } else Modifier)
+                                    .selectable(
+                                        selected = isSelected,
+                                        enabled = isTabEnabled,
+                                        role = Role.Tab,
+                                        onClick = { selectedTabIndex = idx }
+                                    )
                                     .padding(top = 6.dp)
                             ) {
                                 Text(
@@ -1198,6 +1226,11 @@ fun AnimeDetailScreen(
                         }
                     }
                     HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
+                    if (castLoadFailed) {
+                        TextButton(onClick = { retryCast++ }, modifier = Modifier.align(Alignment.End)) {
+                            Text("Retry cast lookup", color = CrunchyOrange)
+                        }
+                    }
                 }
             }
 
@@ -2009,7 +2042,19 @@ fun AnimeDetailScreen(
                             }
                         } else {
                             val works = activeStaffWorks?.works.orEmpty().filterNsfw(hideNsfwContent)
-                            LazyVerticalGrid(
+                            if (works.isEmpty()) {
+                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text(
+                                            if (staffLoadFailed) "Couldn't load anime credits." else "No anime credits to show.",
+                                            color = MaruTextMuted
+                                        )
+                                        if (staffLoadFailed) {
+                                            TextButton(onClick = { retryStaff++ }) { Text("Try again", color = CrunchyOrange) }
+                                        }
+                                    }
+                                }
+                            } else LazyVerticalGrid(
                                 columns = GridCells.Adaptive(140.dp),
                                 modifier = Modifier
                                     .fillMaxSize()

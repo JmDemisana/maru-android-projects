@@ -1,12 +1,13 @@
 ﻿package io.maru.manime.extensions
 
 import io.maru.manime.readResponse
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 data class StremioManifest(
@@ -87,75 +88,70 @@ class StremioAddonClient(
     suspend fun getStreams(type: String, id: String): List<StremioStreamResult> = withContext(Dispatchers.IO) {
         val root = if (cleanBase.endsWith("/manifest.json")) cleanBase.substringBeforeLast("/manifest.json") else cleanBase
         val url = "$root/stream/$type/$id.json"
-        try {
-            val req = Request.Builder()
-                .url(url)
-                .header("User-Agent", BROWSER_UA)
-                .build()
-            val body = client.newCall(req).readResponse { response ->
-                if (response.isSuccessful) response.body?.string() else null
-            } ?: return@withContext emptyList()
-            val json = JSONObject(body)
-            val streams = json.optJSONArray("streams") ?: return@withContext emptyList()
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", BROWSER_UA)
+            .build()
+        val body = client.newCall(req).readResponse { response ->
+            if (response.code == 404) return@readResponse null
+            if (!response.isSuccessful) throw IOException("Stream provider returned HTTP ${response.code}")
+            response.body?.string() ?: throw IOException("Stream provider returned an empty response")
+        } ?: return@withContext emptyList()
+        parseStreams(JSONObject(body).getJSONArray("streams"))
+    }
 
-            val results = mutableListOf<StremioStreamResult>()
-            for (i in 0 until streams.length()) {
-                val s = streams.optJSONObject(i) ?: continue
-                val streamUrl = s.nonBlankString("url")
-                val infoHash = s.nonBlankString("infoHash")
-                val title = s.nonBlankString("description") ?: s.nonBlankString("title")
-                val name = s.nonBlankString("name")
-                val fileIdx = if (s.has("fileIdx") && !s.isNull("fileIdx")) s.optInt("fileIdx", -1).takeIf { it >= 0 } else null
+    private fun parseStreams(streams: JSONArray): List<StremioStreamResult> = buildList {
+        for (i in 0 until streams.length()) {
+            val s = streams.optJSONObject(i) ?: continue
+            val streamUrl = s.nonBlankString("url")
+            val infoHash = s.nonBlankString("infoHash")
+            val title = s.nonBlankString("description") ?: s.nonBlankString("title")
+            val name = s.nonBlankString("name")
+            val fileIdx = if (s.has("fileIdx") && !s.isNull("fileIdx")) s.optInt("fileIdx", -1).takeIf { it >= 0 } else null
 
-                val sourcesList = mutableListOf<String>()
-                val rawSources = s.optJSONArray("sources")
-                if (rawSources != null) {
-                    for (j in 0 until rawSources.length()) {
-                        val src = rawSources.optString(j, "")
-                        if (src.startsWith("tracker:")) {
-                            sourcesList.add(src.removePrefix("tracker:"))
-                        }
+            val sourcesList = mutableListOf<String>()
+            val rawSources = s.optJSONArray("sources")
+            if (rawSources != null) {
+                for (j in 0 until rawSources.length()) {
+                    val src = rawSources.optString(j, "")
+                    if (src.startsWith("tracker:")) {
+                        sourcesList.add(src.removePrefix("tracker:"))
                     }
-                }
-
-                if (streamUrl != null || infoHash != null) {
-                    val hints = s.optJSONObject("behaviorHints")
-                    val requestHeaders = hints?.optJSONObject("proxyHeaders")?.optJSONObject("request")
-                    val headers = buildMap {
-                        if (requestHeaders != null) for (key in requestHeaders.keys()) {
-                            val value = requestHeaders.nonBlankString(key) ?: continue
-                            put(key, value)
-                        }
-                    }
-                    val subtitles = buildList {
-                        val rawSubtitles = s.optJSONArray("subtitles") ?: return@buildList
-                        for (j in 0 until rawSubtitles.length()) {
-                            val sub = rawSubtitles.optJSONObject(j) ?: continue
-                            val subUrl = sub.nonBlankString("url") ?: continue
-                            add(SubtitleTrack(subUrl, sub.nonBlankString("lang") ?: "Unknown"))
-                        }
-                    }
-                    results.add(
-                        StremioStreamResult(
-                            title = title,
-                            name = name,
-                            url = streamUrl,
-                            infoHash = infoHash,
-                            fileIdx = fileIdx,
-                            sources = sourcesList,
-                            filename = hints?.nonBlankString("filename"),
-                            headers = headers,
-                            subtitles = subtitles,
-                            sizeBytes = hints?.optLong("videoSize")?.takeIf { it > 0 }
-                        )
-                    )
                 }
             }
-            results
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            emptyList()
+
+            if (streamUrl != null || infoHash != null) {
+                val hints = s.optJSONObject("behaviorHints")
+                val requestHeaders = hints?.optJSONObject("proxyHeaders")?.optJSONObject("request")
+                val headers = buildMap {
+                    if (requestHeaders != null) for (key in requestHeaders.keys()) {
+                        val value = requestHeaders.nonBlankString(key) ?: continue
+                        put(key, value)
+                    }
+                }
+                val subtitles = buildList {
+                    val rawSubtitles = s.optJSONArray("subtitles") ?: return@buildList
+                    for (j in 0 until rawSubtitles.length()) {
+                        val sub = rawSubtitles.optJSONObject(j) ?: continue
+                        val subUrl = sub.nonBlankString("url") ?: continue
+                        add(SubtitleTrack(subUrl, sub.nonBlankString("lang") ?: "Unknown"))
+                    }
+                }
+                add(
+                    StremioStreamResult(
+                        title = title,
+                        name = name,
+                        url = streamUrl,
+                        infoHash = infoHash,
+                        fileIdx = fileIdx,
+                        sources = sourcesList,
+                        filename = hints?.nonBlankString("filename"),
+                        headers = headers,
+                        subtitles = subtitles,
+                        sizeBytes = hints?.optLong("videoSize")?.takeIf { it > 0 }
+                    )
+                )
+            }
         }
     }
 

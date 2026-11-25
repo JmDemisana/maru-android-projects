@@ -19,11 +19,16 @@ internal object AdultStreamFallback {
         if (anilistId == HentaiMamaResolver.OTOME_DOMAIN_ID) episode == 1
         else HstreamResolver.supports(anilistId, episode, aliases)
 
-    suspend fun resolve(anilistId: Int, episode: Int, aliases: List<String>): List<StreamLink> =
+    suspend fun resolve(
+        anilistId: Int,
+        episode: Int,
+        aliases: List<String>,
+        lookupHealth: StreamLookupHealth? = null
+    ): List<StreamLink> =
         if (anilistId == HentaiMamaResolver.OTOME_DOMAIN_ID) {
-            if (episode == 1) HentaiMamaResolver.resolveOtomeDomain() else emptyList()
+            if (episode == 1) HentaiMamaResolver.resolveOtomeDomain(lookupHealth) else emptyList()
         } else {
-            HstreamResolver.resolve(anilistId, episode, aliases)
+            HstreamResolver.resolve(anilistId, episode, aliases, lookupHealth)
         }
 
     fun containsSource(streams: List<StreamLink>): Boolean = streams.any {
@@ -47,13 +52,15 @@ private object HentaiMamaResolver {
         .followRedirects(false)
         .build()
 
-    suspend fun resolveOtomeDomain(): List<StreamLink> = withContext(Dispatchers.IO) {
+    suspend fun resolveOtomeDomain(lookupHealth: StreamLookupHealth?): List<StreamLink> = withContext(Dispatchers.IO) {
         try {
-            val page = fetch(Request.Builder().url(episodeUrl).build()) ?: return@withContext emptyList()
+            val page = fetch(Request.Builder().url(episodeUrl).build(), lookupHealth) ?: return@withContext emptyList()
             val document = Jsoup.parse(page, episodeUrl.toString())
-            if (!expectedTitle.containsMatchIn(document.title()) ||
-                document.selectFirst("a[href='#option-1']") == null
-            ) return@withContext emptyList()
+            if (!expectedTitle.containsMatchIn(document.title())) {
+                lookupHealth?.recordUnverifiedMatch()
+                return@withContext emptyList()
+            }
+            if (document.selectFirst("a[href='#option-1']") == null) return@withContext emptyList()
             val postId = document.selectFirst("#post_report input[name=idpost]")?.attr("value")?.toLongOrNull()
                 ?: return@withContext emptyList()
 
@@ -63,13 +70,13 @@ private object HentaiMamaResolver {
                 .add("i", "1")
                 .build()
             val request = Request.Builder().url(endpoint).header("Referer", site.toString()).post(body).build()
-            val fragments = fetch(request)?.let(::JSONArray) ?: return@withContext emptyList()
+            val fragments = fetch(request, lookupHealth)?.let(::JSONArray) ?: return@withContext emptyList()
             val frame = Jsoup.parseBodyFragment(fragments.optString(0), site.toString()).selectFirst("iframe")
                 ?: return@withContext emptyList()
             val playerUrl = frame.absUrl("src").toHttpUrlOrNull()?.takeIf {
                 it.isHttps && it.host == site.host && it.port == site.port && it.username.isEmpty() && it.password.isEmpty()
             } ?: return@withContext emptyList()
-            val playerPage = fetch(Request.Builder().url(playerUrl).build()) ?: return@withContext emptyList()
+            val playerPage = fetch(Request.Builder().url(playerUrl).build(), lookupHealth) ?: return@withContext emptyList()
             val playerSources = sources.find(playerPage)?.groupValues?.get(1)?.let(::JSONArray)
                 ?: return@withContext emptyList()
             (0 until playerSources.length()).mapNotNull { index ->
@@ -88,13 +95,21 @@ private object HentaiMamaResolver {
                 )
             }.distinctBy { it.url }
         } catch (_: IOException) {
+            lookupHealth?.recordFailure()
             emptyList()
         } catch (_: JSONException) {
+            lookupHealth?.recordFailure()
             emptyList()
         }
     }
 
-    private suspend fun fetch(request: Request): String? = client.newCall(request).readResponse { response ->
-        if (response.isSuccessful) response.body?.string() else null
-    }
+    private suspend fun fetch(request: Request, lookupHealth: StreamLookupHealth?): String? =
+        client.newCall(request).readResponse { response ->
+            if (response.isSuccessful) {
+                response.body?.string()
+            } else {
+                if (response.code != 404) lookupHealth?.recordFailure()
+                null
+            }
+        }
 }
