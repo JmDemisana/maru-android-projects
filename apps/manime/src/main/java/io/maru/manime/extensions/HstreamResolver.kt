@@ -89,7 +89,7 @@ internal object HstreamResolver {
 
     private suspend fun searchCandidateSlugs(candidateTitles: List<String>, targetEpisode: Int): List<String> =
         coroutineScope {
-            buildSearchQueries(candidateTitles).take(4).map { query ->
+            buildSearchQueries(candidateTitles).take(8).map { query ->
                 async { searchEpisodeSlugs(query, candidateTitles, targetEpisode) }
             }.awaitAll().flatten().distinct()
         }
@@ -114,10 +114,27 @@ internal object HstreamResolver {
         }
     }
 
-    internal fun buildSearchQueries(candidateTitles: List<String>): List<String> =
-        candidateTitles.map { normalizeTitleWords(it).replace(animationSuffix, "").trim() }
+    internal fun buildSearchQueries(candidateTitles: List<String>): List<String> {
+        val exactTitles = candidateTitles.map { raw ->
+            Normalizer.normalize(raw, Normalizer.Form.NFKC)
+                .replace('×', 'x')
+                .replace('✕', 'x')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .replace(animationSuffix, "")
+                .trim()
+        }.filter { it.length >= 2 }
+
+        // Keep punctuation in the first pass: some source search indexes distinguish
+        // possessives ("Rune's Pharmacy" works, while "Rune s Pharmacy" does not).
+        // Then try the punctuation-folded variants for providers that ignore it.
+        val normalizedTitles = exactTitles.map { title ->
+            title.replace(separators, " ").replace(Regex("\\s+"), " ").trim()
+        }
+        return (exactTitles + normalizedTitles)
             .filter { it.length >= 2 }
             .distinctBy { it.lowercase(Locale.ROOT) }
+    }
 
     internal fun matchesHstreamSeriesTitle(hstreamSeriesTitle: String, candidateTitles: List<String>): Boolean {
         val title = normalizeSeriesKey(hstreamSeriesTitle)
