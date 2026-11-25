@@ -7,7 +7,7 @@ Nanami Anime is an Android anime player and AniList companion. Version 2.1.1 is 
 ## What’s new in 2.1.1
 
 - **One download at a time.** Episodes transfer in queue order. You can queue the next five unwatched episodes, all unwatched episodes, or a custom number.
-- **More reliable episode matching.** Source lookup uses AniList’s romaji, English, and native titles. For explicit adult titles, Nanami Anime checks the edition and episode before offering a stream. The native fallback supports both episodes of the original *Oni Chichi* (*Demon Father*) and episode 1 of *Otome Domain The Animation*. Older adult downloads without verification are skipped during online playback.
+- **More reliable episode matching.** Source lookup uses AniList’s romaji, English, and native titles, preserves source-sensitive punctuation such as the apostrophe in *Rune’s Pharmacy*, and verifies the adult series and episode before offering a stream. The native fallback supports both episodes of the original *Oni Chichi* (*Demon Father*) and episode 1 of *Otome Domain The Animation*. Older adult downloads without verification are skipped during online playback.
 - **Account controls for adult content.** Go to **Settings → Account → NSFW Content** to hide titles, skip AniList tracking, or select a separate tracking account. Guest Mode always hides adult titles. The app also respects the signed-in account’s AniList visibility settings.
 
 ## Playback and library
