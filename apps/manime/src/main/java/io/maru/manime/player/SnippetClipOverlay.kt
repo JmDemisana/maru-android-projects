@@ -261,6 +261,32 @@ internal fun SnippetClipOverlay(
                         }
                     }
 
+                    if (durationMs > 0L) {
+                        val isFullSelected = range.startMs == 0L && range.endMs == durationMs
+                        Surface(
+                            onClick = {
+                                if (controlsEnabled) {
+                                    val fullRange = SnippetRange(0L, durationMs)
+                                    onRangeChange(fullRange, 0L)
+                                }
+                            },
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (isFullSelected) CrunchyOrange.copy(alpha = 0.22f) else Color(0xFF1C1F26),
+                            border = BorderStroke(
+                                1.dp,
+                                if (isFullSelected) CrunchyOrange else CrunchyBorder
+                            )
+                        ) {
+                            Text(
+                                text = "Full",
+                                color = if (isFullSelected) CrunchyOrange else Color(0xFFD0D4DE),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.5.sp,
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                            )
+                        }
+                    }
+
                     if (hasExternalSubtitles || hasEmbeddedSubtitles) {
                         Spacer(Modifier.width(4.dp))
                         val subsActive = burnSubtitles
@@ -645,8 +671,7 @@ private fun SnippetRangeSeekbar(
                                 ClipDragHandle.START -> {
                                     val targetStart = xToMs(x)
                                     val maxStart = (anchorRange.endMs - SNIPPET_MIN_DURATION_MS).coerceAtLeast(0L)
-                                    val minStart = (anchorRange.endMs - SNIPPET_MAX_DURATION_MS).coerceAtLeast(0L)
-                                    val clampedStart = targetStart.coerceIn(minStart, maxStart)
+                                    val clampedStart = targetStart.coerceIn(0L, maxStart)
                                     val next = normalizeSnippetRange(clampedStart, anchorRange.endMs, currentDur)
                                     dragBubbleTimeMs = next.startMs
                                     dragBubbleFraction = (next.startMs.toFloat() / currentDur).coerceIn(0f, 1f)
@@ -655,8 +680,7 @@ private fun SnippetRangeSeekbar(
                                 ClipDragHandle.END -> {
                                     val targetEnd = xToMs(x)
                                     val minEnd = (anchorRange.startMs + SNIPPET_MIN_DURATION_MS).coerceAtMost(currentDur)
-                                    val maxEnd = (anchorRange.startMs + SNIPPET_MAX_DURATION_MS).coerceAtMost(currentDur)
-                                    val clampedEnd = targetEnd.coerceIn(minEnd, maxEnd)
+                                    val clampedEnd = targetEnd.coerceIn(minEnd, currentDur)
                                     val next = normalizeSnippetRange(anchorRange.startMs, clampedEnd, currentDur)
                                     dragBubbleTimeMs = next.endMs
                                     dragBubbleFraction = (next.endMs.toFloat() / currentDur).coerceIn(0f, 1f)

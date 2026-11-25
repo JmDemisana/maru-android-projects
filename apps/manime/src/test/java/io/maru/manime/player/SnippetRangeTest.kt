@@ -25,13 +25,13 @@ class SnippetRangeTest {
     }
 
     @Test
-    fun normalizeEnforcesMinAndMaxDurations() {
-        val dur = 600_000L
+    fun normalizeEnforcesMinDurationAndAllowsFullEpisodeLength() {
+        val dur = 24 * 60 * 1000L
         val tooShort = normalizeSnippetRange(10_000L, 10_200L, dur)
         assertEquals(SNIPPET_MIN_DURATION_MS, tooShort.durationMs)
 
-        val tooLong = normalizeSnippetRange(10_000L, 400_000L, dur)
-        assertEquals(SNIPPET_MAX_DURATION_MS, tooLong.durationMs)
+        val fullEpisode = normalizeSnippetRange(0L, dur, dur)
+        assertEquals(dur, fullEpisode.durationMs)
 
         val inverted = normalizeSnippetRange(50_000L, 30_000L, dur)
         assertEquals(30_000L, inverted.startMs)

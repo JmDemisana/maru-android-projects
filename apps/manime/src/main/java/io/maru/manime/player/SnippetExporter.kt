@@ -42,7 +42,6 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 const val SNIPPET_MIN_DURATION_MS = 1_000L
-const val SNIPPET_MAX_DURATION_MS = 180_000L
 const val SNIPPET_DEFAULT_DURATION_MS = 15_000L
 
 data class SnippetRange(
@@ -64,7 +63,7 @@ internal fun normalizeSnippetRange(
     endMs: Long,
     durationMs: Long,
     minDurationMs: Long = SNIPPET_MIN_DURATION_MS,
-    maxDurationMs: Long = SNIPPET_MAX_DURATION_MS
+    maxDurationMs: Long = Long.MAX_VALUE
 ): SnippetRange {
     if (durationMs <= 0L) return SnippetRange(0L, 0L)
     val effectiveMin = minDurationMs.coerceAtMost(durationMs)
@@ -111,7 +110,7 @@ internal fun applyDurationPreset(
     durationMs: Long
 ): SnippetRange {
     if (durationMs <= 0L) return SnippetRange(0L, 0L)
-    val length = presetLengthMs.coerceIn(SNIPPET_MIN_DURATION_MS.coerceAtMost(durationMs), SNIPPET_MAX_DURATION_MS.coerceAtMost(durationMs))
+    val length = presetLengthMs.coerceIn(SNIPPET_MIN_DURATION_MS.coerceAtMost(durationMs), durationMs)
     val start = current.startMs.coerceIn(0L, (durationMs - length).coerceAtLeast(0L))
     return normalizeSnippetRange(start, start + length, durationMs)
 }
