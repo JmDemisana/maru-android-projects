@@ -22,6 +22,7 @@ import androidx.media3.transformer.DefaultDecoderFactory
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExoPlayerAssetLoader
+import com.google.common.collect.ImmutableList
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.ProgressHolder
@@ -315,7 +316,7 @@ internal class SnippetExporter(private val context: Context) {
             editedBuilder.setEffects(
                 Effects(
                     emptyList(),
-                    listOf(OverlayEffect(listOf(subtitleOverlay)))
+                    listOf(OverlayEffect(ImmutableList.of(subtitleOverlay)))
                 )
             )
         }
