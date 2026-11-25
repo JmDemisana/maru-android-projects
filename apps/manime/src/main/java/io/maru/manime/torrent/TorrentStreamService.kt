@@ -13,7 +13,9 @@ import android.os.IBinder
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import io.maru.manime.MAnimePrefs
+import io.maru.manime.NanamiDiagnostics
 import io.maru.manime.extensions.StreamLink
 import io.maru.manime.extensions.StremioAddonClient
 import io.maru.manime.readResponse
@@ -180,6 +182,9 @@ class TorrentStreamService : Service() {
         const val ACTION_START_STREAM = "io.maru.manime.action.START_STREAM"
         const val ACTION_DOWNLOAD_OFFLINE = "io.maru.manime.action.DOWNLOAD_OFFLINE"
         const val ACTION_SERVE_OFFLINE_CAST = "io.maru.manime.action.SERVE_OFFLINE_CAST"
+        private const val ACTION_GENERATE_DIAGNOSTICS = "io.maru.manime.action.GENERATE_DIAGNOSTICS"
+        private const val ACTION_CANCEL_DIAGNOSTICS = "io.maru.manime.action.CANCEL_DIAGNOSTICS"
+        private const val EXTRA_INCLUDE_ADULT_SAMPLES = "extra_include_adult_samples"
         const val EXTRA_OFFLINE_FILE_PATH = "extra_offline_file_path"
 
         const val EXTRA_MAGNET = "extra_magnet"
@@ -201,6 +206,39 @@ class TorrentStreamService : Service() {
 
         private val _streamStatus = MutableStateFlow(ActiveStreamStatus())
         val streamStatus: StateFlow<ActiveStreamStatus> = _streamStatus.asStateFlow()
+
+        private val _diagnosticState = MutableStateFlow(NanamiDiagnostics.State())
+        internal val diagnosticState = _diagnosticState.asStateFlow()
+
+        internal fun generateLogDump(context: Context, includeAdult: Boolean) {
+            val previous = _diagnosticState.value
+            if (previous.isRunning) return
+            val started = previous.copy(isRunning = true, progress = null, status = null)
+            if (!_diagnosticState.compareAndSet(previous, started)) return
+            val intent = Intent(context, TorrentStreamService::class.java).apply {
+                action = ACTION_GENERATE_DIAGNOSTICS
+                putExtra(EXTRA_INCLUDE_ADULT_SAMPLES, includeAdult)
+            }
+            try {
+                ContextCompat.startForegroundService(context, intent)
+            } catch (e: Exception) {
+                Log.w("TorrentStreamService", "Could not start log generation", e)
+                _diagnosticState.compareAndSet(
+                    started, previous.copy(status = "Couldn't start the diagnostic checks. Try again.")
+                )
+            }
+        }
+
+        internal fun cancelLogDump(context: Context) {
+            if (_diagnosticState.value.isRunning) {
+                val intent = Intent(context, TorrentStreamService::class.java).setAction(ACTION_CANCEL_DIAGNOSTICS)
+                try {
+                    context.startService(intent)
+                } catch (e: IllegalStateException) {
+                    Log.w("TorrentStreamService", "Could not cancel log generation", e)
+                }
+            }
+        }
 
         private val _offlineCastUrl = MutableStateFlow<String?>(null)
         val offlineCastUrl: StateFlow<String?> = _offlineCastUrl.asStateFlow()
@@ -449,6 +487,7 @@ class TorrentStreamService : Service() {
     private val clientSockets = ConcurrentHashMap.newKeySet<Socket>()
     private var streamJob: Job? = null
     private var streamRequestId: String? = null
+    private var diagnosticJob: Job? = null
     private var latestStartId = 0
     private data class StreamSession(
         val id: String, val file: File, val size: Long, val handle: TorrentHandle,
@@ -479,7 +518,9 @@ class TorrentStreamService : Service() {
         val status = _streamStatus.value
         val noDownloads = offlineJobs.values.none { !it.isCompleted }
         val noSeeds = seedingJobs.values.none { !it.isCompleted }
-        if ((status.requestId == null || status.error != null) && noDownloads && noSeeds) {
+        if ((status.requestId == null || status.error != null) && noDownloads && noSeeds &&
+            !_diagnosticState.value.isRunning
+        ) {
             stopSelfResult(latestStartId)
         }
     }
@@ -491,6 +532,11 @@ class TorrentStreamService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         latestStartId = startId
         when (intent?.action) {
+            ACTION_GENERATE_DIAGNOSTICS -> launchDiagnostics(intent.getBooleanExtra(EXTRA_INCLUDE_ADULT_SAMPLES, false))
+            ACTION_CANCEL_DIAGNOSTICS -> {
+                diagnosticJob?.cancel()
+                if (activeOfflineCast.get() == null) stopIfIdle()
+            }
             ACTION_START_STREAM -> {
                 val magnet = intent.getStringExtra(EXTRA_MAGNET)
                 val fileIdx = intent.getIntExtra(EXTRA_FILE_IDX, -1).takeIf { it >= 0 }
@@ -562,6 +608,66 @@ class TorrentStreamService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun launchDiagnostics(includeAdult: Boolean) {
+        if (diagnosticJob != null) return
+        updateDiagnosticNotification(null)
+        diagnosticJob = serviceScope.launch(Dispatchers.Main) {
+            try {
+                val report = NanamiDiagnostics.collect(
+                    applicationContext,
+                    includeAdult,
+                    startTorrent = ::startDiagnosticTorrent
+                ) { progress ->
+                    _diagnosticState.update { it.copy(progress = progress) }
+                    updateDiagnosticNotification(progress)
+                }
+                if (diagnosticJob != null) {
+                    _diagnosticState.value = NanamiDiagnostics.State(report = report, status = "Log dump is ready.")
+                }
+            } catch (e: CancellationException) {
+                if (diagnosticJob != null) finishDiagnostics("Diagnostic checks canceled.")
+                throw e
+            } catch (e: Exception) {
+                Log.w("TorrentStreamService", "Could not generate diagnostics", e)
+                if (diagnosticJob != null) finishDiagnostics("Couldn't generate the log dump. Try again.")
+            } finally {
+                if (diagnosticJob != null) {
+                    diagnosticJob = null
+                    if (activeOfflineCast.get() == null) stopIfIdle()
+                }
+            }
+        }
+    }
+
+    private fun finishDiagnostics(status: String) {
+        _diagnosticState.update { it.copy(isRunning = false, progress = null, status = status) }
+    }
+
+    private fun updateDiagnosticNotification(progress: NanamiDiagnostics.Progress?) {
+        if (_streamStatus.value.requestId != null || activeOfflineCast.get() != null ||
+            offlineJobs.values.any { !it.isCompleted }
+        ) return
+        if (progress == null) {
+            updateNotification("Generating log dump", progressPercent = 0)
+        } else {
+            updateNotification(
+                "Generating log dump • ${progress.completed}/${progress.total} checks",
+                progressPercent = 100 * progress.completed / progress.total
+            )
+        }
+    }
+
+    private fun startDiagnosticTorrent(source: StreamLink, episodeNum: Int): String? {
+        val previous = _streamStatus.value
+        if (previous.requestId != null || activeOfflineCast.get() != null) return null
+        val requestId = UUID.randomUUID().toString()
+        val reserved = ActiveStreamStatus(requestId = requestId, isBuffering = true)
+        if (!_streamStatus.compareAndSet(previous, reserved)) return null
+        streamRequestId = requestId
+        launchLiveStream(source.url, source.fileIdx, null, episodeNum, requestId)
+        return requestId
+    }
 
     private fun pickVideoFileIndex(tInfo: TorrentInfo, preferredIdx: Int?, episodeNum: Int): Int {
         val files = tInfo.files()
@@ -676,7 +782,7 @@ class TorrentStreamService : Service() {
     private fun launchLiveStream(
         magnetUri: String,
         preferredFileIdx: Int?,
-        animeTitle: String,
+        animeTitle: String?,
         episodeNum: Int,
         requestId: String
     ) {
@@ -701,7 +807,7 @@ class TorrentStreamService : Service() {
                 updateStreamStatus(requestId) { status ->
                     status.copy(phase = phase, statusMessage = "Loading Episode $episodeNum stream...", progressPercent = 5)
                 }
-                updateNotification("Playing $animeTitle • Ep $episodeNum")
+                if (animeTitle != null) updateNotification("Playing $animeTitle • Ep $episodeNum")
                 val handle = addLiveTorrent(session, magnetUri, saveDir)
                 val tInfo = awaitMetadata(handle)
                 val metadataAt = SystemClock.elapsedRealtime()
@@ -1501,6 +1607,10 @@ class TorrentStreamService : Service() {
     }
 
     override fun onDestroy() {
+        if (diagnosticJob != null) {
+            diagnosticJob = null
+            finishDiagnostics("Diagnostic checks stopped.")
+        }
         serviceScope.cancel()
         activeSession.set(null)
         activeOfflineCast.set(null)

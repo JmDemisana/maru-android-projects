@@ -7,7 +7,10 @@ import android.os.Build
 import android.os.PersistableBundle
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -17,14 +20,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.maru.manime.CrunchyBorder
+import io.maru.manime.CrunchyTeal
 import io.maru.manime.MaruTextMuted
-import io.maru.manime.NanamiDiagnostics
 import io.maru.manime.NanamiRelease
 import io.maru.manime.NanamiUpdater
+import io.maru.manime.torrent.TorrentStreamService
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -32,8 +38,8 @@ import java.io.File
 internal fun NanamiSupportActions(hideNsfwContent: Boolean) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var diagnosticJob by remember { mutableStateOf<Job?>(null) }
-    var diagnosticText by remember { mutableStateOf<String?>(null) }
+    val diagnostics by TorrentStreamService.diagnosticState.collectAsStateWithLifecycle()
+    var clipboardStatus by remember(diagnostics.report) { mutableStateOf<String?>(null) }
     var confirmDiagnostics by remember { mutableStateOf(false) }
 
     var updateBusy by remember { mutableStateOf(false) }
@@ -56,13 +62,58 @@ internal fun NanamiSupportActions(hideNsfwContent: Boolean) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         OutlinedButton(
             onClick = { confirmDiagnostics = true },
-            enabled = diagnosticJob == null && !updateBusy
+            enabled = !diagnostics.isRunning && !updateBusy
         ) {
-            Text("Copy Log Dump to Clipboard")
+            Text("Generate Log Dump")
         }
-        diagnosticText?.let { Text(it, color = MaruTextMuted) }
-        diagnosticJob?.let { job ->
-            TextButton(onClick = { job.cancel() }) { Text("Cancel checks") }
+        Text(
+            "This dump will continue even if the app is on another page, another anime, or minimized.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaruTextMuted
+        )
+        if (diagnostics.isRunning) {
+            val progress = diagnostics.progress
+            if (progress == null) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = CrunchyTeal, trackColor = CrunchyBorder)
+            } else {
+                LinearProgressIndicator(
+                    progress = { progress.completed.toFloat() / progress.total },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = CrunchyTeal,
+                    trackColor = CrunchyBorder
+                )
+            }
+            Text(
+                if (progress == null) "Preparing checks…"
+                else "${progress.completed} of ${progress.total} checks complete · ${progress.label}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaruTextMuted
+            )
+            TextButton(onClick = { TorrentStreamService.cancelLogDump(context) }) { Text("Cancel checks") }
+        } else {
+            (clipboardStatus ?: diagnostics.status)?.let { Text(it, color = MaruTextMuted) }
+        }
+        OutlinedButton(
+            onClick = {
+                val report = diagnostics.report ?: return@OutlinedButton
+                val clip = ClipData.newPlainText("Nanami Anime diagnostics", report)
+                if (Build.VERSION.SDK_INT >= 33) {
+                    clip.description.extras = PersistableBundle().apply {
+                        putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+                    }
+                }
+                clipboardStatus = try {
+                    val clipboard = context.getSystemService(ClipboardManager::class.java)
+                        ?: error("Clipboard unavailable")
+                    clipboard.setPrimaryClip(clip)
+                    "Log dump copied."
+                } catch (_: Exception) {
+                    "Couldn't copy the log dump. Try again."
+                }
+            },
+            enabled = diagnostics.report != null && !diagnostics.isRunning
+        ) {
+            Text("Copy Generated Log Dump to Clipboard")
         }
 
         OutlinedButton(
@@ -95,7 +146,7 @@ internal fun NanamiSupportActions(hideNsfwContent: Boolean) {
                     }
                 }
             },
-            enabled = !updateBusy && diagnosticJob == null
+            enabled = !updateBusy && !diagnostics.isRunning
         ) {
             Text(if (downloadedApk?.isFile == true) "Install Update" else "Check for Updates")
         }
@@ -107,37 +158,14 @@ internal fun NanamiSupportActions(hideNsfwContent: Boolean) {
             onDismissRequest = { confirmDiagnostics = false },
             title = { Text("Run diagnostic checks?") },
             text = {
-                Text("Nanami checks its online services and tries to render the first frame of each sample. This can take several minutes and use data. Torrent checks require Wi-Fi or Ethernet. The report is copied locally and excludes account names and tokens.")
+                Text("Nanami checks its online services and tries to render the first frame of each sample. This can take several minutes and use data. Torrent checks require Wi-Fi or Ethernet. The report stays on your device and excludes account names and tokens.")
             },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDiagnostics = false
-                    diagnosticText = "Preparing checks…"
-                    diagnosticJob = scope.launch {
-                        try {
-                            val report = NanamiDiagnostics.collect(context, includeAdult = !hideNsfwContent) {
-                                diagnosticText = "Checking $it…"
-                            }
-                            val clip = ClipData.newPlainText("Nanami Anime diagnostics", report)
-                            if (Build.VERSION.SDK_INT >= 33) {
-                                clip.description.extras = PersistableBundle().apply {
-                                    putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
-                                }
-                            }
-                            val clipboard = context.getSystemService(ClipboardManager::class.java)
-                                ?: error("Clipboard unavailable")
-                            clipboard.setPrimaryClip(clip)
-                            diagnosticText = "Diagnostic report copied."
-                        } catch (e: CancellationException) {
-                            diagnosticText = "Diagnostic checks canceled."
-                            throw e
-                        } catch (_: Exception) {
-                            diagnosticText = "Couldn't generate the diagnostic report. Try again."
-                        } finally {
-                            diagnosticJob = null
-                        }
-                    }
-                }) { Text("Run and Copy") }
+                    clipboardStatus = null
+                    TorrentStreamService.generateLogDump(context, includeAdult = !hideNsfwContent)
+                }) { Text("Generate") }
             },
             dismissButton = { TextButton(onClick = { confirmDiagnostics = false }) { Text("Cancel") } }
         )

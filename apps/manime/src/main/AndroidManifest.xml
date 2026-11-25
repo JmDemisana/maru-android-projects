@@ -93,7 +93,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Streams torrent content via a local HTTP server for in-app anime playback" />
+                android:value="Streams torrent content via a local HTTP server for in-app playback and user-started diagnostic checks" />
         </service>
 
     </application>

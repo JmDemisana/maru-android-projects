@@ -30,7 +30,7 @@ Open the APK on your Android device. Android may ask you to allow installation f
 
 ## Updates and diagnostics
 
-Starting in 2.1.2, go to **Settings → Private Offline Vault & About**. **Check for Updates** finds official Nanami Anime releases and hands a verified APK to Android's installer. **Copy Log Dump to Clipboard** checks the app's online services and tries to render the first frame of sample episodes. The report stays on your device until you share it.
+Starting in 2.1.2, go to **Settings → Private Offline Vault & About**. **Check for Updates** finds official Nanami Anime releases and hands a verified APK to Android's installer. **Generate Log Dump** checks online services and tries to render the first frame of sample episodes. Check its progress in Settings or leave it running while browsing or minimizing the app. Select **Copy Generated Log Dump to Clipboard** when the report is ready.
 
 ## Release channels
 
