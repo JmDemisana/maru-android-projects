@@ -271,10 +271,15 @@ private fun EpisodePlayerScreen(
     var snippetExportState by remember { mutableStateOf<SnippetExportState>(SnippetExportState.Idle) }
     var snippetPreviewPlaying by remember { mutableStateOf(false) }
     var snippetBurnSubtitles by remember { mutableStateOf(true) }
+    var snippetControlsCollapsed by remember { mutableStateOf(false) }
+    var snippetPanelHeightPx by remember { mutableIntStateOf(0) }
     var snippetExportJob by remember { mutableStateOf<Job?>(null) }
     val snippetExporter = remember(context) { SnippetExporter(context) }
     val liveCueRecorder = remember { LiveCueRecorder() }
     var cueCaptureVersion by remember { mutableIntStateOf(0) }
+    val savedSnippetConfig by remember(media.mediaId, episodeNum) {
+        prefs.getSnippetConfigFlow(media.mediaId, episodeNum)
+    }.collectAsState(initial = null)
 
     // Swipe Brightness & Volume + Double-Tap Seek HUD states
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
@@ -1074,12 +1079,32 @@ private fun EpisodePlayerScreen(
         }
     }
 
+    fun persistSnippetConfig(
+        range: SnippetRange = snippetRange,
+        burnSubs: Boolean = snippetBurnSubtitles,
+        collapsed: Boolean = snippetControlsCollapsed
+    ) {
+        persistenceScope.launch {
+            prefs.saveSnippetConfig(
+                mediaId = media.mediaId,
+                ep = episodeNum,
+                config = SavedEpisodeSnippetConfig(
+                    startMs = range.startMs,
+                    endMs = range.endMs,
+                    burnSubtitles = burnSubs,
+                    controlsCollapsed = collapsed
+                )
+            )
+        }
+    }
+
     fun dismissSnippetEditor() {
         snippetExportJob?.cancel()
         snippetExportJob = null
         snippetExporter.cancel()
         snippetPreviewPlaying = false
         showSnippetEditor = false
+        snippetPanelHeightPx = 0
         snippetExportState = SnippetExportState.Idle
         showControls = true
         controlsInteraction++
@@ -1244,6 +1269,16 @@ private fun EpisodePlayerScreen(
         gestureHideTick++
     }
 
+    val snippetVideoBottomInset by animateDpAsState(
+        targetValue = if (showSnippetEditor && !snippetControlsCollapsed && !isInPipMode && !showFullSettingsPage && snippetPanelHeightPx > 0) {
+            with(density) { snippetPanelHeightPx.toDp() } + 10.dp
+        } else {
+            0.dp
+        },
+        animationSpec = tween(200),
+        label = "snippet_video_bottom_inset"
+    )
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1273,7 +1308,9 @@ private fun EpisodePlayerScreen(
                     applySubtitleAppearance(subView, subtitleBlackFill, subtitleSize)
                 }
             },
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = snippetVideoBottomInset)
         )
 
         // Casting backdrop when streaming to Chromecast
@@ -1472,8 +1509,16 @@ private fun EpisodePlayerScreen(
                             showControls = false
                             snippetPreviewPlaying = false
                             snippetExportState = SnippetExportState.Idle
-                            snippetBurnSubtitles = subtitlesEnabled != false && sourceAudio != "DUB"
-                            snippetRange = defaultSnippetRange(currentPosition.longValue, totalDuration.longValue)
+                            val saved = savedSnippetConfig
+                            if (saved != null) {
+                                snippetRange = normalizeSnippetRange(saved.startMs, saved.endMs, totalDuration.longValue)
+                                snippetBurnSubtitles = saved.burnSubtitles
+                                snippetControlsCollapsed = saved.controlsCollapsed
+                            } else {
+                                snippetRange = defaultSnippetRange(currentPosition.longValue, totalDuration.longValue)
+                                snippetBurnSubtitles = subtitlesEnabled != false && sourceAudio != "DUB"
+                                snippetControlsCollapsed = false
+                            }
                             showSnippetEditor = true
                         }
                     } else null,
@@ -1784,6 +1829,7 @@ private fun EpisodePlayerScreen(
                 currentPositionMs = currentPosition.longValue,
                 range = snippetRange,
                 isPreviewPlaying = snippetPreviewPlaying,
+                controlsCollapsed = snippetControlsCollapsed,
                 burnSubtitles = snippetBurnSubtitles,
                 hasExternalSubtitles = !extSubUrl.isNullOrBlank(),
                 hasEmbeddedSubtitles = hasEmbeddedTextTrack,
@@ -1792,6 +1838,7 @@ private fun EpisodePlayerScreen(
                 skipIntervals = skipIntervals,
                 onRangeChange = { nextRange, previewSeekMs ->
                     snippetRange = nextRange
+                    persistSnippetConfig(range = nextRange)
                     if (snippetExportState is SnippetExportState.Error || snippetExportState is SnippetExportState.Saved) {
                         snippetExportState = SnippetExportState.Idle
                     }
@@ -1802,8 +1849,37 @@ private fun EpisodePlayerScreen(
                     exoPlayer.seekTo(previewSeekMs)
                     currentPosition.longValue = previewSeekMs
                 },
+                onSetStartAtCurrent = {
+                    val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
+                    val next = setSnippetStartTo(snippetRange, pos, totalDuration.longValue)
+                    snippetRange = next
+                    persistSnippetConfig(range = next)
+                    if (snippetExportState is SnippetExportState.Error || snippetExportState is SnippetExportState.Saved) {
+                        snippetExportState = SnippetExportState.Idle
+                    }
+                },
+                onSetEndAtCurrent = {
+                    val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
+                    val next = setSnippetEndTo(snippetRange, pos, totalDuration.longValue)
+                    snippetRange = next
+                    persistSnippetConfig(range = next)
+                    if (snippetExportState is SnippetExportState.Error || snippetExportState is SnippetExportState.Saved) {
+                        snippetExportState = SnippetExportState.Idle
+                    }
+                },
+                onToggleCollapse = {
+                    val nextCollapsed = !snippetControlsCollapsed
+                    snippetControlsCollapsed = nextCollapsed
+                    if (nextCollapsed) snippetPanelHeightPx = 0
+                    persistSnippetConfig(collapsed = nextCollapsed)
+                },
+                onPanelHeightChange = { heightPx ->
+                    snippetPanelHeightPx = heightPx
+                },
                 onToggleBurnSubtitles = {
-                    snippetBurnSubtitles = !snippetBurnSubtitles
+                    val nextSubs = !snippetBurnSubtitles
+                    snippetBurnSubtitles = nextSubs
+                    persistSnippetConfig(burnSubs = nextSubs)
                 },
                 onTogglePreview = {
                     if (snippetPreviewPlaying) {

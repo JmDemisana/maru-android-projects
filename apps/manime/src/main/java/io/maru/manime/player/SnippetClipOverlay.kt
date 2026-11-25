@@ -55,6 +55,7 @@ internal fun SnippetClipOverlay(
     currentPositionMs: Long,
     range: SnippetRange,
     isPreviewPlaying: Boolean,
+    controlsCollapsed: Boolean,
     burnSubtitles: Boolean,
     hasExternalSubtitles: Boolean,
     hasEmbeddedSubtitles: Boolean,
@@ -62,6 +63,10 @@ internal fun SnippetClipOverlay(
     exportState: SnippetExportState,
     skipIntervals: List<AniSkipInterval>,
     onRangeChange: (SnippetRange, Long) -> Unit,
+    onSetStartAtCurrent: () -> Unit,
+    onSetEndAtCurrent: () -> Unit,
+    onToggleCollapse: () -> Unit,
+    onPanelHeightChange: (Int) -> Unit,
     onToggleBurnSubtitles: () -> Unit,
     onTogglePreview: () -> Unit,
     onExportClick: () -> Unit,
@@ -76,14 +81,23 @@ internal fun SnippetClipOverlay(
         modifier = Modifier
             .fillMaxSize()
             .background(
-                Brush.verticalGradient(
-                    colorStops = arrayOf(
-                        0.0f to Color(0x28000000),
-                        0.45f to Color(0x40000000),
-                        0.68f to Color(0xDD0B0C0F),
-                        1.0f to Color(0xF50B0C0F)
+                if (controlsCollapsed) {
+                    Brush.verticalGradient(
+                        colorStops = arrayOf(
+                            0.0f to Color.Transparent,
+                            0.72f to Color.Transparent,
+                            1.0f to Color(0xC80B0C0F)
+                        )
                     )
-                )
+                } else {
+                    Brush.verticalGradient(
+                        colorStops = arrayOf(
+                            0.0f to Color.Transparent,
+                            0.55f to Color.Transparent,
+                            1.0f to Color(0xD80B0C0F)
+                        )
+                    )
+                }
             )
             .windowInsetsPadding(WindowInsets.safeDrawing)
     ) {
@@ -98,10 +112,10 @@ internal fun SnippetClipOverlay(
             border = BorderStroke(1.dp, CrunchyBorder),
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(12.dp)
+                .padding(10.dp)
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(5.dp)
             ) {
@@ -109,34 +123,37 @@ internal fun SnippetClipOverlay(
                     imageVector = Icons.Default.Close,
                     contentDescription = "Close clip editor",
                     tint = Color.White,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(15.dp)
                 )
                 Text(
                     text = if (isExporting) "Cancel & Close" else "Close",
                     color = Color.White,
-                    fontSize = 12.sp,
+                    fontSize = 11.5.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
         }
 
-        // Bottom docked Clip Studio panel
+        // Bottom docked Clip Studio panel (full or collapsed seekbar-only mode)
         Surface(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 8.dp),
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+                .onSizeChanged { size ->
+                    onPanelHeightChange(if (controlsCollapsed) 0 else size.height)
+                },
             shape = RoundedCornerShape(12.dp),
-            color = Color(0xEB121419),
+            color = if (controlsCollapsed) Color(0xC8121419) else Color(0xF2121419),
             border = BorderStroke(1.dp, CrunchyBorder)
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                    .padding(horizontal = 12.dp, vertical = if (controlsCollapsed) 6.dp else 9.dp),
+                verticalArrangement = Arrangement.spacedBy(if (controlsCollapsed) 4.dp else 7.dp)
             ) {
-                // Header row: Title + live start/end/duration readout
+                // Header row: Title/times + inline compact buttons + collapse toggle
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -144,26 +161,22 @@ internal fun SnippetClipOverlay(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(7.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.ContentCut,
                             contentDescription = null,
                             tint = CrunchyOrange,
-                            modifier = Modifier.size(17.dp)
+                            modifier = Modifier.size(16.dp)
                         )
-                        Text(
-                            text = "Save Snippet to Gallery",
-                            color = Color.White,
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 13.5.sp
-                        )
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
+                        if (!controlsCollapsed) {
+                            Text(
+                                text = "Save Snippet",
+                                color = Color.White,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 13.sp
+                            )
+                        }
                         Text(
                             text = "${formatPlayerTime(range.startMs)} → ${formatPlayerTime(range.endMs)}",
                             color = Color(0xFFE0E3EC),
@@ -179,14 +192,77 @@ internal fun SnippetClipOverlay(
                                 text = formatSnippetDuration(range.durationMs),
                                 color = CrunchyTeal,
                                 fontWeight = FontWeight.ExtraBold,
-                                fontSize = 11.5.sp,
-                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
+                        }
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (controlsCollapsed && exportState is SnippetExportState.Idle) {
+                            Surface(
+                                onClick = { if (controlsEnabled) onTogglePreview() },
+                                shape = CircleShape,
+                                color = Color(0xFF1E222B),
+                                border = BorderStroke(1.dp, CrunchyBorder)
+                            ) {
+                                Icon(
+                                    imageVector = if (isPreviewPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                    contentDescription = if (isPreviewPlaying) "Pause preview" else "Preview clip",
+                                    tint = Color.White,
+                                    modifier = Modifier
+                                        .padding(5.dp)
+                                        .size(16.dp)
+                                )
+                            }
+                            Surface(
+                                onClick = { if (controlsEnabled) onExportClick() },
+                                shape = CircleShape,
+                                color = CrunchyOrange
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.SaveAlt,
+                                    contentDescription = "Save MP4 to Gallery",
+                                    tint = Color.Black,
+                                    modifier = Modifier
+                                        .padding(5.dp)
+                                        .size(16.dp)
+                                )
+                            }
+                        }
+
+                        Surface(
+                            onClick = onToggleCollapse,
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFF1C1F26),
+                            border = BorderStroke(1.dp, CrunchyBorder)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (controlsCollapsed) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                    contentDescription = if (controlsCollapsed) "Expand controls" else "Collapse controls",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = if (controlsCollapsed) "Expand" else "Hide Controls",
+                                    color = Color(0xFFD0D4DE),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
+                                )
+                            }
                         }
                     }
                 }
 
-                // Dual-handle range seekbar
+                // Dual-handle range seekbar (always visible in both expanded & collapsed modes!)
                 SnippetRangeSeekbar(
                     durationMs = durationMs,
                     currentPositionMs = currentPositionMs,
@@ -196,142 +272,197 @@ internal fun SnippetClipOverlay(
                     onRangeChange = onRangeChange
                 )
 
-                // Fine-tune nudges + Quick duration presets
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    NudgePair(
-                        label = "Start",
-                        enabled = controlsEnabled,
-                        onMinus = {
-                            val next = normalizeSnippetRange(range.startMs - 1_000L, range.endMs, durationMs)
-                            onRangeChange(next, next.startMs)
-                        },
-                        onPlus = {
-                            val next = normalizeSnippetRange(range.startMs + 1_000L, range.endMs, durationMs)
-                            onRangeChange(next, next.startMs)
-                        }
-                    )
-
-                    NudgePair(
-                        label = "End",
-                        enabled = controlsEnabled,
-                        onMinus = {
-                            val next = normalizeSnippetRange(range.startMs, range.endMs - 1_000L, durationMs)
-                            onRangeChange(next, next.endMs)
-                        },
-                        onPlus = {
-                            val next = normalizeSnippetRange(range.startMs, range.endMs + 1_000L, durationMs)
-                            onRangeChange(next, next.endMs)
-                        }
-                    )
-
-                    Spacer(Modifier.width(4.dp))
-
-                    val activeSec = (range.durationMs / 1000L).toInt()
-                    for (presetSec in CLIP_DURATION_PRESETS_SEC) {
-                        val presetMs = presetSec * 1000L
-                        if (presetMs > durationMs && presetSec > 5) continue
-                        val isSelected = abs(activeSec - presetSec) == 0
+                if (!controlsCollapsed) {
+                    // Set Start / Set End at current time + Fine-tune nudges + Quick duration presets + Subs toggle
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         Surface(
-                            onClick = {
-                                if (controlsEnabled) {
-                                    val next = applyDurationPreset(range, presetMs, durationMs)
-                                    onRangeChange(next, next.endMs)
-                                }
-                            },
+                            onClick = { if (controlsEnabled) onSetStartAtCurrent() },
                             shape = RoundedCornerShape(6.dp),
-                            color = if (isSelected) CrunchyOrange.copy(alpha = 0.22f) else Color(0xFF1C1F26),
-                            border = BorderStroke(
-                                1.dp,
-                                if (isSelected) CrunchyOrange else CrunchyBorder
-                            )
-                        ) {
-                            Text(
-                                text = "${presetSec}s",
-                                color = if (isSelected) CrunchyOrange else Color(0xFFD0D4DE),
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.5.sp,
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
-                            )
-                        }
-                    }
-
-                    if (durationMs > 0L) {
-                        val isFullSelected = range.startMs == 0L && range.endMs == durationMs
-                        Surface(
-                            onClick = {
-                                if (controlsEnabled) {
-                                    val fullRange = SnippetRange(0L, durationMs)
-                                    onRangeChange(fullRange, 0L)
-                                }
-                            },
-                            shape = RoundedCornerShape(6.dp),
-                            color = if (isFullSelected) CrunchyOrange.copy(alpha = 0.22f) else Color(0xFF1C1F26),
-                            border = BorderStroke(
-                                1.dp,
-                                if (isFullSelected) CrunchyOrange else CrunchyBorder
-                            )
-                        ) {
-                            Text(
-                                text = "Full",
-                                color = if (isFullSelected) CrunchyOrange else Color(0xFFD0D4DE),
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.5.sp,
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
-                            )
-                        }
-                    }
-
-                    if (hasExternalSubtitles || hasEmbeddedSubtitles) {
-                        Spacer(Modifier.width(4.dp))
-                        val subsActive = burnSubtitles
-                        Surface(
-                            onClick = { if (controlsEnabled) onToggleBurnSubtitles() },
-                            shape = RoundedCornerShape(6.dp),
-                            color = if (subsActive) CrunchyTeal.copy(alpha = 0.20f) else Color(0xFF1C1F26),
-                            border = BorderStroke(
-                                1.dp,
-                                if (subsActive) CrunchyTeal else CrunchyBorder
-                            )
+                            color = CrunchyOrange.copy(alpha = 0.16f),
+                            border = BorderStroke(1.dp, CrunchyOrange.copy(alpha = 0.75f))
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.Subtitles,
+                                    imageVector = Icons.Default.FirstPage,
                                     contentDescription = null,
-                                    tint = if (subsActive) CrunchyTeal else Color(0xFF9EA4B3),
+                                    tint = CrunchyOrange,
                                     modifier = Modifier.size(14.dp)
                                 )
                                 Text(
-                                    text = if (subsActive) "Subs: On" else "Subs: Off",
-                                    color = if (subsActive) CrunchyTeal else Color(0xFF9EA4B3),
+                                    text = "Set Start",
+                                    color = CrunchyOrange,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 11.5.sp
                                 )
                             }
                         }
+
+                        Surface(
+                            onClick = { if (controlsEnabled) onSetEndAtCurrent() },
+                            shape = RoundedCornerShape(6.dp),
+                            color = CrunchyOrange.copy(alpha = 0.16f),
+                            border = BorderStroke(1.dp, CrunchyOrange.copy(alpha = 0.75f))
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                            ) {
+                                Text(
+                                    text = "Set End",
+                                    color = CrunchyOrange,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.5.sp
+                                )
+                                Icon(
+                                    imageVector = Icons.Default.LastPage,
+                                    contentDescription = null,
+                                    tint = CrunchyOrange,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        }
+
+                        NudgePair(
+                            label = "Start",
+                            enabled = controlsEnabled,
+                            onMinus = {
+                                val next = normalizeSnippetRange(range.startMs - 1_000L, range.endMs, durationMs)
+                                onRangeChange(next, next.startMs)
+                            },
+                            onPlus = {
+                                val next = normalizeSnippetRange(range.startMs + 1_000L, range.endMs, durationMs)
+                                onRangeChange(next, next.startMs)
+                            }
+                        )
+
+                        NudgePair(
+                            label = "End",
+                            enabled = controlsEnabled,
+                            onMinus = {
+                                val next = normalizeSnippetRange(range.startMs, range.endMs - 1_000L, durationMs)
+                                onRangeChange(next, next.endMs)
+                            },
+                            onPlus = {
+                                val next = normalizeSnippetRange(range.startMs, range.endMs + 1_000L, durationMs)
+                                onRangeChange(next, next.endMs)
+                            }
+                        )
+
+                        Spacer(Modifier.width(2.dp))
+
+                        val activeSec = (range.durationMs / 1000L).toInt()
+                        for (presetSec in CLIP_DURATION_PRESETS_SEC) {
+                            val presetMs = presetSec * 1000L
+                            if (presetMs > durationMs && presetSec > 5) continue
+                            val isSelected = abs(activeSec - presetSec) == 0
+                            Surface(
+                                onClick = {
+                                    if (controlsEnabled) {
+                                        val next = applyDurationPreset(range, presetMs, durationMs)
+                                        onRangeChange(next, next.endMs)
+                                    }
+                                },
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (isSelected) CrunchyOrange.copy(alpha = 0.22f) else Color(0xFF1C1F26),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isSelected) CrunchyOrange else CrunchyBorder
+                                )
+                            ) {
+                                Text(
+                                    text = "${presetSec}s",
+                                    color = if (isSelected) CrunchyOrange else Color(0xFFD0D4DE),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.5.sp,
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                                )
+                            }
+                        }
+
+                        if (durationMs > 0L) {
+                            val isFullSelected = range.startMs == 0L && range.endMs == durationMs
+                            Surface(
+                                onClick = {
+                                    if (controlsEnabled) {
+                                        val fullRange = SnippetRange(0L, durationMs)
+                                        onRangeChange(fullRange, 0L)
+                                    }
+                                },
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (isFullSelected) CrunchyOrange.copy(alpha = 0.22f) else Color(0xFF1C1F26),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isFullSelected) CrunchyOrange else CrunchyBorder
+                                )
+                            ) {
+                                Text(
+                                    text = "Full",
+                                    color = if (isFullSelected) CrunchyOrange else Color(0xFFD0D4DE),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.5.sp,
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                                )
+                            }
+                        }
+
+                        if (hasExternalSubtitles || hasEmbeddedSubtitles) {
+                            Spacer(Modifier.width(2.dp))
+                            val subsActive = burnSubtitles
+                            Surface(
+                                onClick = { if (controlsEnabled) onToggleBurnSubtitles() },
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (subsActive) CrunchyTeal.copy(alpha = 0.20f) else Color(0xFF1C1F26),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (subsActive) CrunchyTeal else CrunchyBorder
+                                )
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Subtitles,
+                                        contentDescription = null,
+                                        tint = if (subsActive) CrunchyTeal else Color(0xFF9EA4B3),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = if (subsActive) "Subs: On" else "Subs: Off",
+                                        color = if (subsActive) CrunchyTeal else Color(0xFF9EA4B3),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.5.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (burnSubtitles && !hasExternalSubtitles && hasEmbeddedSubtitles && !hasCapturedEmbeddedCues && exportState is SnippetExportState.Idle) {
+                        Text(
+                            text = "Tip: Tap Preview Clip once to capture embedded MKV subtitles before saving.",
+                            color = CrunchyGold,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
                 }
 
-                if (burnSubtitles && !hasExternalSubtitles && hasEmbeddedSubtitles && !hasCapturedEmbeddedCues && exportState is SnippetExportState.Idle) {
-                    Text(
-                        text = "Tip: Tap Preview Clip once to capture embedded MKV subtitles before saving.",
-                        color = CrunchyGold,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-
-                // Bottom action bar / export status
-                when (exportState) {
+                // Bottom action bar / export status (shown when expanded, OR when exporting/saved/error even while collapsed)
+                if (!controlsCollapsed || exportState !is SnippetExportState.Idle) {
+                    when (exportState) {
                     is SnippetExportState.Idle -> {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -516,6 +647,7 @@ internal fun SnippetClipOverlay(
                                 Text("Retry", fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
                             }
                         }
+                    }
                     }
                 }
             }

@@ -353,6 +353,46 @@ class MAnimePrefs(private val context: Context) {
         context.dataStore.edit { it[posKey(mediaId, ep)] = seconds }
     fun getPositionFlow(mediaId: Int, ep: Int): Flow<Long> =
         context.dataStore.data.map { it[posKey(mediaId, ep)] ?: 0L }
+
+    // Per-episode snippet clipper config: "mediaId:ep" -> JSON
+    private fun snippetConfigKey(mediaId: Int, ep: Int) = stringPreferencesKey("snippet_cfg_${mediaId}_$ep")
+    suspend fun saveSnippetConfig(mediaId: Int, ep: Int, config: SavedEpisodeSnippetConfig) =
+        context.dataStore.edit { it[snippetConfigKey(mediaId, ep)] = encodeSnippetConfigJson(config) }
+    fun getSnippetConfigFlow(mediaId: Int, ep: Int): Flow<SavedEpisodeSnippetConfig?> =
+        context.dataStore.data.map { parseSnippetConfigJson(it[snippetConfigKey(mediaId, ep)]) }
+        .distinctUntilChanged()
+}
+
+data class SavedEpisodeSnippetConfig(
+    val startMs: Long,
+    val endMs: Long,
+    val burnSubtitles: Boolean,
+    val controlsCollapsed: Boolean
+)
+
+internal fun encodeSnippetConfigJson(config: SavedEpisodeSnippetConfig): String {
+    return JSONObject().apply {
+        put("startMs", config.startMs.coerceAtLeast(0L))
+        put("endMs", config.endMs.coerceAtLeast(0L))
+        put("burnSubtitles", config.burnSubtitles)
+        put("controlsCollapsed", config.controlsCollapsed)
+    }.toString()
+}
+
+internal fun parseSnippetConfigJson(raw: String?): SavedEpisodeSnippetConfig? {
+    if (raw.isNullOrBlank()) return null
+    return try {
+        val o = JSONObject(raw)
+        if (!o.has("startMs") || !o.has("endMs")) return null
+        SavedEpisodeSnippetConfig(
+            startMs = o.optLong("startMs", 0L).coerceAtLeast(0L),
+            endMs = o.optLong("endMs", 0L).coerceAtLeast(0L),
+            burnSubtitles = o.optBoolean("burnSubtitles", true),
+            controlsCollapsed = o.optBoolean("controlsCollapsed", false)
+        )
+    } catch (_: Exception) {
+        null
+    }
 }
 
 internal fun parseAccountsJson(raw: String?): List<SavedAniListAccount> {

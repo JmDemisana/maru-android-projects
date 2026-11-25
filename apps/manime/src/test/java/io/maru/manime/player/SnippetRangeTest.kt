@@ -1,6 +1,10 @@
 package io.maru.manime.player
 
+import io.maru.manime.SavedEpisodeSnippetConfig
+import io.maru.manime.encodeSnippetConfigJson
+import io.maru.manime.parseSnippetConfigJson
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -127,5 +131,42 @@ class SnippetRangeTest {
         assertEquals("First line", cuesActiveAt(cues, 11_000L))
         assertEquals("Second line", cuesActiveAt(cues, 14_000L))
         assertTrue(recorder.hasCuesInRange(10_500L, 14_500L))
+    }
+
+    @Test
+    fun setStartAndEndAtCurrentTimeAdjustsBoundsSafely() {
+        val dur = 120_000L
+        val base = SnippetRange(20_000L, 40_000L)
+
+        val movedStart = setSnippetStartTo(base, 30_000L, dur)
+        assertEquals(30_000L, movedStart.startMs)
+        assertEquals(40_000L, movedStart.endMs)
+
+        val startPastEnd = setSnippetStartTo(base, 50_000L, dur)
+        assertEquals(50_000L, startPastEnd.startMs)
+        assertEquals(51_000L, startPastEnd.endMs)
+
+        val movedEnd = setSnippetEndTo(base, 65_000L, dur)
+        assertEquals(20_000L, movedEnd.startMs)
+        assertEquals(65_000L, movedEnd.endMs)
+
+        val endBeforeStart = setSnippetEndTo(base, 10_000L, dur)
+        assertEquals(9_000L, endBeforeStart.startMs)
+        assertEquals(10_000L, endBeforeStart.endMs)
+    }
+
+    @Test
+    fun savedEpisodeSnippetConfigRoundTripsThroughJson() {
+        val original = SavedEpisodeSnippetConfig(
+            startMs = 42_500L,
+            endMs = 118_000L,
+            burnSubtitles = false,
+            controlsCollapsed = true
+        )
+        val encoded = encodeSnippetConfigJson(original)
+        val decoded = parseSnippetConfigJson(encoded)
+        assertEquals(original, decoded)
+        assertNull(parseSnippetConfigJson(""))
+        assertNull(parseSnippetConfigJson("not-json"))
     }
 }

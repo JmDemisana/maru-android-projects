@@ -126,6 +126,38 @@ internal fun shiftSnippetWindow(
     return SnippetRange(newStart, (newStart + length).coerceAtMost(durationMs))
 }
 
+internal fun setSnippetStartTo(
+    current: SnippetRange,
+    positionMs: Long,
+    durationMs: Long
+): SnippetRange {
+    if (durationMs <= 0L) return SnippetRange(0L, 0L)
+    val minLen = SNIPPET_MIN_DURATION_MS.coerceAtMost(durationMs)
+    val clampedPos = positionMs.coerceIn(0L, (durationMs - minLen).coerceAtLeast(0L))
+    val newEnd = if (current.endMs >= clampedPos + minLen) {
+        current.endMs.coerceAtMost(durationMs)
+    } else {
+        (clampedPos + minLen).coerceAtMost(durationMs)
+    }
+    return normalizeSnippetRange(clampedPos, newEnd, durationMs)
+}
+
+internal fun setSnippetEndTo(
+    current: SnippetRange,
+    positionMs: Long,
+    durationMs: Long
+): SnippetRange {
+    if (durationMs <= 0L) return SnippetRange(0L, 0L)
+    val minLen = SNIPPET_MIN_DURATION_MS.coerceAtMost(durationMs)
+    val clampedPos = positionMs.coerceIn(minLen, durationMs)
+    val newStart = if (current.startMs <= clampedPos - minLen) {
+        current.startMs.coerceAtLeast(0L)
+    } else {
+        (clampedPos - minLen).coerceAtLeast(0L)
+    }
+    return normalizeSnippetRange(newStart, clampedPos, durationMs)
+}
+
 internal fun buildSnippetDisplayName(
     animeTitle: String,
     episodeNum: Int,
