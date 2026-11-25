@@ -58,6 +58,7 @@ internal fun PlayerHeader(
     isCasting: Boolean = false,
     hasCastRoutes: Boolean = false,
     onCastClick: (() -> Unit)? = null,
+    onClipClick: (() -> Unit)? = null,
     onLockClick: (() -> Unit)? = null,
     onPipClick: (() -> Unit)? = null,
     onSettings: (() -> Unit)? = null
@@ -88,6 +89,15 @@ internal fun PlayerHeader(
                 color = Color(0xFFD0D3DC),
                 style = MaterialTheme.typography.bodySmall
             )
+        }
+        if (onClipClick != null) {
+            IconButton(onClick = onClipClick) {
+                Icon(
+                    imageVector = Icons.Default.ContentCut,
+                    contentDescription = "Save snippet to gallery",
+                    tint = Color.White
+                )
+            }
         }
         if (onCastClick != null) {
             IconButton(onClick = onCastClick) {

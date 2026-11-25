@@ -265,6 +265,14 @@ private fun EpisodePlayerScreen(
     var showFullSettingsPage by remember { mutableStateOf(false) }
     var showCastDialog by remember { mutableStateOf(false) }
 
+    // Gallery MP4 snippet clipper state
+    var showSnippetEditor by remember { mutableStateOf(false) }
+    var snippetRange by remember { mutableStateOf(SnippetRange(0L, 0L)) }
+    var snippetExportState by remember { mutableStateOf<SnippetExportState>(SnippetExportState.Idle) }
+    var snippetPreviewPlaying by remember { mutableStateOf(false) }
+    var snippetExportJob by remember { mutableStateOf<Job?>(null) }
+    val snippetExporter = remember(context) { SnippetExporter(context) }
+
     // Swipe Brightness & Volume + Double-Tap Seek HUD states
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
     var activeGestureIsBrightness by remember { mutableStateOf(true) }
@@ -919,6 +927,8 @@ private fun EpisodePlayerScreen(
             }
             exoPlayer.removeListener(listener)
             exoPlayer.release()
+            snippetExportJob?.cancel()
+            snippetExporter.cancel()
             PlayerForegroundService.stop(context)
             stopTorrent()
         }
@@ -994,8 +1004,27 @@ private fun EpisodePlayerScreen(
         }
     }
 
-    LaunchedEffect(showControls, wantsPlayback, showFullSettingsPage, showCastDialog, hasRenderedFrame, controlsInteraction, isScrubbing, isCasting) {
-        if (showControls && wantsPlayback && hasRenderedFrame && !showFullSettingsPage && !showCastDialog && !isScrubbing && !isCasting) {
+    LaunchedEffect(showSnippetEditor, snippetPreviewPlaying, snippetRange) {
+        if (!showSnippetEditor || !snippetPreviewPlaying) return@LaunchedEffect
+        val cur = exoPlayer.currentPosition
+        if (cur < snippetRange.startMs || cur >= snippetRange.endMs) {
+            exoPlayer.seekTo(snippetRange.startMs)
+            currentPosition.longValue = snippetRange.startMs
+        }
+        exoPlayer.play()
+        while (showSnippetEditor && snippetPreviewPlaying) {
+            val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
+            currentPosition.longValue = pos
+            if (pos >= snippetRange.endMs) {
+                exoPlayer.seekTo(snippetRange.startMs)
+                currentPosition.longValue = snippetRange.startMs
+            }
+            delay(80L)
+        }
+    }
+
+    LaunchedEffect(showControls, wantsPlayback, showFullSettingsPage, showCastDialog, showSnippetEditor, hasRenderedFrame, controlsInteraction, isScrubbing, isCasting) {
+        if (showControls && wantsPlayback && hasRenderedFrame && !showFullSettingsPage && !showCastDialog && !showSnippetEditor && !isScrubbing && !isCasting) {
             delay(4000)
             showControls = false
         }
@@ -1034,15 +1063,54 @@ private fun EpisodePlayerScreen(
         }
     }
 
+    fun dismissSnippetEditor() {
+        snippetExportJob?.cancel()
+        snippetExportJob = null
+        snippetExporter.cancel()
+        snippetPreviewPlaying = false
+        showSnippetEditor = false
+        snippetExportState = SnippetExportState.Idle
+        showControls = true
+        controlsInteraction++
+    }
+
+    fun startSnippetExport() {
+        val uri = currentLoadedUri ?: return
+        snippetPreviewPlaying = false
+        exoPlayer.pause()
+        snippetExportJob?.cancel()
+        snippetExportJob = scope.launch {
+            try {
+                val saved = snippetExporter.exportToGallery(
+                    videoUri = uri,
+                    mimeType = currentLoadedMime,
+                    headers = sourceHeaders,
+                    animeTitle = media.title,
+                    episodeNum = episodeNum,
+                    range = snippetRange,
+                    onProgress = { progress -> snippetExportState = progress }
+                )
+                snippetExportState = saved
+            } catch (_: CancellationException) {
+                snippetExportState = SnippetExportState.Idle
+            } catch (e: Exception) {
+                val msg = e.localizedMessage?.takeIf { it.isNotBlank() }
+                    ?: "Could not export snippet from this stream."
+                snippetExportState = SnippetExportState.Error(msg)
+            }
+        }
+    }
+
     BackHandler {
         when {
+            showSnippetEditor -> dismissSnippetEditor()
             showCastDialog -> showCastDialog = false
             showFullSettingsPage -> showFullSettingsPage = false
             else -> onBack()
         }
     }
 
-    val canToggleChrome = (hasRenderedFrame || isCasting) && resolveError == null && !isInPipMode && !showFullSettingsPage
+    val canToggleChrome = (hasRenderedFrame || isCasting) && resolveError == null && !isInPipMode && !showFullSettingsPage && !showSnippetEditor
     val controlsShowing = canToggleChrome && showControls && !isScreenLocked
     val episodeLabel = if (episodeTitle.equals("Episode $episodeNum", true) || episodeTitle.isBlank()) {
         "Episode $episodeNum"
@@ -1358,6 +1426,16 @@ private fun EpisodePlayerScreen(
                     onBack = onBack,
                     isCasting = isCasting,
                     hasCastRoutes = castController.routes.isNotEmpty(),
+                    onClipClick = if (!isCasting && isSeekable && currentLoadedUri != null && totalDuration.longValue > SNIPPET_MIN_DURATION_MS) {
+                        {
+                            exoPlayer.pause()
+                            showControls = false
+                            snippetPreviewPlaying = false
+                            snippetExportState = SnippetExportState.Idle
+                            snippetRange = defaultSnippetRange(currentPosition.longValue, totalDuration.longValue)
+                            showSnippetEditor = true
+                        }
+                    } else null,
                     onCastClick = {
                         castController.refreshRoutes()
                         showCastDialog = true
@@ -1637,7 +1715,7 @@ private fun EpisodePlayerScreen(
         }
 
         // YouTube-style Persistent Bottom Progress Bar (slim elapsed ratio line when controls are hidden)
-        if (persistentDurationLine && !isInPipMode && !showFullSettingsPage && (hasRenderedFrame || isCasting) && resolveError == null) {
+        if (persistentDurationLine && !isInPipMode && !showFullSettingsPage && !showSnippetEditor && (hasRenderedFrame || isCasting) && resolveError == null) {
             PersistentMiniProgressBar(
                 position = currentPosition.longValue,
                 bufferedPosition = bufferedPosition.longValue,
@@ -1646,6 +1724,55 @@ private fun EpisodePlayerScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
+            )
+        }
+
+        // Gallery MP4 Snippet Clipper Overlay
+        AnimatedVisibility(
+            visible = showSnippetEditor && !isInPipMode && !showFullSettingsPage,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(160))
+        ) {
+            SnippetClipOverlay(
+                durationMs = totalDuration.longValue,
+                currentPositionMs = currentPosition.longValue,
+                range = snippetRange,
+                isPreviewPlaying = snippetPreviewPlaying,
+                exportState = snippetExportState,
+                skipIntervals = skipIntervals,
+                onRangeChange = { nextRange, previewSeekMs ->
+                    snippetRange = nextRange
+                    if (snippetExportState is SnippetExportState.Error || snippetExportState is SnippetExportState.Saved) {
+                        snippetExportState = SnippetExportState.Idle
+                    }
+                    if (snippetPreviewPlaying) {
+                        snippetPreviewPlaying = false
+                        exoPlayer.pause()
+                    }
+                    exoPlayer.seekTo(previewSeekMs)
+                    currentPosition.longValue = previewSeekMs
+                },
+                onTogglePreview = {
+                    if (snippetPreviewPlaying) {
+                        snippetPreviewPlaying = false
+                        exoPlayer.pause()
+                    } else {
+                        exoPlayer.seekTo(snippetRange.startMs)
+                        currentPosition.longValue = snippetRange.startMs
+                        snippetPreviewPlaying = true
+                    }
+                },
+                onExportClick = ::startSnippetExport,
+                onCancelExport = {
+                    snippetExportJob?.cancel()
+                    snippetExportJob = null
+                    snippetExporter.cancel()
+                    snippetExportState = SnippetExportState.Idle
+                },
+                onResetExport = {
+                    snippetExportState = SnippetExportState.Idle
+                },
+                onDismiss = ::dismissSnippetEditor
             )
         }
 
