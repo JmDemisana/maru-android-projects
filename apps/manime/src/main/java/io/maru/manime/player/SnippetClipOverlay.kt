@@ -55,9 +55,14 @@ internal fun SnippetClipOverlay(
     currentPositionMs: Long,
     range: SnippetRange,
     isPreviewPlaying: Boolean,
+    burnSubtitles: Boolean,
+    hasExternalSubtitles: Boolean,
+    hasEmbeddedSubtitles: Boolean,
+    hasCapturedEmbeddedCues: Boolean,
     exportState: SnippetExportState,
     skipIntervals: List<AniSkipInterval>,
     onRangeChange: (SnippetRange, Long) -> Unit,
+    onToggleBurnSubtitles: () -> Unit,
     onTogglePreview: () -> Unit,
     onExportClick: () -> Unit,
     onCancelExport: () -> Unit,
@@ -255,6 +260,48 @@ internal fun SnippetClipOverlay(
                             )
                         }
                     }
+
+                    if (hasExternalSubtitles || hasEmbeddedSubtitles) {
+                        Spacer(Modifier.width(4.dp))
+                        val subsActive = burnSubtitles
+                        Surface(
+                            onClick = { if (controlsEnabled) onToggleBurnSubtitles() },
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (subsActive) CrunchyTeal.copy(alpha = 0.20f) else Color(0xFF1C1F26),
+                            border = BorderStroke(
+                                1.dp,
+                                if (subsActive) CrunchyTeal else CrunchyBorder
+                            )
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Subtitles,
+                                    contentDescription = null,
+                                    tint = if (subsActive) CrunchyTeal else Color(0xFF9EA4B3),
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    text = if (subsActive) "Subs: On" else "Subs: Off",
+                                    color = if (subsActive) CrunchyTeal else Color(0xFF9EA4B3),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.5.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (burnSubtitles && !hasExternalSubtitles && hasEmbeddedSubtitles && !hasCapturedEmbeddedCues && exportState is SnippetExportState.Idle) {
+                    Text(
+                        text = "Tip: Tap Preview Clip once to capture embedded MKV subtitles before saving.",
+                        color = CrunchyGold,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
 
                 // Bottom action bar / export status

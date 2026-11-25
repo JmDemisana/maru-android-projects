@@ -85,6 +85,7 @@ dependencies {
     // Media3 / ExoPlayer & Chromecast
     implementation(libs.bundles.media3)
     implementation("androidx.media3:media3-transformer:1.4.1")
+    implementation("androidx.media3:media3-effect:1.4.1")
     implementation("androidx.mediarouter:mediarouter:1.7.0")
     implementation("com.google.android.gms:play-services-cast-framework:21.5.0")
 

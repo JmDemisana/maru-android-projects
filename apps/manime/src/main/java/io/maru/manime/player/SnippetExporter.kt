@@ -16,9 +16,11 @@ import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.effect.OverlayEffect
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultDecoderFactory
 import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExoPlayerAssetLoader
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
@@ -187,6 +189,12 @@ internal class SnippetExporter(private val context: Context) {
         animeTitle: String,
         episodeNum: Int,
         range: SnippetRange,
+        burnSubtitles: Boolean = true,
+        externalSubtitleUrl: String? = null,
+        externalSubtitleHeaders: Map<String, String> = emptyMap(),
+        fallbackSubtitleCues: List<BurnInCue> = emptyList(),
+        subtitleBlackFill: Boolean = true,
+        subtitleSize: String = "MEDIUM",
         onProgress: (SnippetExportState.Exporting) -> Unit
     ): SnippetExportState.Saved {
         val appContext = context.applicationContext
@@ -195,7 +203,27 @@ internal class SnippetExporter(private val context: Context) {
         val displayName = buildSnippetDisplayName(animeTitle, episodeNum, range.startMs, range.endMs)
 
         try {
-            onProgress(SnippetExportState.Exporting(null, "Preparing clip…"))
+            val clipCues = if (burnSubtitles) {
+                onProgress(SnippetExportState.Exporting(null, "Loading subtitles…"))
+                val fetched = if (!externalSubtitleUrl.isNullOrBlank()) {
+                    withContext(Dispatchers.IO) {
+                        fetchExternalSubtitleCues(externalSubtitleUrl, externalSubtitleHeaders)
+                    }
+                } else {
+                    emptyList()
+                }
+                val sourceCues = if (fetched.isNotEmpty()) fetched else fallbackSubtitleCues
+                sourceCues.filter { it.endMs >= range.startMs - 500L && it.startMs <= range.endMs + 500L }
+            } else {
+                emptyList()
+            }
+
+            onProgress(
+                SnippetExportState.Exporting(
+                    null,
+                    if (clipCues.isNotEmpty()) "Preparing clip with subtitles…" else "Preparing clip…"
+                )
+            )
 
             withContext(Dispatchers.Main.immediate) {
                 runTransformer(
@@ -204,6 +232,9 @@ internal class SnippetExporter(private val context: Context) {
                     mimeType = mimeType,
                     headers = headers,
                     range = range,
+                    clipCues = clipCues,
+                    subtitleBlackFill = subtitleBlackFill,
+                    subtitleSize = subtitleSize,
                     outputPath = tempFile.absolutePath,
                     onProgress = onProgress
                 )
@@ -235,6 +266,9 @@ internal class SnippetExporter(private val context: Context) {
         mimeType: String?,
         headers: Map<String, String>,
         range: SnippetRange,
+        clipCues: List<BurnInCue>,
+        subtitleBlackFill: Boolean,
+        subtitleSize: String,
         outputPath: String,
         onProgress: (SnippetExportState.Exporting) -> Unit
     ) {
@@ -268,10 +302,24 @@ internal class SnippetExporter(private val context: Context) {
         if (!mimeType.isNullOrBlank()) {
             mediaItemBuilder.setMimeType(mimeType)
         }
-        val editedMediaItem = EditedMediaItem.Builder(mediaItemBuilder.build())
+        val editedBuilder = EditedMediaItem.Builder(mediaItemBuilder.build())
             .setRemoveAudio(false)
             .setRemoveVideo(false)
-            .build()
+        if (clipCues.isNotEmpty()) {
+            val subtitleOverlay = SubtitleBitmapOverlay(
+                cues = clipCues,
+                clipStartMs = range.startMs,
+                blackFill = subtitleBlackFill,
+                subtitleSize = subtitleSize
+            )
+            editedBuilder.setEffects(
+                Effects(
+                    emptyList(),
+                    listOf(OverlayEffect(listOf(subtitleOverlay)))
+                )
+            )
+        }
+        val editedMediaItem = editedBuilder.build()
 
         var progressJob: Job? = null
         try {

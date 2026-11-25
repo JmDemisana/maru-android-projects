@@ -270,8 +270,11 @@ private fun EpisodePlayerScreen(
     var snippetRange by remember { mutableStateOf(SnippetRange(0L, 0L)) }
     var snippetExportState by remember { mutableStateOf<SnippetExportState>(SnippetExportState.Idle) }
     var snippetPreviewPlaying by remember { mutableStateOf(false) }
+    var snippetBurnSubtitles by remember { mutableStateOf(true) }
     var snippetExportJob by remember { mutableStateOf<Job?>(null) }
     val snippetExporter = remember(context) { SnippetExporter(context) }
+    val liveCueRecorder = remember { LiveCueRecorder() }
+    var cueCaptureVersion by remember { mutableIntStateOf(0) }
 
     // Swipe Brightness & Volume + Double-Tap Seek HUD states
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
@@ -907,6 +910,14 @@ private fun EpisodePlayerScreen(
                 latestListener.onRenderedFirstFrame()
             override fun onTracksChanged(tracks: Tracks) =
                 latestListener.onTracksChanged(tracks)
+            override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
+                val combined = cueGroup.cues
+                    .mapNotNull { it.text?.toString()?.trim() }
+                    .filter { it.isNotEmpty() }
+                    .joinToString("\n")
+                liveCueRecorder.onCues(exoPlayer.currentPosition.coerceAtLeast(0L), combined)
+                if (combined.isNotEmpty()) cueCaptureVersion++
+            }
             override fun onPlayerError(error: PlaybackException) =
                 latestListener.onPlayerError(error)
         }
@@ -1074,10 +1085,33 @@ private fun EpisodePlayerScreen(
         controlsInteraction++
     }
 
+    fun resolveActiveExternalSubtitle(): Pair<String?, Map<String, String>> {
+        val openSub = selectedOpenSub
+        if (openSub != null && openSub.url.isNotBlank()) {
+            return openSub.url to emptyMap()
+        }
+        val preferredSourceSub = sourceSubtitles.firstOrNull {
+            it.language.startsWith("en", ignoreCase = true)
+        } ?: sourceSubtitles.firstOrNull()
+        if (preferredSourceSub != null && preferredSourceSub.url.isNotBlank()) {
+            return preferredSourceSub.url to sourceHeaders
+        }
+        val fallbackOpenSub = openSubtitlesList.firstOrNull {
+            it.langCode.equals("en", true) || it.langCode.equals("eng", true)
+        }
+        if (fallbackOpenSub != null && fallbackOpenSub.url.isNotBlank()) {
+            return fallbackOpenSub.url to emptyMap()
+        }
+        return null to emptyMap()
+    }
+
     fun startSnippetExport() {
         val uri = currentLoadedUri ?: return
         snippetPreviewPlaying = false
         exoPlayer.pause()
+        liveCueRecorder.flush(exoPlayer.currentPosition.coerceAtLeast(0L))
+        val (extSubUrl, extSubHeaders) = resolveActiveExternalSubtitle()
+        val recordedCues = liveCueRecorder.snapshot()
         snippetExportJob?.cancel()
         snippetExportJob = scope.launch {
             try {
@@ -1088,6 +1122,12 @@ private fun EpisodePlayerScreen(
                     animeTitle = media.title,
                     episodeNum = episodeNum,
                     range = snippetRange,
+                    burnSubtitles = snippetBurnSubtitles,
+                    externalSubtitleUrl = extSubUrl,
+                    externalSubtitleHeaders = extSubHeaders,
+                    fallbackSubtitleCues = recordedCues,
+                    subtitleBlackFill = subtitleBlackFill,
+                    subtitleSize = subtitleSize,
                     onProgress = { progress -> snippetExportState = progress }
                 )
                 snippetExportState = saved
@@ -1432,6 +1472,7 @@ private fun EpisodePlayerScreen(
                             showControls = false
                             snippetPreviewPlaying = false
                             snippetExportState = SnippetExportState.Idle
+                            snippetBurnSubtitles = subtitlesEnabled != false && sourceAudio != "DUB"
                             snippetRange = defaultSnippetRange(currentPosition.longValue, totalDuration.longValue)
                             showSnippetEditor = true
                         }
@@ -1733,11 +1774,20 @@ private fun EpisodePlayerScreen(
             enter = fadeIn(tween(180)),
             exit = fadeOut(tween(160))
         ) {
+            val (extSubUrl, _) = resolveActiveExternalSubtitle()
+            val hasEmbeddedTextTrack = playbackTracks.groups.any { it.type == C.TRACK_TYPE_TEXT }
+            val hasCapturedInRange = remember(cueCaptureVersion, snippetRange) {
+                liveCueRecorder.hasCuesInRange(snippetRange.startMs, snippetRange.endMs)
+            }
             SnippetClipOverlay(
                 durationMs = totalDuration.longValue,
                 currentPositionMs = currentPosition.longValue,
                 range = snippetRange,
                 isPreviewPlaying = snippetPreviewPlaying,
+                burnSubtitles = snippetBurnSubtitles,
+                hasExternalSubtitles = !extSubUrl.isNullOrBlank(),
+                hasEmbeddedSubtitles = hasEmbeddedTextTrack,
+                hasCapturedEmbeddedCues = hasCapturedInRange,
                 exportState = snippetExportState,
                 skipIntervals = skipIntervals,
                 onRangeChange = { nextRange, previewSeekMs ->
@@ -1751,6 +1801,9 @@ private fun EpisodePlayerScreen(
                     }
                     exoPlayer.seekTo(previewSeekMs)
                     currentPosition.longValue = previewSeekMs
+                },
+                onToggleBurnSubtitles = {
+                    snippetBurnSubtitles = !snippetBurnSubtitles
                 },
                 onTogglePreview = {
                     if (snippetPreviewPlaying) {
