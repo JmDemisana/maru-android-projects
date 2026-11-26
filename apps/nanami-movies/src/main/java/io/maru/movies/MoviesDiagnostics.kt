@@ -76,7 +76,7 @@ class MoviesDiagnosticsService : Service() {
                 report.appendLine("$name: $result")
             }
             progress.value = MoviesDiagnosticState(checked = checks.size, total = checks.size, report = report.toString())
-            stopSelf(startId)
+            stopSelf()
         }
         return START_NOT_STICKY
     }

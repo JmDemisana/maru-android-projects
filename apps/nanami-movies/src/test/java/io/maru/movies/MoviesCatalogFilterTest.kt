@@ -1,5 +1,6 @@
 package io.maru.movies
 
+import io.maru.manime.extensions.StremioStreamResult
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -24,5 +25,24 @@ class MoviesCatalogFilterTest {
         assertFalse(includeAnimation(listOf("United States"), null))
         assertFalse(includeAnimation(listOf("United States", "Japan"), null))
         assertFalse(includeAnimation(emptyList(), null))
+    }
+
+    @Test
+    fun distinguishesAgeCertificatesFromViewerRatings() {
+        assertTrue(isMatureCertification("NC-17"))
+        assertTrue(isMatureCertification("tv-ma"))
+        assertFalse(isMatureCertification("PG-13"))
+        assertFalse(isMatureCertification("9.3"))
+        assertFalse(isMatureCertification(null))
+    }
+
+    @Test
+    fun englishAudioSelectionRequiresAudioRatherThanSubtitles() {
+        fun source(label: String) = StremioStreamResult(title = label, name = null, url = null, infoHash = null)
+
+        assertTrue(source("Dual audio: English + Spanish").listsEnglishAudio())
+        assertTrue(source("Title.2024.English.Dub.1080p").listsEnglishAudio())
+        assertFalse(source("Korean audio + English subtitles").listsEnglishAudio())
+        assertFalse(source("English SDH").listsEnglishAudio())
     }
 }

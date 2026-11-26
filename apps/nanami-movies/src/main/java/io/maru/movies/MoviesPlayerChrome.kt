@@ -87,6 +87,7 @@ internal fun MoviePlayerChrome(
     locked: Boolean,
     hideChrome: Boolean,
     persistentProgress: Boolean,
+    swipeGestures: Boolean,
     skipSegment: MovieSegment?,
     nextCountdown: Int?,
     onCancelNext: () -> Unit,
@@ -149,7 +150,8 @@ internal fun MoviePlayerChrome(
                         }
                     })
                 }
-                .pointerInput(Unit) {
+                .pointerInput(swipeGestures) {
+                    if (!swipeGestures) return@pointerInput
                     var left = false
                     var level = 0f
                     detectVerticalDragGestures(

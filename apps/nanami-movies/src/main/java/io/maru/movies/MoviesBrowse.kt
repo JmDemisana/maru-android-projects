@@ -108,6 +108,16 @@ private val navPages = BrowsePage.entries.filterNot { it == BrowsePage.SEARCH }
 
 private data class Shelf(val label: String, val kind: MovieKind, val feed: MovieFeed = MovieFeed.POPULAR, val genre: String? = null)
 
+private fun Shelf.encode(): String = listOf(label, kind.name, feed.name, genre.orEmpty()).joinToString("|")
+
+private fun String.decodeShelf(): Shelf? {
+    val parts = split('|')
+    if (parts.size != 4) return null
+    val kind = MovieKind.entries.firstOrNull { it.name == parts[1] } ?: return null
+    val feed = MovieFeed.entries.firstOrNull { it.name == parts[2] } ?: return null
+    return Shelf(parts[0], kind, feed, parts[3].takeIf(String::isNotBlank))
+}
+
 @Composable
 internal fun MoviesBrowse(
     page: BrowsePage,
@@ -127,10 +137,11 @@ internal fun MoviesBrowse(
     savedOrder: Map<TitleRef, Long> = emptyMap(),
 ) {
     var query by rememberSaveable { mutableStateOf("") }
-    var collection by remember(page) { mutableStateOf<Shelf?>(null) }
-    BackHandler(collection != null) { collection = null }
+    var collectionKey by rememberSaveable(page) { mutableStateOf<String?>(null) }
+    val collection = collectionKey?.decodeShelf()
+    BackHandler(collection != null) { collectionKey = null }
     fun go(page: BrowsePage) {
-        collection = null
+        collectionKey = null
         onPage(page)
     }
 
@@ -152,12 +163,12 @@ internal fun MoviesBrowse(
                     if (name == null) {
                         Text("NANAMI", color = MoviesAccent, fontWeight = FontWeight.Black, style = MaterialTheme.typography.titleLarge)
                         Text(" MOVIES", fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.weight(1f))
                     } else {
-                        IconButton(onClick = { collection = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back to browse") }
+                        IconButton(onClick = { collectionKey = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back to browse") }
                         Text(name, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                     }
-                    Spacer(Modifier.weight(1f))
                     IconButton(onClick = { go(if (page == BrowsePage.SEARCH) BrowsePage.HOME else BrowsePage.SEARCH) }) {
                         Icon(Icons.Default.Search, if (page == BrowsePage.SEARCH) "Close search" else "Search")
                     }
@@ -180,7 +191,7 @@ internal fun MoviesBrowse(
                     if (section != null) MovieCollection(section, catalog, hideMature, open)
                     else when (page) {
                         BrowsePage.HOME, BrowsePage.MOVIES, BrowsePage.SERIES -> BrowseShelves(page, catalog, recent, open, resume,
-                            saved, playFeatured, toggleSaved, hideMature, wide) { collection = it }
+                            saved, playFeatured, toggleSaved, hideMature, wide) { collectionKey = it.encode() }
                         BrowsePage.LIST -> ResultsPage(saved, catalog, open, openDownloads, recent, history, savedOrder, hideMature, resume)
                         BrowsePage.SEARCH -> SearchResults(query.trim(), catalog, open, hideMature)
                     }
@@ -377,7 +388,9 @@ private fun SearchResults(query: String, catalog: MoviesCatalog, open: (MovieTit
     }
 }
 
-private enum class LibraryTab(val label: String) { SAVED("My List"), CONTINUE("Continue Watching"), WATCHED("Watched") }
+private enum class LibraryTab(val label: String) {
+    SAVED("My List"), CONTINUE("Continue Watching"), WATCHED("Watched"), UPCOMING("Upcoming"),
+}
 
 @Composable
 private fun ResultsPage(
@@ -399,11 +412,13 @@ private fun ResultsPage(
         LibraryTab.SAVED -> saved.toList()
         LibraryTab.CONTINUE -> recent.map(WatchProgress::title)
         LibraryTab.WATCHED -> watched.map(WatchProgress::title)
+        LibraryTab.UPCOMING -> (saved + recent.map(WatchProgress::title)).toList()
     }
     val order = when (tab) {
         LibraryTab.SAVED -> savedOrder
         LibraryTab.CONTINUE -> recent.associate { it.title to it.updated }
         LibraryTab.WATCHED -> watched.associate { it.title to it.updated }
+        LibraryTab.UPCOMING -> emptyMap()
     }
     var titles by remember(refs) { mutableStateOf<List<MovieTitle>?>(null) }
     LaunchedEffect(refs) { titles = catalog.resolve(refs) }
@@ -419,19 +434,51 @@ private fun ResultsPage(
                 FilterChip(tab == item, { tab = item }, label = { Text(item.label) })
             }
         }
-        ListFilters(kind, { kind = it }, sorting, { sorting = it },
+        if (tab != LibraryTab.UPCOMING) ListFilters(kind, { kind = it }, sorting, { sorting = it },
             if (tab == LibraryTab.SAVED) "Recently added" else "Recently watched")
         if (titles == null && refs.isNotEmpty()) Loading()
+        else if (tab == LibraryTab.UPCOMING) UpcomingReleases(titles.orEmpty().visible(hideMature), open)
         else ResultItems(sorting.sort(titles.orEmpty().visible(hideMature).filter { kind == null || it.kind == kind }, order),
             when (tab) {
                 LibraryTab.SAVED -> "Save a movie or show to find it here."
                 LibraryTab.CONTINUE -> "Pick up a movie or episode you’ve started."
                 LibraryTab.WATCHED -> "Completed movies and episodes will appear here."
+                LibraryTab.UPCOMING -> "No upcoming releases listed."
             }, open = { title ->
             val savedProgress = recent.firstOrNull { it.title == title.ref }
             if (tab == LibraryTab.CONTINUE && savedProgress != null) resume(title, savedProgress)
             else open(title)
         })
+    }
+}
+
+@Composable
+private fun UpcomingReleases(titles: List<MovieTitle>, open: (MovieTitle) -> Unit) {
+    val upcoming = remember(titles) {
+        titles.mapNotNull { title ->
+            val episode = title.episodes.filterNot(MovieEpisode::available).minByOrNull { it.releasedAt ?: java.time.Instant.MAX }
+            val whenReleased = if (title.kind == MovieKind.MOVIE && !title.available) title.releasedAt else episode?.releasedAt
+            whenReleased?.let { Triple(title, episode, it) }
+        }.sortedBy { it.third }
+    }
+    if (upcoming.isEmpty()) {
+        EmptyState("Upcoming episodes and movies from My List will appear here.")
+        return
+    }
+    val date = remember { java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.MEDIUM)
+        .withZone(java.time.ZoneId.systemDefault()) }
+    LazyColumn(contentPadding = PaddingValues(PagePadding), verticalArrangement = Arrangement.spacedBy(15.dp)) {
+        items(upcoming, key = { it.first.ref.key }) { (title, episode, released) ->
+            Row(Modifier.fillMaxWidth().clip(TileShape).clickable { open(title) },
+                horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Artwork(episode?.thumbnail ?: title.backdrop ?: title.poster, Modifier.width(110.dp).aspectRatio(16f / 9f).clip(TileShape))
+                Column(Modifier.weight(1f)) {
+                    Text(title.title, style = MaterialTheme.typography.titleMedium)
+                    if (episode != null) Text("S${episode.season} E${episode.episode} · ${episode.title}", maxLines = 2)
+                    Text(date.format(released), color = MoviesAccent, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
     }
 }
 

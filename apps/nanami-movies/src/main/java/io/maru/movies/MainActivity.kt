@@ -89,6 +89,8 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
     var recent by remember { mutableStateOf(library.recent()) }
     var history by remember { mutableStateOf(library.history()) }
     var remote by remember { mutableStateOf(emptySet<TitleRef>()) }
+    var remoteHistory by remember { mutableStateOf(emptyList<WatchProgress>()) }
+    var ratings by remember { mutableStateOf(library.ratings()) }
     var account by remember { mutableStateOf(simkl.connectionKey.takeIf { simkl.isConnected }) }
     var syncMessage by remember { mutableStateOf<String?>(null) }
     val syncSignal = remember { Channel<Unit>(Channel.CONFLATED) }
@@ -112,8 +114,10 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
 
     LaunchedEffect(account) {
         remote = emptySet()
+        remoteHistory = emptyList()
         syncMessage = null
-        val key = account ?: return@LaunchedEffect
+        val key = account ?: run { ratings = library.ratings(); return@LaunchedEffect }
+        ratings = library.pendingRatings(key).associate { it.title to it.score }
         while (isActive) {
             var retry = false
             try {
@@ -132,19 +136,26 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
                     catch (_: SimklTitleUnavailable) { /* Some titles are absent from SIMKL. */ }
                     library.finishWatch(key, pending)
                 }
-                val listFromSimkl = simkl.watchlist().map {
-                    TitleRef(if (it.isSeries) MovieKind.SERIES else MovieKind.MOVIE, it.imdbId)
-                }.toMutableSet()
+                for (rating in library.pendingRatings(key)) {
+                    try { simkl.rate(rating.title, rating.score, key) }
+                    catch (_: SimklTitleUnavailable) { /* SIMKL has no entry for the IMDb title. */ }
+                    library.finishRating(key, rating)
+                }
+                val snapshot = simkl.librarySnapshot()
+                val listFromSimkl = snapshot.planned.toMutableSet()
                 for (pending in library.pendingList(key)) {
                     if (pending.listed) listFromSimkl.add(pending.title) else listFromSimkl.remove(pending.title)
                 }
                 remote = listFromSimkl
+                val pendingDeletes = library.pendingWatch(key).filterNot { it.watched }.mapTo(mutableSetOf()) { it.progress.key }
+                remoteHistory = snapshot.completed.filterNot { it.key in pendingDeletes }
+                ratings = snapshot.ratings + library.pendingRatings(key).associate { it.title to it.score }
                 syncMessage = "My List and watch history synced."
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
                 account = simkl.connectionKey.takeIf { simkl.isConnected }
-                val pending = library.pendingList(key).size + library.pendingWatch(key).size
+                val pending = library.pendingList(key).size + library.pendingWatch(key).size + library.pendingRatings(key).size
                 syncMessage = if (pending > 0) "$pending changes saved to sync when connected."
                     else "Couldn't refresh SIMKL."
                 retry = pending > 0
@@ -175,9 +186,16 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
         val batch = if (title.kind == MovieKind.SERIES && episode == null) title.episodes else listOf(episode)
         for (entry in batch) {
             val progress = library.markWatched(title.ref, entry, watched)
+            if (!watched) remoteHistory = remoteHistory.filterNot { it.key == progress.key }
             account?.let { if (library.queueWatch(it, progress, watched)) syncSignal.trySend(Unit) }
         }
         refreshProgress()
+    }
+
+    fun rate(title: MovieTitle, score: Int) {
+        library.rate(title.ref, score, account)
+        ratings = ratings + (title.ref to score)
+        if (account != null) syncSignal.trySend(Unit)
     }
 
     fun queueDownloads(title: MovieTitle, episodes: List<MovieEpisode?>) {
@@ -212,9 +230,12 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
     Scaffold(containerColor = MoviesBackground, snackbarHost = { SnackbarHost(snackbar) }) { insets ->
         val request = playback
         val title = selected
+        val combinedHistory = remember(history, remoteHistory) {
+            (history + remoteHistory).distinctBy(WatchProgress::key).sortedByDescending(WatchProgress::updated)
+        }
         when {
             request != null -> {
-                val episodes = request.title.episodes.filter { it.season > 0 || request.episode?.season == 0 }
+                val episodes = request.title.episodes.filter { it.available && (it.season > 0 || request.episode?.season == 0) }
                 val index = episodes.indexOfFirst { it.id == request.episode?.id }
                 val next = episodes.getOrNull(index + 1).takeIf { index >= 0 }
                 val previous = episodes.getOrNull(index - 1)
@@ -234,7 +255,8 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
                 saved = title.ref in saved || title.ref in remote, onSave = { toggleSaved(title) },
                 onBack = { selected = null }, onPlay = { item, episode -> startPlayback(item, episode) },
                 modifier = Modifier.padding(insets), hideMature = hideMature, onDownload = ::queueDownloads,
-                onWatched = ::markWatched, onOpenRelated = { selected = it },
+                onWatched = ::markWatched, onOpenRelated = { selected = it }, history = combinedHistory,
+                rating = ratings[title.ref] ?: 0, onRate = ::rate,
                 isDownloaded = { item, episode -> downloads.isNotEmpty() && vault.completedFile(activity, item, episode) != null },
             )
             settings -> MoviesSettings(
@@ -253,11 +275,11 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
                     onPage = { tab = it }, open = { selected = it },
                     resume = { item, entry ->
                         selected = item
-                        val episode = item.episodes.firstOrNull { it.season == entry.season && it.episode == entry.episode }
+                        val episode = item.episodes.firstOrNull { it.season == entry.season && it.episode == entry.episode && it.available }
                         if (item.kind == MovieKind.MOVIE || episode != null) startPlayback(item, episode)
                     },
                     openSettings = { settings = true }, modifier = Modifier.padding(insets),
-                    openDownloads = { downloadsOpen = true }, toggleSaved = ::toggleSaved, history = history,
+                    openDownloads = { downloadsOpen = true }, toggleSaved = ::toggleSaved, history = combinedHistory,
                     savedOrder = savedOrder, hideMature = hideMature,
                     playFeatured = { item, episode -> selected = item; startPlayback(item, episode) },
                 )

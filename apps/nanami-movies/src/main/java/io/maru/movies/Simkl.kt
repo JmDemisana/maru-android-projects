@@ -50,6 +50,7 @@ data class SimklWatchlistEntry(
 
 internal data class SimklAccount(val id: String, val label: String)
 internal class SimklTitleUnavailable : IOException("SIMKL couldn't match this title or episode.")
+internal data class SimklLibrarySnapshot(val planned: Set<TitleRef>, val ratings: Map<TitleRef, Int>, val completed: List<WatchProgress>)
 
 class Simkl(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("simkl", Context.MODE_PRIVATE)
@@ -148,8 +149,26 @@ class Simkl(context: Context) {
 
     suspend fun disconnect() = mutex.withLock { disconnectLocked() }
 
-    suspend fun watchlist(): List<SimklWatchlistEntry> = mutex.withLock {
-        syncLibrary().filter { it.status == "plantowatch" }.map { it.media }
+    internal suspend fun librarySnapshot(): SimklLibrarySnapshot = mutex.withLock {
+        val library = syncLibrary()
+        SimklLibrarySnapshot(
+            planned = library.filter { it.status == "plantowatch" }.map { it.title }.toSet(),
+            ratings = library.mapNotNull { entry -> entry.rating?.let { entry.title to it } }.toMap(),
+            completed = library.filter { it.status == "completed" || !it.media.isSeries && it.lastWatched > 0 }.map {
+                WatchProgress(it.title, null, null, 0L, 0L, it.lastWatched, completed = true)
+            },
+        )
+    }
+
+    internal suspend fun rate(title: TitleRef, score: Int, account: String) = mutex.withLock {
+        check(account == connectionKey) { "SIMKL account changed." }
+        require(score in 0..10)
+        val type = if (title.kind == MovieKind.SERIES) "shows" else "movies"
+        val item = imdbItem(title.imdbId)
+        if (score > 0) item.put("rating", score)
+        val path = if (score == 0) "sync/ratings/remove" else "sync/ratings"
+        val result = authorized(path, JSONObject().put(type, JSONArray().put(item)))
+        checkFound(result)
     }
 
     suspend fun setWatchlisted(imdbId: String, isSeries: Boolean, listed: Boolean, account: String? = null): Boolean = mutex.withLock {
@@ -238,7 +257,7 @@ class Simkl(context: Context) {
             val known = previous?.optJSONArray(type).objects().mapNotNull { parseCachedEntry(it, isSeries) }
             val currentGroup = current.optJSONObject(activityType)
             val lastGroup = previousActivities?.optJSONObject(activityType)
-            val membershipFields = listOf("plantowatch", "watching", "hold", "completed", "dropped")
+            val membershipFields = listOf("plantowatch", "watching", "hold", "completed", "dropped", "last_watched_at")
             val removed = currentGroup?.text("removed_from_list") != lastGroup?.text("removed_from_list")
             val changed = membershipFields.any { currentGroup?.text(it) != lastGroup?.text(it) }
             val path = "sync/all-items/$type"
@@ -258,6 +277,17 @@ class Simkl(context: Context) {
                     merged += byId.values
                 }
                 else -> merged += known
+            }
+            val rated = currentGroup?.text("rated_at") != lastGroup?.text("rated_at")
+            if (since != null && rated) {
+                val ratingsDelta = readLibrary(type, authorized("sync/ratings/$type", query = mapOf("date_from" to since)))
+                val updates = ratingsDelta.associateBy { it.media.imdbId }
+                for (index in merged.indices) {
+                    val entry = merged[index]
+                    if (entry.media.isSeries == isSeries) updates[entry.media.imdbId]?.let { merged[index] = it }
+                }
+                val existing = merged.filter { it.media.isSeries == isSeries }.mapTo(mutableSetOf()) { it.media.imdbId }
+                merged += ratingsDelta.filter { it.media.imdbId !in existing }
             }
         }
         val snapshot = JSONObject().put("activities", current)
@@ -286,18 +316,24 @@ class Simkl(context: Context) {
             val status = row.text("status") ?: return@mapNotNull null
             val hasActivity = row.text("last_watched_at") != null || row.optInt("watched_episodes_count") > 0 ||
                 row.text("user_rating") != null
-            libraryEntry(imdbId, type == "shows", ids.text("simkl"), status, hasActivity)
+            val lastWatched = row.text("last_watched_at")?.let { runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrDefault(0L) } ?: 0L
+            libraryEntry(imdbId, type == "shows", ids.text("simkl"), status, hasActivity,
+                rating = row.optInt("user_rating").takeIf { it in 1..10 }, lastWatched = lastWatched)
         }
 
     private fun parseCachedEntry(row: JSONObject, isSeries: Boolean): LibraryEntry? {
         val imdbId = row.text("imdbId") ?: return null
         val status = row.text("status") ?: return null
-        return libraryEntry(imdbId, isSeries, row.text("simklId"), status, row.optBoolean("watched"))
+        return libraryEntry(imdbId, isSeries, row.text("simklId"), status, row.optBoolean("watched"),
+            row.optInt("rating").takeIf { it in 1..10 }, row.optLong("lastWatched"))
     }
 
-    private fun libraryEntry(imdbId: String, isSeries: Boolean, simklId: String?, status: String, hasActivity: Boolean): LibraryEntry {
+    private fun libraryEntry(
+        imdbId: String, isSeries: Boolean, simklId: String?, status: String, hasActivity: Boolean,
+        rating: Int? = null, lastWatched: Long = 0,
+    ): LibraryEntry {
         val url = simklId?.takeIf { it.all(Char::isDigit) }?.let { "https://simkl.com/${if (isSeries) "tv" else "movies"}/$it" }
-        return LibraryEntry(SimklWatchlistEntry(imdbId, isSeries, url), simklId, status, hasActivity)
+        return LibraryEntry(SimklWatchlistEntry(imdbId, isSeries, url), simklId, status, hasActivity, rating, lastWatched)
     }
 
     private fun mediaObject(row: JSONObject, type: String): JSONObject? =
@@ -393,9 +429,11 @@ class Simkl(context: Context) {
 
     private data class LibraryEntry(
         val media: SimklWatchlistEntry, val simklId: String?, val status: String, val hasPreservedActivity: Boolean,
+        val rating: Int?, val lastWatched: Long,
     ) {
+        val title get() = TitleRef(if (media.isSeries) MovieKind.SERIES else MovieKind.MOVIE, media.imdbId)
         fun toJson() = JSONObject().put("imdbId", media.imdbId).put("simklId", simklId)
-            .put("status", status).put("watched", hasPreservedActivity)
+            .put("status", status).put("watched", hasPreservedActivity).put("rating", rating).put("lastWatched", lastWatched)
     }
 
     private class Token(val access: String, val refresh: String, val expiresAt: Long, val scope: String) {

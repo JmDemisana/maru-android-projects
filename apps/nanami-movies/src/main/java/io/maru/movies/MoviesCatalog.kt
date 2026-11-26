@@ -195,6 +195,7 @@ class MoviesCatalog(private val client: OkHttpClient = OkHttpClient()) {
             directors = item.optJSONArray("director").strings(),
             writers = item.optJSONArray("writer").strings(),
             trailerId = item.optJSONArray("trailers").objects()
+                .filter { trailer -> trailer.text("type").equals("Trailer", ignoreCase = true) }
                 .firstNotNullOfOrNull { trailer -> trailer.text("source")?.takeIf(YOUTUBE_ID::matches) },
             status = item.text("status"),
             releasedAt = item.instant("released"),

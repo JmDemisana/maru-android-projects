@@ -25,12 +25,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material.icons.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -44,6 +45,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -80,11 +82,15 @@ internal fun MovieDetails(
     isDownloaded: (MovieTitle, MovieEpisode?) -> Boolean = { _, _ -> false },
     onOpenRelated: ((MovieTitle) -> Unit)? = null,
     hideMature: Boolean = false,
+    history: List<WatchProgress>? = null,
+    rating: Int = 0,
+    onRate: ((MovieTitle, Int) -> Unit)? = null,
 ) {
     var details by remember(preview.ref) { mutableStateOf<Result<MovieTitle?>?>(null) }
     var retry by remember(preview.ref) { mutableIntStateOf(0) }
     var chosenSeason by rememberSaveable(preview.ref.key) { mutableStateOf<Int?>(null) }
     var downloadDialog by remember { mutableStateOf(false) }
+    var ratingDialog by remember(preview.ref) { mutableStateOf(false) }
     var expandedOverview by rememberSaveable(preview.ref.key) { mutableStateOf(false) }
     var detailsTab by rememberSaveable(preview.ref.key) { mutableStateOf(DetailsTab.EPISODES) }
     var related by remember(preview.ref) { mutableStateOf<List<MovieTitle>?>(null) }
@@ -97,16 +103,20 @@ internal fun MovieDetails(
     val title = verified ?: preview
     val blocked = hideMature && title.isMature
     val seasons = title.episodes.map(MovieEpisode::season).distinct().sorted()
-    val resume = library.recent().firstOrNull { it.title == title.ref }
+    val titleHistory = history?.filter { it.title == title.ref }
+    fun progressFor(episode: MovieEpisode?): WatchProgress? = if (titleHistory == null) library.progress(title.ref, episode)
+        else titleHistory.firstOrNull { it.season == episode?.season && it.episode == episode?.episode }
+    val resume = if (titleHistory == null) library.recent().firstOrNull { it.title == title.ref }
+        else titleHistory.filter(WatchProgress::canResume).maxByOrNull(WatchProgress::updated)
     val resumeEpisode = title.episodes.firstOrNull { it.season == resume?.season && it.episode == resume?.episode && it.available }
     val firstEpisode = resumeEpisode ?: title.episodes.firstOrNull {
-        it.season > 0 && it.available && library.progress(title.ref, it)?.completed != true
+        it.season > 0 && it.available && progressFor(it)?.completed != true
     } ?: title.episodes.firstOrNull { it.season > 0 && it.available } ?: title.episodes.firstOrNull { it.available }
     val activeSeason = chosenSeason ?: firstEpisode?.season ?: seasons.firstOrNull()
     val episodes = title.episodes.filter { it.season == activeSeason }
     val canPlay = verified != null && !blocked && (title.kind == MovieKind.MOVIE && title.available || firstEpisode != null)
     val downloadableEpisodes = episodes.filter { it.available && !isDownloaded(title, it) &&
-        library.progress(title.ref, it)?.completed != true }
+        progressFor(it)?.completed != true }
 
     LaunchedEffect(verified, detailsTab, onOpenRelated != null) {
         if (verified == null || onOpenRelated == null || detailsTab != DetailsTab.RELATED || related != null) return@LaunchedEffect
@@ -122,19 +132,34 @@ internal fun MovieDetails(
             downloadDialog = false
         },
     )
+    if (ratingDialog && onRate != null) {
+        var score by remember { mutableIntStateOf(rating.takeIf { it in 1..10 } ?: 7) }
+        AlertDialog(onDismissRequest = { ratingDialog = false }, title = { Text("Rate ${title.title}") }, text = {
+            Column {
+                Text("$score / 10", style = MaterialTheme.typography.titleMedium)
+                Slider(value = score.toFloat(), onValueChange = { score = it.toInt() }, valueRange = 1f..10f, steps = 8)
+            }
+        }, confirmButton = {
+            TextButton(onClick = { onRate(title, score); ratingDialog = false }) { Text("Save rating") }
+        }, dismissButton = {
+            TextButton(onClick = { if (rating > 0) onRate(title, 0); ratingDialog = false }) {
+                Text(if (rating > 0) "Clear rating" else "Cancel")
+            }
+        })
+    }
 
     LazyColumn(modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(13.dp), contentPadding = PaddingValues(bottom = 22.dp)) {
         item {
             BoxWithConstraints(Modifier.fillMaxWidth()) {
-            Box(Modifier.fillMaxWidth().height(if (maxWidth >= 600.dp) 347.dp else 275.dp)) {
-                Artwork(title.backdrop ?: title.poster, Modifier.fillMaxSize())
-                Box(Modifier.fillMaxWidth().fillMaxHeight(0.7f).align(Alignment.BottomCenter)
-                    .background(Brush.verticalGradient(listOf(Color.Transparent, MoviesBackground))))
-                IconButton(
-                    onClick = onBack,
-                    modifier = Modifier.padding(start = 12.dp, top = 8.dp).background(Color(0xBE151219), TileShape),
-                ) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-            }
+                Box(Modifier.fillMaxWidth().height(if (maxWidth >= 600.dp) 347.dp else 275.dp)) {
+                    if (!blocked) Artwork(title.backdrop ?: title.poster, Modifier.fillMaxSize())
+                    Box(Modifier.fillMaxWidth().fillMaxHeight(0.7f).align(Alignment.BottomCenter)
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, MoviesBackground))))
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier.padding(start = 12.dp, top = 8.dp).background(Color(0xBE151219), TileShape),
+                    ) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+                }
             }
         }
         item {
@@ -192,16 +217,21 @@ internal fun MovieDetails(
                         }
                     }
                     if (verified != null && title.kind == MovieKind.MOVIE && onWatched != null) {
-                        val watched = library.progress(title.ref, null)?.completed == true
+                        val watched = progressFor(null)?.completed == true
                         TextButton(onClick = { onWatched(title, null, !watched) }) {
                             Text(if (watched) "Mark unwatched" else "Mark watched")
                         }
+                    }
+                    if (verified != null && onRate != null) TextButton(onClick = { ratingDialog = true }) {
+                        Icon(Icons.Outlined.StarOutline, null, Modifier.size(17.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text(if (rating > 0) "Your rating $rating/10" else "Rate")
                     }
                     title.trailerId?.let { trailer ->
                         TextButton(onClick = {
                             runCatching { uriHandler.openUri("https://www.youtube.com/watch?v=" + trailer) }
                         }) {
-                            Icon(Icons.Outlined.OpenInNew, null, Modifier.size(15.dp))
+                            Icon(Icons.AutoMirrored.Outlined.OpenInNew, null, Modifier.size(15.dp))
                             Spacer(Modifier.width(5.dp))
                             Text("Trailer")
                         }
@@ -265,7 +295,7 @@ internal fun MovieDetails(
             }
         }
         if (!blocked && activeTab == DetailsTab.EPISODES) items(episodes, key = MovieEpisode::id) { episode ->
-            MovieEpisodeCard(title, episode, library.progress(title.ref, episode), isDownloaded(title, episode),
+            MovieEpisodeCard(title, episode, progressFor(episode), isDownloaded(title, episode),
                 onPlay = { onPlay(title, episode) },
                 onDownload = onDownload?.let { callback -> { callback(title, listOf(episode)) } },
                 onWatched = onWatched?.let { callback -> { watched -> callback(title, episode, watched) } })
@@ -303,14 +333,17 @@ private fun MovieEpisodeCard(
 ) {
     var menu by remember { mutableStateOf(false) }
     val watched = progress?.completed == true
+    val canPlay = episode.available || downloaded
+    val canDownload = onDownload != null && !downloaded && episode.available
+    val canMark = onWatched != null && canPlay
     Column(Modifier.fillMaxWidth().padding(horizontal = PagePadding).clip(TileShape)
         .background(CardBackground).padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
-            Row(Modifier.weight(1f).clip(TileShape).clickable(enabled = episode.available || downloaded, onClick = onPlay),
+            Row(Modifier.weight(1f).clip(TileShape).clickable(enabled = canPlay, onClick = onPlay),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
                 Box(Modifier.width(110.dp).aspectRatio(16f / 9f).clip(TileShape)) {
                     Artwork(episode.thumbnail ?: title.backdrop, Modifier.fillMaxSize())
-                    if (episode.available || downloaded) Icon(Icons.Default.PlayArrow, null, Modifier.align(Alignment.Center)
+                    if (canPlay) Icon(Icons.Default.PlayArrow, null, Modifier.align(Alignment.Center)
                         .size(29.dp).background(Color(0xB0000000), RoundedCornerShape(50)).padding(4.dp), tint = Color.White)
                 }
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -328,15 +361,15 @@ private fun MovieEpisodeCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 }
             }
-            if (onDownload != null || onWatched != null) Box {
+            if (canDownload || canMark) Box {
                 IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "Episode options") }
                 DropdownMenu(menu, { menu = false }) {
-                    if (onDownload != null && !downloaded && episode.available) {
-                        DropdownMenuItem(text = { Text("Download") }, onClick = { menu = false; onDownload() })
+                    if (canDownload) {
+                        DropdownMenuItem(text = { Text("Download") }, onClick = { menu = false; onDownload?.invoke() })
                     }
-                    if (onWatched != null && (episode.available || downloaded)) {
+                    if (canMark) {
                         DropdownMenuItem(text = { Text(if (watched) "Mark unwatched" else "Mark watched") },
-                            onClick = { menu = false; onWatched(!watched) })
+                            onClick = { menu = false; onWatched?.invoke(!watched) })
                     }
                 }
             }

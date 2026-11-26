@@ -133,7 +133,17 @@ internal fun MoviePlaybackSettings(
                                 item { SettingsSwitch("Automatically skip intros", options.autoSkipIntro) { onOptions(options.copy(autoSkipIntro = it)) } }
                                 if (options.autoSkipIntro) item { SettingsLabel("Skip markers from IntroDB when available") }
                                 item { SettingsSwitch("Always show progress bar", options.persistentProgress) { onOptions(options.copy(persistentProgress = it)) } }
-                                item { SettingsSwitch("Fill screen", options.fillScreen) { onOptions(options.copy(fillScreen = it)) } }
+                                item { SettingsSwitch("Swipe for brightness and volume", options.swipeGestures) { onOptions(options.copy(swipeGestures = it)) } }
+                                item { SettingsLabel("Picture fit") }
+                                item {
+                                    Row {
+                                        MovieVideoFit.entries.forEach { fit ->
+                                            TextButton(onClick = { onOptions(options.copy(fit = fit)) }) {
+                                                Text(fit.label, color = if (options.fit == fit) CinemaRed else Color.White)
+                                            }
+                                        }
+                                    }
+                                }
                                 item { SettingsLabel("Subtitle size") }
                                 item {
                                     Row {

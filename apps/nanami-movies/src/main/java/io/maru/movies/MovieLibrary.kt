@@ -33,6 +33,7 @@ internal data class WatchProgress(
 
 internal data class PendingListChange(val title: TitleRef, val listed: Boolean)
 internal data class PendingWatchChange(val progress: WatchProgress, val watched: Boolean)
+internal data class PendingRating(val title: TitleRef, val score: Int)
 
 internal class MovieLibrary(context: Context) {
     private val prefs = context.getSharedPreferences("nanami_movies_library", Context.MODE_PRIVATE)
@@ -50,6 +51,32 @@ internal class MovieLibrary(context: Context) {
     fun savedOrder(): Map<TitleRef, Long> {
         val data = readJson("saved_order") ?: return emptyMap()
         return data.keys().asSequence().mapNotNull { key -> TitleRef.parse(key)?.let { it to data.optLong(key) } }.toMap()
+    }
+
+    fun ratings(): Map<TitleRef, Int> = prefs.all.mapNotNull { (key, value) ->
+        if (!key.startsWith("rating/") || value !is Int) return@mapNotNull null
+        TitleRef.parse(key.removePrefix("rating/"))?.let { it to value }
+    }.toMap()
+
+    fun rate(title: TitleRef, score: Int, account: String?) {
+        require(score in 0..10)
+        val edit = prefs.edit()
+        if (account == null) edit.putInt("rating/${title.key}", score)
+        else edit.putInt("rated/$account/${title.key}", score)
+        edit.apply()
+    }
+
+    fun pendingRatings(account: String): List<PendingRating> {
+        val prefix = "rated/$account/"
+        return prefs.all.mapNotNull { (key, value) ->
+            if (!key.startsWith(prefix) || value !is Int) return@mapNotNull null
+            TitleRef.parse(key.removePrefix(prefix))?.let { PendingRating(it, value) }
+        }
+    }
+
+    fun finishRating(account: String, rating: PendingRating) {
+        val key = "rated/$account/${rating.title.key}"
+        if (prefs.all[key] == rating.score) prefs.edit().remove(key).apply()
     }
 
     fun history(): List<WatchProgress> = prefs.all.keys.asSequence()

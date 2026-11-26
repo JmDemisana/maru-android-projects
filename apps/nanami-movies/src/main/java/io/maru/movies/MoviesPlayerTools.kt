@@ -110,6 +110,7 @@ internal fun MoviesPlayerTools(
     onRemoteEnded: (Long) -> Unit = {},
     onRemoteProgress: ((Long, Long, Boolean) -> Unit)? = null,
     onRemoteTransport: ((MovieRemoteTransport?) -> Unit)? = null,
+    onClipVisibilityChanged: ((Boolean) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     var showCast by remember { mutableStateOf(false) }
@@ -119,6 +120,7 @@ internal fun MoviesPlayerTools(
     val ended by rememberUpdatedState(onRemoteEnded)
     val progress by rememberUpdatedState(onRemoteProgress)
     val transport by rememberUpdatedState(onRemoteTransport)
+    val clipVisibility by rememberUpdatedState(onClipVisibilityChanged)
     val startPosition by rememberUpdatedState(position)
     var requested by remember { mutableStateOf(false) }
     var castAttempt by remember { mutableIntStateOf(0) }
@@ -227,9 +229,13 @@ internal fun MoviesPlayerTools(
             }
         }, confirmButton = { TextButton(onClick = { showCast = false }) { Text("Done") } },
     )
-    if (showClip && mediaUri != null && dataSource != null && duration > 0) MoviesClipEditor(
-        title, episode, activeSource, mediaUri, dataSource, position, duration, onClose = { showClip = false },
-    )
+    if (showClip && mediaUri != null && dataSource != null && duration > 0) {
+        DisposableEffect(Unit) {
+            clipVisibility?.invoke(true)
+            onDispose { clipVisibility?.invoke(false) }
+        }
+        MoviesClipEditor(title, episode, activeSource, mediaUri, dataSource, position, duration, onClose = { showClip = false })
+    }
 }
 
 private class MoviesCastDevice(context: Context) {

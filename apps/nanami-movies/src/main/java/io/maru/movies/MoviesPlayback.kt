@@ -99,9 +99,17 @@ internal data class MoviePlayerOptions(
     val persistentProgress: Boolean,
     val subtitleSize: Float,
     val subtitleBackground: Boolean,
-    val fillScreen: Boolean,
+    val fit: MovieVideoFit,
+    val swipeGestures: Boolean,
     val autoSkipIntro: Boolean,
 )
+
+@OptIn(UnstableApi::class)
+internal enum class MovieVideoFit(val label: String, val resizeMode: Int) {
+    FIT("Fit", AspectRatioFrameLayout.RESIZE_MODE_FIT),
+    CROP("Crop", AspectRatioFrameLayout.RESIZE_MODE_ZOOM),
+    STRETCH("Stretch", AspectRatioFrameLayout.RESIZE_MODE_FILL),
+}
 
 private data class PlayerMedia(val uri: Uri, val factory: DataSource.Factory, val torrent: Boolean = false)
 
@@ -151,7 +159,9 @@ private fun MoviePlaybackSession(
         persistentProgress = preferences.getBoolean("persistent_progress", false),
         subtitleSize = preferences.getFloat("subtitle_size", 1f).coerceIn(0.75f, 1.5f),
         subtitleBackground = preferences.getBoolean("subtitle_background", true),
-        fillScreen = preferences.getBoolean("fill_screen", false),
+        fit = MovieVideoFit.entries.firstOrNull { it.name == preferences.getString("video_fit", null) }
+            ?: if (preferences.getBoolean("fill_screen", false)) MovieVideoFit.CROP else MovieVideoFit.FIT,
+        swipeGestures = preferences.getBoolean("swipe_gestures", true),
         autoSkipIntro = preferences.getBoolean("auto_skip_intro", false),
     )) }
     val player = remember(streamId) {
@@ -181,6 +191,7 @@ private fun MoviePlaybackSession(
     var playIntent by remember(streamId) { mutableStateOf(true) }
     var remotePlayback by remember { mutableStateOf(false) }
     var remoteTransport by remember { mutableStateOf<MovieRemoteTransport?>(null) }
+    var wasPlayingBeforeClip by remember(streamId) { mutableStateOf(false) }
     var settings by remember(streamId) { mutableStateOf<MoviePlayerPanel?>(null) }
     var controls by remember(streamId) { mutableStateOf(true) }
     var controlPulse by remember(streamId) { mutableIntStateOf(0) }
@@ -203,7 +214,8 @@ private fun MoviePlaybackSession(
         preferences.edit().putFloat("speed", value.speed).putBoolean("autoplay", value.autoplay)
             .putBoolean("persistent_progress", value.persistentProgress)
             .putFloat("subtitle_size", value.subtitleSize).putBoolean("subtitle_background", value.subtitleBackground)
-            .putBoolean("fill_screen", value.fillScreen).putBoolean("auto_skip_intro", value.autoSkipIntro).apply()
+            .putString("video_fit", value.fit.name).putBoolean("swipe_gestures", value.swipeGestures)
+            .putBoolean("auto_skip_intro", value.autoSkipIntro).apply()
         player.setPlaybackSpeed(value.speed)
     }
 
@@ -522,7 +534,7 @@ private fun MoviePlaybackSession(
             factory = { PlayerView(it).apply { useController = false; this.player = player } },
             update = { view ->
                 if (view.player !== player) view.player = player
-                view.resizeMode = if (options.fillScreen) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
+                view.resizeMode = options.fit.resizeMode
                 view.subtitleView?.apply {
                     setApplyEmbeddedFontSizes(false)
                     setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * options.subtitleSize)
@@ -547,6 +559,7 @@ private fun MoviePlaybackSession(
             locked = locked && !inPip,
             hideChrome = inPip,
             persistentProgress = options.persistentProgress,
+            swipeGestures = options.swipeGestures,
             skipSegment = activeSegment,
             nextCountdown = nextCountdown,
             onCancelNext = { nextCountdown = null },
@@ -614,6 +627,16 @@ private fun MoviePlaybackSession(
                         }
                     },
                     onRemoteTransport = { remoteTransport = it },
+                    onClipVisibilityChanged = { visible ->
+                        if (visible) {
+                            wasPlayingBeforeClip = player.playWhenReady
+                            player.pause()
+                        } else {
+                            if (wasPlayingBeforeClip && playIntent && !remotePlayback && !ended &&
+                                lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) player.play()
+                            wasPlayingBeforeClip = false
+                        }
+                    },
                 )
             },
         )
