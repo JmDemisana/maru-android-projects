@@ -179,8 +179,8 @@ class MoviesCatalog(private val client: OkHttpClient = OkHttpClient()) {
             kind = kind,
             imdbId = imdbId,
             title = title,
-            poster = item.art("poster"),
-            backdrop = item.art("background"),
+            poster = item.art("poster")?.upgradePosterResolution(),
+            backdrop = item.art("background")?.upgradeBackdropResolution(),
             year = item.text("releaseInfo") ?: item.text("year"),
             runtime = item.text("runtime"),
             overview = item.text("description"),
@@ -284,6 +284,13 @@ private fun JSONObject.text(key: String): String? =
     (opt(key) as? String)?.trim()?.takeUnless { it.isEmpty() || it.equals("N/A", ignoreCase = true) }
 
 private fun JSONObject.art(key: String): String? = text(key)?.takeIf { it.startsWith("https://") }
+
+private fun String.upgradePosterResolution(): String =
+    replace("images.metahub.space/poster/small/", "images.metahub.space/poster/medium/")
+
+private fun String.upgradeBackdropResolution(): String =
+    replace("images.metahub.space/background/small/", "images.metahub.space/background/large/")
+        .replace("images.metahub.space/background/medium/", "images.metahub.space/background/large/")
 
 private fun JSONObject.instant(key: String): Instant? = text(key)?.let { runCatching { Instant.parse(it) }.getOrNull() }
 

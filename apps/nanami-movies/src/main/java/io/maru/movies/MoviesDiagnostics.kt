@@ -50,12 +50,12 @@ class MoviesDiagnosticsService : Service() {
             val checks: List<Pair<String, suspend () -> Unit>> = listOf(
                 "Internet connection" to { check(network.getNetworkCapabilities(network.activeNetwork)
                     ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true) { "Offline" } },
-                "Movie catalog" to { reachable("https://v3-cinemeta.strem.io/manifest.json") },
-                "Anime classification" to { reachable("https://api.ani.zip/mappings?imdb_id=tt0245429") },
-                "Torrentio" to { reachable("https://torrentio.strem.fun/manifest.json") },
-                "SIMKL service" to { reachable("https://api.simkl.org/") },
-                "Private storage" to { check(context.filesDir.canWrite()) { "Unavailable" } },
-                "Android installer" to { context.packageManager.canRequestPackageInstalls(); Unit },
+                "Movie & TV catalog" to { reachable("https://v3-cinemeta.strem.io/manifest.json") },
+                "Catalog filter" to { reachable("https://api.ani.zip/mappings?imdb_id=tt0245429") },
+                "Streaming sources" to { reachable("https://torrentio.strem.fun/manifest.json") },
+                "SIMKL sync service" to { reachable("https://api.simkl.org/") },
+                "Offline storage" to { check(context.filesDir.canWrite()) { "Unavailable" } },
+                "Android app updater" to { context.packageManager.canRequestPackageInstalls(); Unit },
             )
             val report = StringBuilder("Nanami Movies ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})\n")
             report.appendLine("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) · ${Build.MANUFACTURER} ${Build.MODEL}")

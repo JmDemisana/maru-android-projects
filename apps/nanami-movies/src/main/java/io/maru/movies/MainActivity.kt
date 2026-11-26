@@ -1,16 +1,16 @@
 package io.maru.movies
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
-import android.webkit.CookieManager
-import android.webkit.WebResourceRequest
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -19,6 +19,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.browser.customtabs.CustomTabColorSchemeParams
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -38,20 +40,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -84,9 +85,32 @@ private sealed interface MoviesRoute {
         }
 }
 
+internal fun openCinemaCustomTab(context: Context, url: String) {
+    val uri = Uri.parse(url)
+    runCatching {
+        val colors = CustomTabColorSchemeParams.Builder()
+            .setToolbarColor(android.graphics.Color.BLACK)
+            .setNavigationBarColor(android.graphics.Color.BLACK)
+            .build()
+        val intent = CustomTabsIntent.Builder()
+            .setDefaultColorSchemeParams(colors)
+            .setShowTitle(true)
+            .setShareState(CustomTabsIntent.SHARE_STATE_OFF)
+            .build()
+        intent.launchUrl(context, uri)
+    }.onFailure {
+        runCatching {
+            context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+    }
+}
+
 class MainActivity : ComponentActivity() {
+    internal val incomingAuthUri = MutableStateFlow<Uri?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        incomingAuthUri.value = intent?.data
         if (!isInMultiWindowMode && resources.configuration.smallestScreenWidthDp in 1..599) {
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
@@ -102,6 +126,14 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = NanamiMoviesColorScheme) {
                 MoviesApp(this, catalog, library, simkl)
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.data != null) {
+            incomingAuthUri.value = intent.data
         }
     }
 }
@@ -126,6 +158,7 @@ private fun MoviesApp(
     val routeStateHolder = rememberSaveableStateHolder()
     val vault = MoviesDownloadVault
     val downloads by vault.items.collectAsState()
+    val authCallbackUri by activity.incomingAuthUri.collectAsState()
 
     var selectedTab by rememberSaveable { mutableStateOf(MoviesNavTab.HOME) }
     var detailStack by remember { mutableStateOf<List<MoviesRoute.Detail>>(emptyList()) }
@@ -133,8 +166,11 @@ private fun MoviesApp(
     val currentRoute: MoviesRoute = detailStack.lastOrNull() ?: MoviesRoute.Tab(selectedTab)
 
     var playback by remember { mutableStateOf<PlaybackRequest?>(null) }
+    var lastPlayback by remember { mutableStateOf<PlaybackRequest?>(null) }
+    if (playback != null) lastPlayback = playback
+
     var showSimklAuthDialog by remember { mutableStateOf(false) }
-    var authClearCookies by remember { mutableStateOf(false) }
+    var completingSimklCallback by remember { mutableStateOf(false) }
     var showTopAccountMenu by remember { mutableStateOf(false) }
 
     var hideMature by remember { mutableStateOf(MoviesPreferences.hideMature(activity)) }
@@ -196,9 +232,35 @@ private fun MoviesApp(
         }
     }
 
-    fun openSimklWebAuth(clearCookies: Boolean = false) {
-        authClearCookies = clearCookies
+    fun openSimklWebAuth(@Suppress("UNUSED_PARAMETER") clearCookies: Boolean = false) {
         showSimklAuthDialog = true
+        scope.launch {
+            runCatching {
+                val session = simkl.createPkceSession(forAppDeepLink = true)
+                openCinemaCustomTab(activity, session.authorizeUrl)
+            }
+        }
+    }
+
+    // Intercept returning `nanamimovies://simkl-auth?code=...&state=...` callback automatically!
+    LaunchedEffect(authCallbackUri) {
+        val uri = authCallbackUri ?: return@LaunchedEffect
+        if (!simkl.isAppAuthCallback(uri)) return@LaunchedEffect
+        activity.incomingAuthUri.value = null
+        completingSimklCallback = true
+        try {
+            val account = simkl.completeAppCallback(uri)
+            refreshAccountModels()
+            showSimklAuthDialog = false
+            syncSignal.trySend(Unit)
+            Toast.makeText(activity, "Connected to SIMKL as ${account.label}", Toast.LENGTH_SHORT).show()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Toast.makeText(activity, e.message ?: "Couldn't complete SIMKL sign-in.", Toast.LENGTH_LONG).show()
+        } finally {
+            completingSimklCallback = false
+        }
     }
 
     LaunchedEffect(vault) { vault.load(activity.applicationContext) }
@@ -212,11 +274,6 @@ private fun MoviesApp(
                 detailStack = detailStack - hidden.toSet()
             }
         }
-    }
-
-    // Warm remote Client ID discovery silently on cold boot
-    LaunchedEffect(Unit) {
-        runCatching { simkl.resolveEffectiveClientId() }
     }
 
     DisposableEffect(activity) {
@@ -400,7 +457,7 @@ private fun MoviesApp(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                snackbar.showSnackbar(error.message ?: "Couldn't queue the download.")
+                snackbar.showSnackbar(error.message ?: "Couldn't start the download.")
             }
         }
     }
@@ -413,43 +470,12 @@ private fun MoviesApp(
         }
     }
 
-    val request = playback
-    if (request != null) {
-        val episodes = request.title.episodes.filter { it.available && (it.season > 0 || request.episode?.season == 0) }
-        val index = episodes.indexOfFirst { it.id == request.episode?.id }
-        val next = episodes.getOrNull(index + 1).takeIf { index >= 0 }
-        val previous = episodes.getOrNull(index - 1)
-        MoviesPlayback(
-            title = request.title,
-            episode = request.episode,
-            startPosition = request.position,
-            offlineFile = request.offlineFile,
-            preferredQuality = preferredQuality,
-            onProgress = { position, duration ->
-                if (!reportProgress || (doNotTrackMature && request.title.isMature)) return@MoviesPlayback
-                val progress = library.record(request.title.ref, request.episode, position, duration, MoviesPreferences.completion(activity))
-                if (progress?.completed == true) {
-                    accountKey?.let { key ->
-                        if (library.queueWatch(key, progress, true)) {
-                            pendingSyncCount = computePendingCount(key)
-                            syncSignal.trySend(Unit)
-                        }
-                    }
-                }
-            },
-            onBack = { playback = null },
-            onNextEpisode = next?.let { episode -> { startPlayback(request.title, episode) } },
-            onPreviousEpisode = previous?.let { episode -> { startPlayback(request.title, episode) } },
-        )
-        return
-    }
-
-    val showNavigationChrome = currentRoute is MoviesRoute.Tab
+    val showNavigationChrome = currentRoute is MoviesRoute.Tab && playback == null
     val combinedHistory = remember(history, remoteHistory) {
         (history + remoteHistory).distinctBy(WatchProgress::key).sortedByDescending(WatchProgress::updated)
     }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = NetflixBlack) {
+    Box(modifier = Modifier.fillMaxSize().background(NetflixBlack)) {
         Scaffold(
             containerColor = NetflixBlack,
             snackbarHost = { SnackbarHost(snackbar) },
@@ -499,7 +525,6 @@ private fun MoviesApp(
                                 }
                             }
 
-                            // 1-Tap Quick SIMKL Account Switcher Pill in TopAppBar (identical to Nanami Anime!)
                             if (savedSimklAccounts.isNotEmpty()) {
                                 Box {
                                     Surface(
@@ -597,6 +622,33 @@ private fun MoviesApp(
                                         }
                                     }
                                 }
+                            } else if (selectedTab == MoviesNavTab.HOME) {
+                                Surface(
+                                    onClick = { openSimklWebAuth(false) },
+                                    shape = RoundedCornerShape(18.dp),
+                                    color = NetflixCardBg,
+                                    border = BorderStroke(1.dp, NetflixBorder),
+                                    modifier = Modifier.padding(end = 10.dp),
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                    ) {
+                                        Icon(
+                                            Icons.Default.PersonOutline,
+                                            contentDescription = null,
+                                            tint = NetflixRed,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                        Text(
+                                            text = "Sign In",
+                                            color = Color.White,
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                        )
+                                    }
+                                }
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(
@@ -609,7 +661,7 @@ private fun MoviesApp(
             bottomBar = {
                 if (showNavigationChrome) {
                     Column {
-                        HorizontalDivider(color = Color(0xFF1E1E24), thickness = 1.dp)
+                        HorizontalDivider(color = Color(0xFF1A1A22), thickness = 1.dp)
                         NavigationBar(
                             containerColor = Color(0xFF0A0A0D),
                             contentColor = Color.White,
@@ -659,16 +711,16 @@ private fun MoviesApp(
                     transitionSpec = {
                         when {
                             targetState.depth > initialState.depth -> {
-                                (slideInHorizontally(tween(220)) { it / 5 } + fadeIn(tween(180))) togetherWith
-                                    (slideOutHorizontally(tween(200)) { -it / 10 } + fadeOut(tween(140)))
+                                (slideInHorizontally(tween(240)) { it / 5 } + fadeIn(tween(190))) togetherWith
+                                    (slideOutHorizontally(tween(210)) { -it / 10 } + fadeOut(tween(150)))
                             }
                             targetState.depth < initialState.depth -> {
-                                (slideInHorizontally(tween(200)) { -it / 10 } + fadeIn(tween(160))) togetherWith
-                                    (slideOutHorizontally(tween(200)) { it / 5 } + fadeOut(tween(140)))
+                                (slideInHorizontally(tween(220)) { -it / 10 } + fadeIn(tween(170))) togetherWith
+                                    (slideOutHorizontally(tween(220)) { it / 5 } + fadeOut(tween(150)))
                             }
                             else -> {
-                                (fadeIn(tween(170)) + scaleIn(tween(170), initialScale = 0.985f)) togetherWith
-                                    fadeOut(tween(120))
+                                (fadeIn(tween(180)) + scaleIn(tween(180), initialScale = 0.985f)) togetherWith
+                                    fadeOut(tween(130))
                             }
                         }.using(SizeTransform(clip = false))
                     },
@@ -775,243 +827,225 @@ private fun MoviesApp(
             }
         }
 
-        if (showSimklAuthDialog) {
-            SimklAuthDialog(
+        // Smooth Fullscreen Player Overlay (preserves underlying scroll state & animates cleanly!)
+        AnimatedVisibility(
+            visible = playback != null,
+            enter = fadeIn(tween(220)) + scaleIn(tween(240), initialScale = 0.96f),
+            exit = fadeOut(tween(180)) + scaleOut(tween(180), targetScale = 0.97f),
+            label = "fullscreen_playback_transition",
+        ) {
+            val request = playback ?: lastPlayback
+            if (request != null) {
+                val episodes = request.title.episodes.filter { it.available && (it.season > 0 || request.episode?.season == 0) }
+                val index = episodes.indexOfFirst { it.id == request.episode?.id }
+                val next = episodes.getOrNull(index + 1).takeIf { index >= 0 }
+                val previous = episodes.getOrNull(index - 1)
+                MoviesPlayback(
+                    title = request.title,
+                    episode = request.episode,
+                    startPosition = request.position,
+                    offlineFile = request.offlineFile,
+                    preferredQuality = preferredQuality,
+                    onProgress = { position, duration ->
+                        if (!reportProgress || (doNotTrackMature && request.title.isMature)) return@MoviesPlayback
+                        val progress = library.record(request.title.ref, request.episode, position, duration, MoviesPreferences.completion(activity))
+                        if (progress?.completed == true) {
+                            accountKey?.let { key ->
+                                if (library.queueWatch(key, progress, true)) {
+                                    pendingSyncCount = computePendingCount(key)
+                                    syncSignal.trySend(Unit)
+                                }
+                            }
+                        }
+                    },
+                    onBack = { playback = null },
+                    onNextEpisode = next?.let { episode -> { startPlayback(request.title, episode) } },
+                    onPreviousEpisode = previous?.let { episode -> { startPlayback(request.title, episode) } },
+                )
+            }
+        }
+
+        if (showSimklAuthDialog || completingSimklCallback) {
+            SimklConnectDialog(
                 simkl = simkl,
-                clearCookies = authClearCookies,
+                completingCallback = completingSimklCallback,
+                onReopenBrowser = { openSimklWebAuth(false) },
                 onConnected = {
                     refreshAccountModels()
                     showSimklAuthDialog = false
+                    syncSignal.trySend(Unit)
                 },
-                onClose = { showSimklAuthDialog = false },
+                onClose = {
+                    if (!completingSimklCallback) showSimklAuthDialog = false
+                },
             )
         }
     }
 }
 
 @Composable
-private fun SimklAuthDialog(
+private fun SimklConnectDialog(
     simkl: Simkl,
-    clearCookies: Boolean = false,
+    completingCallback: Boolean,
+    onReopenBrowser: () -> Unit,
     onConnected: () -> Unit,
     onClose: () -> Unit,
 ) {
     val context = LocalContext.current
-    val expectedRedirect = remember { Uri.parse(Simkl.REDIRECT_URI) }
-    var pkceSession by remember { mutableStateOf<SimklPkceSession?>(null) }
-    var clientIdDraft by remember { mutableStateOf(simkl.clientId) }
-    var needsClientId by remember { mutableStateOf(false) }
-    var loadingSession by remember { mutableStateOf(true) }
-    var returnedCode by remember { mutableStateOf<String?>(null) }
-    var errorText by remember { mutableStateOf<String?>(null) }
-    var startAttempt by remember { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
+    var deviceSignIn by remember { mutableStateOf<SimklSignIn?>(null) }
+    var loadingCode by remember { mutableStateOf(false) }
+    var codeError by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(startAttempt) {
-        loadingSession = true
-        errorText = null
+    LaunchedEffect(deviceSignIn) {
+        val active = deviceSignIn ?: return@LaunchedEffect
         try {
-            val session = simkl.createPkceSession(clientIdDraft)
-            pkceSession = session
-            needsClientId = false
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            needsClientId = true
-            if (startAttempt > 0) {
-                errorText = e.message ?: "Enter a valid SIMKL AUTH V2 Client ID."
-            }
-        } finally {
-            loadingSession = false
-        }
-    }
-
-    LaunchedEffect(returnedCode) {
-        val code = returnedCode ?: return@LaunchedEffect
-        val activeSession = pkceSession ?: return@LaunchedEffect
-        try {
-            val account = simkl.completePkceSignIn(activeSession, code)
-            Toast.makeText(context, "Connected as ${account.label}.", Toast.LENGTH_SHORT).show()
+            simkl.awaitSignIn(active)
+            val label = simkl.activeAccount()?.label ?: "SIMKL"
+            Toast.makeText(context, "Connected to SIMKL as $label", Toast.LENGTH_SHORT).show()
             onConnected()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            returnedCode = null
-            errorText = e.message ?: "Couldn't connect to SIMKL. Please try again."
-            pkceSession = null
-            needsClientId = true
+            codeError = e.message ?: "Sign-in code expired. Try again."
+            deviceSignIn = null
         }
     }
 
-    fun handleRedirect(uri: Uri): Boolean {
-        val session = pkceSession ?: return false
-        if (uri.scheme != expectedRedirect.scheme || uri.host != expectedRedirect.host ||
-            uri.port != expectedRedirect.port || uri.encodedPath != expectedRedirect.encodedPath || uri.userInfo != null
-        ) return false
-        if (returnedCode != null) return true
-        val oauthErr = uri.getQueryParameter("error_description") ?: uri.getQueryParameter("error")
-        if (!oauthErr.isNullOrBlank()) {
-            Toast.makeText(context, oauthErr, Toast.LENGTH_SHORT).show()
-            onClose()
-            return true
-        }
-        val code = uri.getQueryParameter("code")
-        val state = uri.getQueryParameter("state")
-        if (state == session.state && !code.isNullOrBlank()) {
-            returnedCode = code
-        } else {
-            Toast.makeText(context, "SIMKL sign-in was interrupted. Please try again.", Toast.LENGTH_SHORT).show()
-            onClose()
-        }
-        return true
-    }
-
-    Dialog(
-        onDismissRequest = onClose,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Surface(modifier = Modifier.fillMaxSize(), color = NetflixBlack) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(NetflixSurface)
-                        .statusBarsPadding()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
+    Dialog(onDismissRequest = onClose) {
+        NetflixCard(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            background = NetflixSurface,
+        ) {
+            Column(
+                modifier = Modifier.padding(22.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                if (completingCallback) {
+                    CircularProgressIndicator(color = NetflixRed, strokeWidth = 3.dp)
                     Text(
-                        text = if (clearCookies) "Add Another SIMKL Account" else "Connect SIMKL",
+                        text = "Linking your SIMKL account…",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp,
+                    )
+                } else if (deviceSignIn != null) {
+                    val active = deviceSignIn!!
+                    Text(
+                        text = "Enter Code on SIMKL",
                         color = Color.White,
                         fontWeight = FontWeight.ExtraBold,
-                        fontSize = 15.sp,
+                        fontSize = 18.sp,
                     )
-                    IconButton(onClick = onClose) {
-                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-                    }
-                }
-
-                when {
-                    loadingSession || returnedCode != null -> {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(12.dp),
-                            ) {
-                                CircularProgressIndicator(color = NetflixRed)
-                                Text(
-                                    text = if (returnedCode != null) "Connecting your SIMKL account…" else "Preparing SIMKL sign-in…",
-                                    color = Color.White,
-                                )
-                            }
-                        }
-                    }
-                    needsClientId || pkceSession == null -> {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(24.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            NetflixCard(modifier = Modifier.widthIn(max = 460.dp).fillMaxWidth()) {
-                                Column(
-                                    modifier = Modifier.padding(20.dp),
-                                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                                ) {
-                                    Text(
-                                        text = "Set SIMKL AUTH V2 Client ID",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        fontSize = 17.sp,
-                                    )
-                                    Text(
-                                        text = "Create an AUTH V2 app at simkl.com/settings/developer/new with Redirect URI https://maruchan.pages.dev/simkl-integration, or set SIMKL_MOVIES_CLIENT_ID on the server so all devices sign in with one tap.",
-                                        color = NetflixTextMuted,
-                                        fontSize = 12.5.sp,
-                                        lineHeight = 18.sp,
-                                    )
-                                    OutlinedTextField(
-                                        value = clientIdDraft,
-                                        onValueChange = { clientIdDraft = it.trim() },
-                                        label = { Text("SIMKL AUTH V2 Client ID") },
-                                        singleLine = true,
-                                        modifier = Modifier.fillMaxWidth(),
-                                        colors = OutlinedTextFieldDefaults.colors(
-                                            focusedBorderColor = NetflixRed,
-                                            unfocusedBorderColor = NetflixBorder,
-                                            focusedTextColor = Color.White,
-                                            unfocusedTextColor = Color.White,
-                                        ),
-                                    )
-                                    errorText?.let {
-                                        Text(text = it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                                    }
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.End,
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        TextButton(onClick = onClose) {
-                                            Text("Cancel", color = NetflixTextMuted)
-                                        }
-                                        Spacer(Modifier.width(8.dp))
-                                        Button(
-                                            enabled = clientIdDraft.isNotBlank(),
-                                            onClick = {
-                                                simkl.setCustomClientId(clientIdDraft)
-                                                startAttempt++
-                                            },
-                                            colors = ButtonDefaults.buttonColors(
-                                                containerColor = NetflixRed,
-                                                contentColor = Color.White,
-                                            ),
-                                            shape = RoundedCornerShape(6.dp),
-                                        ) {
-                                            Text("Continue to SIMKL", fontWeight = FontWeight.Bold)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    else -> {
-                        val activeAuthUrl = pkceSession!!.authorizeUrl
-                        AndroidView(
-                            factory = { ctx ->
-                                if (clearCookies) {
-                                    runCatching {
-                                        CookieManager.getInstance().apply {
-                                            removeAllCookies(null)
-                                            flush()
-                                        }
-                                    }
-                                }
-                                WebView(ctx).apply {
-                                    if (clearCookies) {
-                                        clearCache(true)
-                                        clearHistory()
-                                    }
-                                    settings.javaScriptEnabled = true
-                                    settings.domStorageEnabled = true
-                                    webViewClient = object : WebViewClient() {
-                                        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                                            return request.isForMainFrame &&
-                                                (handleRedirect(request.url) || request.url.scheme != "https")
-                                        }
-
-                                        override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
-                                            if (url != null && handleRedirect(Uri.parse(url))) view.stopLoading()
-                                        }
-                                    }
-                                    loadUrl(activeAuthUrl)
-                                }
-                            },
-                            modifier = Modifier.fillMaxSize(),
-                            onRelease = { webView ->
-                                webView.stopLoading()
-                                webView.destroy()
-                            },
+                    Text(
+                        text = "Approve this code in your browser and Nanami Movies will connect automatically:",
+                        color = NetflixTextMuted,
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center,
+                        lineHeight = 18.sp,
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = NetflixBlack,
+                        border = BorderStroke(1.dp, NetflixRed),
+                        onClick = {
+                            context.getSystemService(ClipboardManager::class.java)
+                                ?.setPrimaryClip(ClipData.newPlainText("SIMKL Code", active.userCode))
+                            Toast.makeText(context, "Copied code ${active.userCode}", Toast.LENGTH_SHORT).show()
+                        },
+                    ) {
+                        Text(
+                            text = active.userCode,
+                            color = Color.White,
+                            fontWeight = FontWeight.Black,
+                            fontSize = 26.sp,
+                            letterSpacing = 2.5.sp,
+                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
                         )
+                    }
+                    Button(
+                        onClick = { openCinemaCustomTab(context, active.verificationUrl) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = NetflixRed, contentColor = Color.White),
+                        shape = RoundedCornerShape(6.dp),
+                    ) {
+                        Text("Open simkl.com/pin", fontWeight = FontWeight.ExtraBold)
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        CircularProgressIndicator(color = NetflixRed, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
+                        Text("Waiting for approval…", color = NetflixTextMuted, fontSize = 12.sp)
+                    }
+                    TextButton(onClick = onClose) {
+                        Text("Cancel", color = NetflixTextMuted)
+                    }
+                } else {
+                    Icon(
+                        Icons.Default.AccountCircle,
+                        contentDescription = null,
+                        tint = NetflixRed,
+                        modifier = Modifier.size(42.dp),
+                    )
+                    Text(
+                        text = "Approve in Browser",
+                        color = Color.White,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 18.sp,
+                    )
+                    Text(
+                        text = "Tap Approve on the SIMKL page that opened and you will return right back to Nanami Movies automatically.",
+                        color = NetflixTextMuted,
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center,
+                        lineHeight = 18.sp,
+                    )
+                    codeError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp, textAlign = TextAlign.Center)
+                    }
+                    Button(
+                        onClick = onReopenBrowser,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = NetflixRed, contentColor = Color.White),
+                        shape = RoundedCornerShape(6.dp),
+                    ) {
+                        Text("Reopen SIMKL Sign-In", fontWeight = FontWeight.ExtraBold)
+                    }
+                    OutlinedButton(
+                        enabled = !loadingCode,
+                        onClick = {
+                            scope.launch {
+                                loadingCode = true
+                                codeError = null
+                                try {
+                                    val started = simkl.beginSignIn()
+                                    deviceSignIn = started
+                                    openCinemaCustomTab(context, started.verificationUrl)
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    codeError = e.message ?: "Couldn't start code sign-in."
+                                } finally {
+                                    loadingCode = false
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        border = BorderStroke(1.dp, NetflixBorder),
+                        shape = RoundedCornerShape(6.dp),
+                    ) {
+                        Text(
+                            text = if (loadingCode) "Generating code…" else "Use 8-Character Code Instead",
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 12.5.sp,
+                        )
+                    }
+                    TextButton(onClick = onClose) {
+                        Text("Cancel", color = NetflixTextMuted)
                     }
                 }
             }

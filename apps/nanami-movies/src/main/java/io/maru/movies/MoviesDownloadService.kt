@@ -133,8 +133,8 @@ class MoviesDownloadService : Service() {
             Log.w(TAG, "Download failed for ${item.key}", error)
             safelyFail(item, (error as? MovieDownloadException)?.message ?: "Couldn't save the video. Tap Retry to try again.")
         } catch (error: LinkageError) {
-            Log.w(TAG, "Torrent engine unavailable", error)
-            safelyFail(item, "The torrent engine is unavailable on this device.")
+            Log.w(TAG, "Download engine unavailable", error)
+            safelyFail(item, "Offline downloads are unavailable on this device.")
         } finally {
             cancellation.cancel()
         }
@@ -253,9 +253,8 @@ private suspend fun fetchDownload(
                 requireDownloadNetwork(context)
                 val speed = stats.speed.takeIf { it > 0 }?.let { "${Formatter.formatFileSize(context, it)}/s" }
                 val percent = stats.fraction?.times(100)?.roundToInt()?.coerceIn(0, 99)?.let { "$it%" }
-                val peers = stats.peers.takeIf { it > 0 }?.let { "$it peers" }
-                val details = listOfNotNull(percent, speed, peers).joinToString(" · ")
-                report(details.ifBlank { "Finding peers · $attempt" }, stats)
+                val details = listOfNotNull(percent, speed).joinToString(" · ")
+                report(details.ifBlank { "Starting download · $attempt" }, stats)
             }
             val direct = candidate.downloadUrl()
             val file = if (direct != null) {

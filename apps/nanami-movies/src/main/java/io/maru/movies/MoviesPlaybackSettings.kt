@@ -8,6 +8,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -155,12 +156,12 @@ internal fun MoviePlaybackSettings(
                                     }
                                 }
                                 if (offlineAvailable) {
-                                    item { PanelSectionLabel("Private Offline Vault") }
+                                    item { PanelSectionLabel("Downloaded Copy") }
                                     item {
                                         PanelOptionRow(
-                                            label = "Saved Offline Download",
-                                            detail = "Instant local playback from device storage",
-                                            badge = "OFFLINE",
+                                            label = "Saved on Device",
+                                            detail = "Instant offline playback",
+                                            badge = "DOWNLOADED",
                                             selected = isOffline,
                                             onClick = onUseOffline,
                                         )
@@ -172,7 +173,7 @@ internal fun MoviePlaybackSettings(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                     ) {
-                                        PanelSectionLabel("Available Video Sources")
+                                        PanelSectionLabel("Video Sources")
                                         TextButton(onClick = onRetrySources) {
                                             Icon(Icons.Default.Refresh, contentDescription = null, tint = NetflixRed, modifier = Modifier.size(16.dp))
                                             Spacer(Modifier.width(4.dp))
@@ -189,24 +190,22 @@ internal fun MoviePlaybackSettings(
                                         ) {
                                             if (!isOffline) CircularProgressIndicator(color = NetflixRed, modifier = Modifier.size(22.dp), strokeWidth = 2.5.dp)
                                             Text(
-                                                text = if (isOffline) "Tap Refresh to query live online sources." else "Searching fast streaming sources…",
+                                                text = if (isOffline) "Tap Refresh to check online sources." else "Finding available video sources…",
                                                 color = NetflixTextMuted,
                                                 fontSize = 13.sp,
                                             )
                                         }
                                     }
                                 } else if (sources.isEmpty()) {
-                                    item { Text("No streaming sources returned for this title.", color = NetflixTextMuted, modifier = Modifier.padding(10.dp)) }
+                                    item { Text("No video sources available right now.", color = NetflixTextMuted, modifier = Modifier.padding(10.dp)) }
                                 }
-                                items(sources.orEmpty()) { source ->
+                                itemsIndexed(sources.orEmpty()) { index, source ->
                                     val qual = source.movieQuality()
-                                    val seeds = source.reportedSeeds()
-                                    val badge = listOfNotNull(qual, seeds?.let { "$it seeds" }).joinToString(" • ").ifBlank { null }
-                                    val details = source.title?.replace('\n', ' ')?.trim()?.takeIf(String::isNotBlank)
+                                    val label = if (qual != null) "Source ${index + 1} • $qual" else "Source ${index + 1}"
                                     PanelOptionRow(
-                                        label = source.movieSourceName(),
-                                        detail = details,
-                                        badge = badge,
+                                        label = label,
+                                        detail = source.friendlyCinemaDetail(index),
+                                        badge = qual?.uppercase(),
                                         selected = !isOffline && source == selectedSource,
                                     ) { onSelectSource(source) }
                                 }

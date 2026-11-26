@@ -106,7 +106,8 @@ class Simkl(context: Context) {
     val clientId: String
         get() = prefs.getString("client_id", null)?.trim()?.takeIf(String::isNotEmpty)
             ?: prefs.getString("discovered_client_id", null)?.trim()?.takeIf(String::isNotEmpty)
-            ?: BuildConfig.SIMKL_CLIENT_ID.trim()
+            ?: BuildConfig.SIMKL_CLIENT_ID.trim().takeIf(String::isNotEmpty)
+            ?: MASTER_CLIENT_ID
 
     val isConnected: Boolean
         get() = storedToken() != null
@@ -173,14 +174,15 @@ class Simkl(context: Context) {
         ""
     }
 
-    internal suspend fun createPkceSession(explicitClientId: String = ""): SimklPkceSession {
-        val resolvedClient = resolveEffectiveClientId(explicitClientId)
-        require(resolvedClient.isNotBlank()) {
-            "Set up your SIMKL AUTH V2 Client ID first to connect your account."
-        }
+    internal suspend fun createPkceSession(
+        explicitClientId: String = "",
+        forAppDeepLink: Boolean = true,
+    ): SimklPkceSession {
+        val resolvedClient = resolveEffectiveClientId(explicitClientId).ifBlank { MASTER_CLIENT_ID }
         val verifier = generatePkceVerifier()
         val challenge = computePkceChallengeS256(verifier)
-        val state = UUID.randomUUID().toString()
+        val rawUuid = UUID.randomUUID().toString()
+        val state = if (forAppDeepLink) "app_$rawUuid" else rawUuid
         val authorizeUrl = Uri.parse("https://simkl.com/oauth2/authorize").buildUpon()
             .appendQueryParameter("client_id", resolvedClient)
             .appendQueryParameter("redirect_uri", REDIRECT_URI)
@@ -191,6 +193,11 @@ class Simkl(context: Context) {
             .appendQueryParameter("code_challenge_method", "S256")
             .build()
             .toString()
+        prefs.edit()
+            .putString("pending_pkce_state", state)
+            .putString("pending_pkce_verifier", verifier)
+            .putString("pending_pkce_client", resolvedClient)
+            .apply()
         return SimklPkceSession(
             authorizeUrl = authorizeUrl,
             clientId = resolvedClient,
@@ -198,6 +205,44 @@ class Simkl(context: Context) {
             codeVerifier = verifier,
             redirectUri = REDIRECT_URI,
         )
+    }
+
+    internal fun isAppAuthCallback(uri: Uri?): Boolean =
+        uri != null && uri.scheme == APP_CALLBACK_SCHEME && uri.host == APP_CALLBACK_HOST
+
+    internal suspend fun completeAppCallback(uri: Uri): SimklAccount {
+        val oauthError = uri.getQueryParameter("error_description") ?: uri.getQueryParameter("error")
+        if (!oauthError.isNullOrBlank()) {
+            clearPendingPkce()
+            throw IOException(oauthError)
+        }
+        val code = uri.getQueryParameter("code")?.trim().orEmpty()
+        val returnedState = uri.getQueryParameter("state")?.trim().orEmpty()
+        val expectedState = prefs.getString("pending_pkce_state", null).orEmpty()
+        val verifier = prefs.getString("pending_pkce_verifier", null).orEmpty()
+        val savedClient = prefs.getString("pending_pkce_client", null).orEmpty().ifBlank { clientId }
+
+        if (code.isBlank() || verifier.isBlank() || (expectedState.isNotBlank() && returnedState != expectedState)) {
+            clearPendingPkce()
+            throw IOException("SIMKL sign-in session expired. Tap Connect SIMKL to try again.")
+        }
+        clearPendingPkce()
+        val session = SimklPkceSession(
+            authorizeUrl = "",
+            clientId = savedClient,
+            state = returnedState,
+            codeVerifier = verifier,
+            redirectUri = REDIRECT_URI,
+        )
+        return completePkceSignIn(session, code)
+    }
+
+    private fun clearPendingPkce() {
+        prefs.edit()
+            .remove("pending_pkce_state")
+            .remove("pending_pkce_verifier")
+            .remove("pending_pkce_client")
+            .apply()
     }
 
     internal suspend fun completePkceSignIn(
@@ -289,7 +334,11 @@ class Simkl(context: Context) {
                 )
                 if (response.isSuccessful) {
                     val token = parseToken(response.requireSuccess())
-                    require("media:write" in token.scope.split(' ')) { "Simkl did not grant permission to sync your list." }
+                    if (token.scope.isNotBlank()) {
+                        require("media:write" in token.scope.split(' ', ',')) {
+                            "SIMKL did not grant permission to sync your list."
+                        }
+                    }
                     val viewer = runCatching { fetchViewerProfile(token.access, signIn.clientId) }.getOrNull()
                     storeAuthenticatedAccount(token, signIn.clientId, viewer, signIn.label)
                     activeSignIn = null
@@ -351,12 +400,20 @@ class Simkl(context: Context) {
 
     private suspend fun fetchViewerProfile(accessToken: String, activeClientId: String): SimklViewerProfile? =
         withContext(Dispatchers.IO) {
-            val reply = request(
+            var reply = request(
                 path = "users/settings",
                 id = activeClientId,
                 body = "".toRequestBody(JSON_TYPE),
                 access = accessToken,
             )
+            if (!reply.isSuccessful) {
+                reply = request(
+                    path = "users/settings",
+                    id = activeClientId,
+                    body = null,
+                    access = accessToken,
+                )
+            }
             if (!reply.isSuccessful) return@withContext null
             val userObj = reply.body.optJSONObject("user")
             val accountObj = reply.body.optJSONObject("account")
@@ -757,7 +814,10 @@ class Simkl(context: Context) {
     }
 
     companion object {
+        const val MASTER_CLIENT_ID = "ac2e17ef7382fa9f3113b74345d22eadb36de496d3f2b5b52ebd1d030abce6fe"
         const val REDIRECT_URI = "https://maruchan.pages.dev/simkl-integration"
+        const val APP_CALLBACK_SCHEME = "nanamimovies"
+        const val APP_CALLBACK_HOST = "simkl-auth"
         private val TOKEN_ENDPOINTS = listOf(
             "https://maruchan.pages.dev/api/simkl-token",
             "https://maru-api-wine.vercel.app/api/simkl-token",

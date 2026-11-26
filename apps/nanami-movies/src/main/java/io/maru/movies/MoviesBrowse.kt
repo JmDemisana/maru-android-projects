@@ -10,6 +10,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -48,7 +49,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -88,15 +88,15 @@ private val browseCategories = listOf(
     "Trending Now",
     "New Releases",
     "Top Rated",
-    "Cartoons & Animation",
+    "Movies",
+    "TV Shows",
+    "Cartoons",
     "Action",
     "Sci-Fi",
     "Comedy",
     "Thriller",
     "Horror",
     "Romance",
-    "Drama",
-    "Documentary",
     "Family",
 )
 
@@ -146,7 +146,7 @@ internal enum class PosterSort(val displayName: String) {
 }
 
 // ============================================================================
-// 1. NETFLIX HOME SCREEN (Billboard Pager + Top 10 + Continue Watching + Lanes)
+// 1. NETFLIX HOME SCREEN (Full-Bleed 1080p Hero + Continue Watching + Top 10)
 // ============================================================================
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -158,13 +158,13 @@ internal fun MoviesHomeScreen(
     history: List<WatchProgress>,
     hideMature: Boolean,
     open: (MovieTitle) -> Unit,
-    resume: (MovieTitle, WatchProgress) -> Unit,
+    @Suppress("UNUSED_PARAMETER") resume: (MovieTitle, WatchProgress) -> Unit,
     playFeatured: (MovieTitle, MovieEpisode?) -> Unit,
     toggleSaved: (MovieTitle) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val posterWidth = if (LocalConfiguration.current.screenWidthDp < 360) 124.dp else 138.dp
+    val posterWidth = if (LocalConfiguration.current.screenWidthDp < 360) 126.dp else 142.dp
 
     var filter by rememberSaveable { mutableStateOf(HomeFilter.ALL) }
     var collectionKey by rememberSaveable { mutableStateOf<String?>(null) }
@@ -191,7 +191,7 @@ internal fun MoviesHomeScreen(
                 Shelf("Trending TV Shows", MovieKind.SERIES, MovieFeed.POPULAR),
                 Shelf("New Movie Releases", MovieKind.MOVIE, MovieFeed.NEW),
                 Shelf("New TV Series", MovieKind.SERIES, MovieFeed.NEW),
-                Shelf("Cartoons & Western Animation", MovieKind.SERIES, MovieFeed.POPULAR, genre = "Animation"),
+                Shelf("Cartoons & Animation", MovieKind.SERIES, MovieFeed.POPULAR, genre = "Animation"),
                 Shelf("Animated Feature Films", MovieKind.MOVIE, MovieFeed.POPULAR, genre = "Animation"),
                 Shelf("Critically Acclaimed Films", MovieKind.MOVIE, MovieFeed.TOP_RATED),
                 Shelf("Top-Rated TV Shows", MovieKind.SERIES, MovieFeed.TOP_RATED),
@@ -226,8 +226,6 @@ internal fun MoviesHomeScreen(
     var reload by remember { mutableIntStateOf(0) }
     var isRefreshing by remember { mutableStateOf(false) }
     var startingHeroId by remember { mutableStateOf<String?>(null) }
-    var shuffling by remember { mutableStateOf(false) }
-    var shuffleMenu by remember { mutableStateOf(false) }
 
     val watchedRefs = remember(history) {
         history.filter(WatchProgress::completed).mapTo(mutableSetOf()) { it.title }
@@ -261,10 +259,12 @@ internal fun MoviesHomeScreen(
     val pool = remember(currentShelves) {
         currentShelves.flatMap { it.second }.distinctBy(MovieTitle::ref).filter(MovieTitle::available)
     }
+
+    // Strictly select spotlight items with clean textless 1080p backdrops so posters never stretch or double-render text!
     val spotlightItems = remember(currentShelves) {
         currentShelves.flatMap { it.second }
             .distinctBy(MovieTitle::ref)
-            .filter { (!it.backdrop.isNullOrBlank() || !it.poster.isNullOrBlank()) && it.available }
+            .filter { !it.backdrop.isNullOrBlank() && it.available }
             .take(5)
     }
     val topTenItems = remember(currentShelves) {
@@ -272,29 +272,6 @@ internal fun MoviesHomeScreen(
             ?.filter(MovieTitle::available)
             ?.take(10)
             .orEmpty()
-    }
-
-    fun pickRandom(englishOnly: Boolean) {
-        shuffleMenu = false
-        val candidates = pool.shuffled()
-        if (!englishOnly) {
-            candidates.firstOrNull()?.let(open)
-            return
-        }
-        scope.launch {
-            shuffling = true
-            try {
-                val match = candidates.take(9).chunked(3).firstNotNullOfOrNull { batch ->
-                    batch.map { candidate ->
-                        async { candidate.takeIf { attempt { catalog.hasListedEnglishAudio(it) }.getOrDefault(false) } }
-                    }.awaitAll().firstOrNull { it != null }
-                }
-                if (match != null) open(match)
-                else Toast.makeText(context, "Couldn't confirm English audio in this row; try another filter.", Toast.LENGTH_SHORT).show()
-            } finally {
-                shuffling = false
-            }
-        }
     }
 
     PullToRefreshBox(
@@ -309,7 +286,7 @@ internal fun MoviesHomeScreen(
             contentPadding = PaddingValues(bottom = 36.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
-            // 0. Netflix Top Filter Pills + Surprise Me
+            // 0. Sleek Netflix Category Pills
             item(key = "netflix_filter_bar") {
                 Row(
                     modifier = Modifier
@@ -327,44 +304,26 @@ internal fun MoviesHomeScreen(
                         )
                     }
                     if (pool.isNotEmpty()) {
-                        Box {
-                            NetflixChip(
-                                label = if (shuffling) "Picking…" else "Surprise Me",
-                                selected = false,
-                                leadingIcon = Icons.Default.Shuffle,
-                                onClick = { if (!shuffling) shuffleMenu = true },
-                            )
-                            DropdownMenu(
-                                expanded = shuffleMenu,
-                                onDismissRequest = { shuffleMenu = false },
-                                containerColor = NetflixSurface,
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("Random Title", color = Color.White, fontWeight = FontWeight.SemiBold) },
-                                    onClick = { pickRandom(false) },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Random English Audio", color = NetflixMatchGreen, fontWeight = FontWeight.Bold) },
-                                    onClick = { pickRandom(true) },
-                                )
-                            }
-                        }
+                        NetflixChip(
+                            label = "Surprise Me",
+                            selected = false,
+                            leadingIcon = Icons.Default.Shuffle,
+                            onClick = { pool.randomOrNull()?.let(open) },
+                        )
                     }
                 }
             }
 
-            // 1. Netflix Billboard Hero Carousel
+            // 1. Full-Bleed Edge-to-Edge Netflix Hero Spotlight (Matching Nanami Anime's clean immersion!)
             if (spotlightItems.isNotEmpty()) {
                 item(key = "netflix_billboard_${filter.name}") {
                     val pagerState = rememberPagerState(pageCount = { spotlightItems.size })
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         HorizontalPager(
                             state = pagerState,
-                            contentPadding = PaddingValues(horizontal = PagePadding),
-                            pageSpacing = 12.dp,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(430.dp),
+                                .heightIn(min = 320.dp),
                         ) { page ->
                             val hero = spotlightItems[page]
                             val isHeroSaved = hero.ref in saved
@@ -402,19 +361,19 @@ internal fun MoviesHomeScreen(
                                     val active = pagerState.currentPage == idx
                                     val dotWidth by animateDpAsState(
                                         targetValue = if (active) 20.dp else 6.dp,
-                                        animationSpec = tween(200),
+                                        animationSpec = tween(220),
                                         label = "hero_dot_w",
                                     )
                                     val dotColor by animateColorAsState(
                                         targetValue = if (active) NetflixRed else NetflixBorder,
-                                        animationSpec = tween(200),
+                                        animationSpec = tween(220),
                                         label = "hero_dot_c",
                                     )
                                     Box(
                                         modifier = Modifier
                                             .padding(horizontal = 3.dp)
                                             .width(dotWidth)
-                                            .height(5.dp)
+                                            .height(6.dp)
                                             .background(dotColor, CircleShape),
                                     )
                                 }
@@ -422,9 +381,19 @@ internal fun MoviesHomeScreen(
                         }
                     }
                 }
+            } else if (stillLoading) {
+                item(key = "hero_shimmer") {
+                    val shimmer = rememberShimmerBrush()
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(310.dp)
+                            .background(shimmer),
+                    )
+                }
             }
 
-            // 2. Continue Watching 16:9 Lane (Works in Guest Mode & SIMKL Mode!)
+            // 2. Continue Watching Lane (Tapping opens Info Screen just like Nanami Anime!)
             val continuing = continueTitles.visible(hideMature).filter { title ->
                 when (filter) {
                     HomeFilter.MOVIES -> title.kind == MovieKind.MOVIE
@@ -454,7 +423,7 @@ internal fun MoviesHomeScreen(
                                     NetflixContinueCard(
                                         title = title,
                                         progress = prog,
-                                        onClick = { resume(title, prog) },
+                                        onClick = { open(title) },
                                     )
                                 }
                             }
@@ -463,7 +432,7 @@ internal fun MoviesHomeScreen(
                 }
             }
 
-            // 3. Netflix Top 10 Row with Iconic Oversized Rank Numbers
+            // 3. Netflix Top 10 Row with Oversized Outlined Rank Numbers
             if (topTenItems.size >= 5) {
                 item(key = "lane_top_10_${filter.name}") {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -515,7 +484,7 @@ internal fun MoviesHomeScreen(
                 }
             }
 
-            // 4. All Curated Shelves
+            // 4. Curated Shelves
             items(currentShelves, key = { it.first.encode() }) { (shelf, titles) ->
                 TitleShelf(
                     label = shelf.label,
@@ -528,21 +497,43 @@ internal fun MoviesHomeScreen(
                 )
             }
 
-            if (stillLoading) {
-                item(key = "home_loading") {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(if (currentShelves.isEmpty()) 280.dp else 56.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        CircularProgressIndicator(color = NetflixRed, modifier = Modifier.size(28.dp))
-                    }
+            if (stillLoading && currentShelves.isEmpty()) {
+                items(2) { idx ->
+                    ShimmerShelfPlaceholder(keySeed = idx, posterWidth = posterWidth)
                 }
-            } else if (currentShelves.isEmpty() && continuing.isEmpty()) {
+            } else if (!stillLoading && currentShelves.isEmpty() && continuing.isEmpty()) {
                 item(key = "home_empty") {
                     EmptyState("Couldn't load the catalog right now.") { reload++ }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ShimmerShelfPlaceholder(keySeed: Int, posterWidth: androidx.compose.ui.unit.Dp) {
+    val shimmer = rememberShimmerBrush()
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Box(
+            modifier = Modifier
+                .padding(horizontal = PagePadding)
+                .width(160.dp)
+                .height(20.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(shimmer),
+        )
+        Row(
+            modifier = Modifier.padding(horizontal = PagePadding),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            repeat(3) { sub ->
+                Box(
+                    modifier = Modifier
+                        .width(posterWidth)
+                        .aspectRatio(2f / 3f)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(shimmer),
+                )
             }
         }
     }
@@ -562,159 +553,143 @@ private fun NetflixHeroBillboard(
         base.coerceIn(78, 99)
     }
 
-    Surface(
-        onClick = onOpen,
-        shape = RoundedCornerShape(10.dp),
-        color = NetflixCardBg,
-        border = BorderStroke(1.dp, NetflixBorder),
-        modifier = Modifier.fillMaxSize(),
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(330.dp)
+            .clickable(onClick = onOpen),
     ) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            CrossfadeArtwork(
-                model = title.poster ?: title.backdrop,
-                contentDescription = title.title,
-                modifier = Modifier.fillMaxSize(),
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.verticalGradient(
-                            0f to Color(0x22000000),
-                            0.42f to Color(0x44000000),
-                            0.72f to Color(0xCC060608),
-                            1f to Color(0xFA000000),
-                        ),
+        // Strictly use clean 1080p backdrop (never low-res poster with burned-in text!)
+        CrossfadeArtwork(
+            model = title.backdrop ?: title.poster,
+            contentDescription = title.title,
+            modifier = Modifier.matchParentSize(),
+        )
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(
+                    Brush.verticalGradient(
+                        0f to Color(0x33000000),
+                        0.45f to Color(0x88000000),
+                        0.82f to Color(0xEB000000),
+                        1f to NetflixBlack,
                     ),
+                ),
+        )
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(start = PagePadding, end = PagePadding, top = 64.dp, bottom = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            // 100% Transparent ClearLogoImage (zero dark bar behind logos, graceful text fallback!)
+            ClearLogoImage(
+                logoUrl = title.logo,
+                titleFallback = title.title,
+                fallbackFontSize = 24,
+                modifier = Modifier
+                    .height(58.dp)
+                    .widthIn(max = 260.dp),
             )
 
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+            val metaParts = remember(title) {
+                buildList {
+                    add("$matchPercent% Match")
+                    title.year?.take(4)?.let(::add)
+                    title.certification?.let(::add)
+                    if (title.genres.isNotEmpty()) {
+                        add(title.genres.take(2).joinToString(" • "))
+                    }
+                }
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (!title.logo.isNullOrBlank()) {
-                    CrossfadeArtwork(
-                        model = title.logo,
-                        contentDescription = title.title,
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .height(64.dp)
-                            .fillMaxWidth(0.82f)
-                            .background(Color.Transparent),
-                    )
-                } else {
+                metaParts.forEachIndexed { idx, part ->
                     Text(
-                        text = title.title,
-                        color = Color.White,
-                        fontSize = 24.sp,
-                        fontWeight = FontWeight.Black,
-                        textAlign = TextAlign.Center,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        lineHeight = 28.sp,
-                    )
-                }
-
-                // Genre & Metadata Ribbon
-                val metaParts = remember(title) {
-                    buildList {
-                        add("$matchPercent% Match")
-                        title.year?.take(4)?.let(::add)
-                        title.certification?.let(::add)
-                        add(if (title.kind == MovieKind.SERIES) "Series" else (title.runtime ?: "Movie"))
-                    }
-                }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    metaParts.forEachIndexed { idx, part ->
-                        Text(
-                            text = part,
-                            fontSize = 12.sp,
-                            fontWeight = if (idx == 0) FontWeight.ExtraBold else FontWeight.SemiBold,
-                            color = if (idx == 0) NetflixMatchGreen else Color(0xFFE4E6EE),
-                        )
-                        if (idx < metaParts.lastIndex) {
-                            Text("•", fontSize = 11.sp, color = NetflixTextMuted)
-                        }
-                    }
-                }
-
-                if (title.genres.isNotEmpty()) {
-                    Text(
-                        text = title.genres.take(3).joinToString("  •  "),
-                        fontSize = 11.5.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = Color(0xFFD0D3DF),
+                        text = part,
+                        fontSize = 12.sp,
+                        fontWeight = if (idx == 0) FontWeight.ExtraBold else FontWeight.SemiBold,
+                        color = if (idx == 0) NetflixMatchGreen else Color(0xFFE0E2EC),
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (idx < metaParts.lastIndex) {
+                        Text("•", fontSize = 11.sp, color = NetflixTextMuted)
+                    }
+                }
+            }
+
+            title.overview?.takeIf(String::isNotBlank)?.let { desc ->
+                Text(
+                    text = desc,
+                    fontSize = 12.5.sp,
+                    color = Color(0xFFD2D5E0),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    lineHeight = 17.sp,
+                )
+            }
+
+            Row(
+                modifier = Modifier.padding(top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Button(
+                    onClick = onPlay,
+                    enabled = !starting,
+                    shape = RoundedCornerShape(4.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = NetflixWhite,
+                        contentColor = Color.Black,
+                    ),
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        text = if (starting) "OPENING…" else "PLAY",
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 13.sp,
                     )
                 }
 
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                OutlinedButton(
+                    onClick = onToggleSave,
+                    shape = RoundedCornerShape(4.dp),
+                    border = BorderStroke(1.dp, Color(0x66FFFFFF)),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = Color(0x7716161C),
+                        contentColor = Color.White,
+                    ),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
                 ) {
-                    Button(
-                        onClick = onPlay,
-                        enabled = !starting,
-                        modifier = Modifier.weight(1f).height(42.dp),
-                        shape = RoundedCornerShape(5.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = NetflixWhite,
-                            contentColor = Color.Black,
-                        ),
-                    ) {
-                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(22.dp))
-                        Spacer(Modifier.width(5.dp))
-                        Text(
-                            text = if (starting) "Opening…" else "Play",
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 14.sp,
-                        )
-                    }
+                    Icon(
+                        if (saved) Icons.Default.Check else Icons.Default.Add,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        text = "MY LIST",
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 12.5.sp,
+                    )
+                }
 
-                    OutlinedButton(
-                        onClick = onToggleSave,
-                        modifier = Modifier.weight(1f).height(42.dp),
-                        shape = RoundedCornerShape(5.dp),
-                        border = BorderStroke(1.dp, Color(0x66FFFFFF)),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = Color(0x661C1C22),
-                            contentColor = Color.White,
-                        ),
-                    ) {
-                        Icon(
-                            if (saved) Icons.Default.Check else Icons.Default.Add,
-                            contentDescription = null,
-                            modifier = Modifier.size(19.dp),
-                        )
-                        Spacer(Modifier.width(5.dp))
-                        Text(
-                            text = "My List",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.5.sp,
-                        )
-                    }
-
-                    Surface(
-                        onClick = onOpen,
-                        shape = RoundedCornerShape(5.dp),
-                        color = Color(0x661C1C22),
-                        border = BorderStroke(1.dp, Color(0x55FFFFFF)),
-                        modifier = Modifier.size(42.dp),
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(Icons.Outlined.Info, contentDescription = "Details", tint = Color.White, modifier = Modifier.size(20.dp))
-                        }
+                Surface(
+                    onClick = onOpen,
+                    shape = RoundedCornerShape(4.dp),
+                    color = Color(0x7716161C),
+                    border = BorderStroke(1.dp, Color(0x55FFFFFF)),
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Outlined.Info, contentDescription = "Info", tint = Color.White, modifier = Modifier.size(20.dp))
                     }
                 }
             }
@@ -723,7 +698,7 @@ private fun NetflixHeroBillboard(
 }
 
 // ============================================================================
-// 2. MY LIST SCREEN (Downloads-First + Series Grouping + 6 Sort Options + Random)
+// 2. MY LIST SCREEN (Downloads-First + Always Opens Info Screen on Card Tap!)
 // ============================================================================
 private enum class MoviesLibraryCategory(val label: String) {
     DOWNLOADS("Downloads"),
@@ -732,7 +707,6 @@ private enum class MoviesLibraryCategory(val label: String) {
     COMPLETED("Completed"),
     HOLD("On Hold"),
     DROPPED("Dropped"),
-    UPCOMING("Upcoming"),
 }
 
 @Composable
@@ -748,13 +722,12 @@ internal fun MoviesMyListScreen(
     isLoggedIn: Boolean,
     pendingSyncCount: Int,
     isSyncingQueue: Boolean,
-    onConnectClick: () -> Unit,
+    @Suppress("UNUSED_PARAMETER") onConnectClick: () -> Unit,
     open: (MovieTitle) -> Unit,
-    resume: (MovieTitle, WatchProgress) -> Unit,
+    @Suppress("UNUSED_PARAMETER") resume: (MovieTitle, WatchProgress) -> Unit,
     playOffline: (MovieTitle, MovieEpisode?, File) -> Unit,
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val vault = MoviesDownloadVault
     val allDownloads by vault.items.collectAsState()
     val visibleDownloads = remember(allDownloads, hideMature) {
@@ -768,7 +741,6 @@ internal fun MoviesMyListScreen(
         val savedName = MoviesPreferences.myListsSortOption(context)
         mutableStateOf(runCatching { PosterSort.valueOf(savedName) }.getOrDefault(PosterSort.ADDED))
     }
-    var pickingEnglishRandom by remember { mutableStateOf(false) }
 
     val watched = remember(history) { history.filter(WatchProgress::completed).distinctBy(WatchProgress::title) }
     val watchedRefs = remember(watched, tracking) {
@@ -782,7 +754,6 @@ internal fun MoviesMyListScreen(
     }
     val holdRefs = remember(tracking) { tracking.filterValues { it == MovieWatchStatus.HOLD }.keys.toList() }
     val droppedRefs = remember(tracking) { tracking.filterValues { it == MovieWatchStatus.DROPPED }.keys.toList() }
-    val upcomingRefs = remember(plannedRefs, watchingRefs) { (plannedRefs + watchingRefs).distinct() }
 
     fun countFor(cat: MoviesLibraryCategory): Int = when (cat) {
         MoviesLibraryCategory.DOWNLOADS -> visibleDownloads.size
@@ -791,7 +762,6 @@ internal fun MoviesMyListScreen(
         MoviesLibraryCategory.COMPLETED -> watchedRefs.size
         MoviesLibraryCategory.HOLD -> holdRefs.size
         MoviesLibraryCategory.DROPPED -> droppedRefs.size
-        MoviesLibraryCategory.UPCOMING -> 0
     }
 
     val activeRefs = when (selectedCategory) {
@@ -801,7 +771,6 @@ internal fun MoviesMyListScreen(
         MoviesLibraryCategory.COMPLETED -> watchedRefs.toList()
         MoviesLibraryCategory.HOLD -> holdRefs
         MoviesLibraryCategory.DROPPED -> droppedRefs
-        MoviesLibraryCategory.UPCOMING -> upcomingRefs
     }
 
     val orderMap = when (selectedCategory) {
@@ -824,7 +793,7 @@ internal fun MoviesMyListScreen(
             .fillMaxSize()
             .background(NetflixBlack),
     ) {
-        // Single-line scrolling category strip with Downloads FIRST (100% parity with Nanami Anime!)
+        // Single-line scrolling category strip with Downloads FIRST (exact parity with Nanami Anime!)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -839,7 +808,7 @@ internal fun MoviesMyListScreen(
                 val count = countFor(cat)
                 val textColor by animateColorAsState(
                     targetValue = if (isSelected) Color.White else NetflixTextMuted,
-                    animationSpec = tween(160),
+                    animationSpec = tween(180),
                     label = "list_tab_text",
                 )
                 val barColor by animateColorAsState(
@@ -881,7 +850,7 @@ internal fun MoviesMyListScreen(
 
         HorizontalDivider(color = NetflixBorder, thickness = 1.dp)
 
-        // Non-blocking Offline Sync Queue or Guest Mode Banner (identical to Nanami Anime!)
+        // Show subtle sync bar ONLY when offline changes are queued!
         if (pendingSyncCount > 0 && isLoggedIn) {
             Surface(color = Color(0xFF14181E), modifier = Modifier.fillMaxWidth()) {
                 Row(
@@ -897,9 +866,9 @@ internal fun MoviesMyListScreen(
                     )
                     Text(
                         text = if (isSyncingQueue) {
-                            "Syncing $pendingSyncCount offline update${if (pendingSyncCount == 1) "" else "s"} to SIMKL…"
+                            "Syncing $pendingSyncCount update${if (pendingSyncCount == 1) "" else "s"} to SIMKL…"
                         } else {
-                            "$pendingSyncCount offline update${if (pendingSyncCount == 1) "" else "s"} queued • Will sync automatically when online"
+                            "$pendingSyncCount update${if (pendingSyncCount == 1) "" else "s"} queued • Syncs automatically when online"
                         },
                         fontSize = 11.5.sp,
                         color = NetflixMatchGreen,
@@ -908,175 +877,124 @@ internal fun MoviesMyListScreen(
                 }
             }
             HorizontalDivider(color = NetflixBorder, thickness = 1.dp)
-        } else if (!isLoggedIn && selectedCategory != MoviesLibraryCategory.DOWNLOADS) {
-            Surface(color = NetflixSurface, modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text(
-                        text = "Managing lists on this device. Connect SIMKL anytime for cloud sync.",
-                        fontSize = 11.5.sp,
-                        color = NetflixTextMuted,
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(onClick = onConnectClick) {
-                        Text("Connect", color = NetflixRed, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                    }
-                }
-            }
-            HorizontalDivider(color = NetflixBorder, thickness = 1.dp)
         }
 
         AnimatedContent(
             targetState = selectedCategory to selectedOfflineSeriesImdb,
-            transitionSpec = { fadeIn(tween(170)) togetherWith fadeOut(tween(120)) },
+            transitionSpec = {
+                (fadeIn(tween(190)) + scaleIn(tween(190), initialScale = 0.985f)) togetherWith fadeOut(tween(130))
+            },
             label = "movies_my_list_body",
             modifier = Modifier.fillMaxSize(),
         ) { (activeCat, drilldownImdb) ->
-            when {
-                activeCat == MoviesLibraryCategory.DOWNLOADS -> {
-                    MoviesDownloadsVaultTab(
-                        downloads = visibleDownloads,
-                        selectedSeriesImdb = drilldownImdb,
-                        onSelectSeriesImdb = { selectedOfflineSeriesImdb = it },
-                        onOpenTitle = open,
-                        onPlayOffline = playOffline,
-                    )
+            if (activeCat == MoviesLibraryCategory.DOWNLOADS) {
+                MoviesDownloadsVaultTab(
+                    downloads = visibleDownloads,
+                    selectedSeriesImdb = drilldownImdb,
+                    onSelectSeriesImdb = { selectedOfflineSeriesImdb = it },
+                    onOpenTitle = open,
+                    onPlayOffline = playOffline,
+                )
+            } else {
+                val baseTitles = resolvedTitles.orEmpty().visible(hideMature)
+                    .filter { kindFilter == null || it.kind == kindFilter }
+                val sortedList = remember(baseTitles, sortOption, orderMap, ratings) {
+                    sortOption.sort(baseTitles, orderMap, ratings)
                 }
-                activeCat == MoviesLibraryCategory.UPCOMING -> {
-                    if (resolvedTitles == null && activeRefs.isNotEmpty()) Loading()
-                    else UpcomingReleases(resolvedTitles.orEmpty().visible(hideMature), open)
-                }
-                else -> {
-                    val baseTitles = resolvedTitles.orEmpty().visible(hideMature)
-                        .filter { kindFilter == null || it.kind == kindFilter }
-                    val sortedList = remember(baseTitles, sortOption, orderMap, ratings) {
-                        sortOption.sort(baseTitles, orderMap, ratings)
-                    }
 
-                    if (resolvedTitles == null && activeRefs.isNotEmpty()) {
-                        Loading()
-                    } else {
-                        Column(modifier = Modifier.fillMaxSize()) {
-                            // Sort Dropdown + Filter Chips + 1-Tap Random & Random English Buttons (matching Nanami Anime!)
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState())
-                                    .padding(horizontal = PagePadding, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                Box {
-                                    var showSortMenu by remember { mutableStateOf(false) }
-                                    Surface(
-                                        onClick = { showSortMenu = true },
-                                        shape = RoundedCornerShape(6.dp),
-                                        color = NetflixCardBg,
-                                        border = BorderStroke(1.dp, NetflixBorder),
+                if (resolvedTitles == null && activeRefs.isNotEmpty()) {
+                    Loading()
+                } else {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = PagePadding, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Box {
+                                var showSortMenu by remember { mutableStateOf(false) }
+                                Surface(
+                                    onClick = { showSortMenu = true },
+                                    shape = CircleShape,
+                                    color = Color(0xFF191920),
+                                    border = BorderStroke(1.dp, Color(0xFF32323E)),
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                                     ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                        ) {
-                                            Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "Sort", tint = NetflixRed, modifier = Modifier.size(16.dp))
-                                            Text(sortOption.displayName, fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                                            Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = NetflixTextMuted, modifier = Modifier.size(16.dp))
-                                        }
-                                    }
-                                    DropdownMenu(
-                                        expanded = showSortMenu,
-                                        onDismissRequest = { showSortMenu = false },
-                                        containerColor = NetflixSurface,
-                                    ) {
-                                        PosterSort.entries.forEach { opt ->
-                                            val chosen = sortOption == opt
-                                            DropdownMenuItem(
-                                                text = {
-                                                    Text(
-                                                        text = opt.displayName,
-                                                        fontWeight = if (chosen) FontWeight.ExtraBold else FontWeight.Medium,
-                                                        color = if (chosen) NetflixRed else Color.White,
-                                                        fontSize = 12.5.sp,
-                                                    )
-                                                },
-                                                leadingIcon = {
-                                                    if (chosen) Icon(Icons.Default.Check, null, tint = NetflixRed, modifier = Modifier.size(16.dp))
-                                                    else Spacer(Modifier.size(16.dp))
-                                                },
-                                                onClick = {
-                                                    sortOption = opt
-                                                    MoviesPreferences.setMyListsSortOption(context, opt.name)
-                                                    showSortMenu = false
-                                                },
-                                            )
-                                        }
+                                        Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "Sort", tint = NetflixRed, modifier = Modifier.size(15.dp))
+                                        Text(sortOption.displayName, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = NetflixTextMuted, modifier = Modifier.size(16.dp))
                                     }
                                 }
-
-                                NetflixChip("All", kindFilter == null) { kindFilter = null }
-                                NetflixChip("Movies", kindFilter == MovieKind.MOVIE) { kindFilter = MovieKind.MOVIE }
-                                NetflixChip("TV Shows", kindFilter == MovieKind.SERIES) { kindFilter = MovieKind.SERIES }
-
-                                if (sortedList.isNotEmpty()) {
-                                    NetflixChip(
-                                        label = "Random",
-                                        selected = false,
-                                        leadingIcon = Icons.Default.Shuffle,
-                                        onClick = { sortedList.randomOrNull()?.let(open) },
-                                    )
-                                    NetflixChip(
-                                        label = if (pickingEnglishRandom) "Checking…" else "Random English",
-                                        selected = false,
-                                        accent = NetflixMatchGreen,
-                                        leadingIcon = Icons.Default.Shuffle,
-                                        onClick = {
-                                            if (pickingEnglishRandom) return@NetflixChip
-                                            scope.launch {
-                                                pickingEnglishRandom = true
-                                                try {
-                                                    val found = sortedList.shuffled().take(8).chunked(4).firstNotNullOfOrNull { batch ->
-                                                        batch.map { item ->
-                                                            async { item.takeIf { attempt { catalog.hasListedEnglishAudio(it) }.getOrDefault(false) } }
-                                                        }.awaitAll().firstOrNull { it != null }
-                                                    }
-                                                    if (found != null) open(found)
-                                                    else Toast.makeText(context, "No confirmed English audio title found in this list.", Toast.LENGTH_SHORT).show()
-                                                } finally {
-                                                    pickingEnglishRandom = false
-                                                }
-                                            }
-                                        },
-                                    )
+                                DropdownMenu(
+                                    expanded = showSortMenu,
+                                    onDismissRequest = { showSortMenu = false },
+                                    containerColor = NetflixSurface,
+                                ) {
+                                    PosterSort.entries.forEach { opt ->
+                                        val chosen = sortOption == opt
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = opt.displayName,
+                                                    fontWeight = if (chosen) FontWeight.ExtraBold else FontWeight.Medium,
+                                                    color = if (chosen) NetflixRed else Color.White,
+                                                    fontSize = 12.5.sp,
+                                                )
+                                            },
+                                            leadingIcon = {
+                                                if (chosen) Icon(Icons.Default.Check, null, tint = NetflixRed, modifier = Modifier.size(16.dp))
+                                                else Spacer(Modifier.size(16.dp))
+                                            },
+                                            onClick = {
+                                                sortOption = opt
+                                                MoviesPreferences.setMyListsSortOption(context, opt.name)
+                                                showSortMenu = false
+                                            },
+                                        )
+                                    }
                                 }
                             }
 
-                            if (sortedList.isEmpty()) {
-                                EmptyState(
-                                    when (activeCat) {
-                                        MoviesLibraryCategory.WATCHING -> "Movies and shows you are currently watching appear here."
-                                        MoviesLibraryCategory.PLAN -> "Tap + My List on any movie or show to save it here."
-                                        MoviesLibraryCategory.COMPLETED -> "Completed movies and series appear here."
-                                        MoviesLibraryCategory.HOLD -> "No titles marked On Hold yet."
-                                        MoviesLibraryCategory.DROPPED -> "No titles marked Dropped."
-                                        else -> "Nothing in this list yet."
-                                    }
-                                )
-                            } else {
-                                PosterGrid(
-                                    titles = sortedList,
-                                    ratings = ratings,
-                                    watchedRefs = watchedRefs,
-                                    open = { item ->
-                                        val prog = recent.firstOrNull { it.title == item.ref }
-                                        if (activeCat == MoviesLibraryCategory.WATCHING && prog != null) resume(item, prog)
-                                        else open(item)
-                                    },
+                            NetflixChip("All", kindFilter == null) { kindFilter = null }
+                            NetflixChip("Movies", kindFilter == MovieKind.MOVIE) { kindFilter = MovieKind.MOVIE }
+                            NetflixChip("TV Shows", kindFilter == MovieKind.SERIES) { kindFilter = MovieKind.SERIES }
+
+                            if (sortedList.isNotEmpty()) {
+                                NetflixChip(
+                                    label = "Random",
+                                    selected = false,
+                                    leadingIcon = Icons.Default.Shuffle,
+                                    onClick = { sortedList.randomOrNull()?.let(open) },
                                 )
                             }
+                        }
+
+                        if (sortedList.isEmpty()) {
+                            EmptyState(
+                                when (activeCat) {
+                                    MoviesLibraryCategory.WATCHING -> "Movies and shows you are currently watching appear here."
+                                    MoviesLibraryCategory.PLAN -> "Tap + My List on any movie or show to save it here."
+                                    MoviesLibraryCategory.COMPLETED -> "Completed movies and series appear here."
+                                    MoviesLibraryCategory.HOLD -> "No titles marked On Hold yet."
+                                    MoviesLibraryCategory.DROPPED -> "No titles marked Dropped."
+                                    else -> "Nothing in this list yet."
+                                }
+                            )
+                        } else {
+                            // Tapping ANY card in My List ALWAYS opens the Info screen (just like Nanami Anime!)
+                            PosterGrid(
+                                titles = sortedList,
+                                ratings = ratings,
+                                watchedRefs = watchedRefs,
+                                open = open,
+                            )
                         }
                     }
                 }
@@ -1105,10 +1023,10 @@ private fun MoviesDownloadsVaultTab(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.padding(28.dp),
             ) {
-                Icon(Icons.Default.CloudDownload, contentDescription = null, tint = NetflixRed, modifier = Modifier.size(44.dp))
+                Icon(Icons.Default.DownloadForOffline, contentDescription = null, tint = NetflixRed, modifier = Modifier.size(46.dp))
                 Text("No Downloads Yet", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 Text(
-                    "Download any movie or TV episode to watch privately offline in Nanami Movies.",
+                    "Tap Download on any movie or episode to watch offline anytime.",
                     color = NetflixTextMuted,
                     fontSize = 13.sp,
                     textAlign = TextAlign.Center,
@@ -1147,7 +1065,7 @@ private fun MoviesDownloadsVaultTab(
                         .clickable { onOpenTitle(parentTitle) },
                 )
                 TextButton(onClick = { onOpenTitle(parentTitle) }) {
-                    Text("Details", color = NetflixRed, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Text("Title Info", color = NetflixRed, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
             }
 
@@ -1189,7 +1107,7 @@ private fun MoviesDownloadsVaultTab(
         Column(modifier = Modifier.fillMaxSize()) {
             if (totalBytes > 0L) {
                 Text(
-                    text = "${downloads.count { it.state == MovieDownloadState.COMPLETE }} saved offline • ${Formatter.formatFileSize(context, totalBytes)}",
+                    text = "${downloads.count { it.state == MovieDownloadState.COMPLETE }} downloaded • ${Formatter.formatFileSize(context, totalBytes)}",
                     fontSize = 12.sp,
                     color = NetflixTextMuted,
                     modifier = Modifier.padding(horizontal = PagePadding, vertical = 8.dp),
@@ -1210,23 +1128,15 @@ private fun MoviesDownloadsVaultTab(
                         activeCount > 0 -> "$readyCount/${group.size} Ready • Downloading…"
                         first.title.kind == MovieKind.MOVIE && readyCount > 0 -> {
                             val bytes = first.progress?.total ?: 0L
-                            "Saved • ${Formatter.formatFileSize(context, bytes)}"
+                            "Downloaded • ${Formatter.formatFileSize(context, bytes)}"
                         }
-                        group.size == 1 -> "1 Episode Saved"
-                        else -> "${group.size} Episodes Saved"
+                        group.size == 1 -> "1 Episode Downloaded"
+                        else -> "${group.size} Episodes Downloaded"
                     }
                     NetflixPosterCard(
                         title = first.title,
                         subtitleOverride = subLabel,
-                        onClick = {
-                            if (first.title.kind == MovieKind.MOVIE && group.size == 1 && first.state == MovieDownloadState.COMPLETE) {
-                                val file = vault.completedFile(context, first)
-                                if (file != null) onPlayOffline(first.title, null, file)
-                                else onSelectSeriesImdb(first.title.imdbId)
-                            } else {
-                                onSelectSeriesImdb(first.title.imdbId)
-                            }
-                        },
+                        onClick = { onSelectSeriesImdb(first.title.imdbId) },
                     )
                 }
             }
@@ -1314,7 +1224,7 @@ private fun VaultDownloadCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                     val statusText = when (item.state) {
-                        MovieDownloadState.COMPLETE -> item.progress?.total?.let { "Saved • ${Formatter.formatFileSize(context, it)}" } ?: "Saved offline"
+                        MovieDownloadState.COMPLETE -> item.progress?.total?.let { "Downloaded • ${Formatter.formatFileSize(context, it)}" } ?: "Downloaded"
                         MovieDownloadState.QUEUED -> "Queued for download"
                         MovieDownloadState.DOWNLOADING -> item.message ?: "Downloading ${(rawPct * 100).toInt()}%"
                         MovieDownloadState.FAILED -> item.message ?: "Download failed"
@@ -1373,7 +1283,7 @@ private fun VaultDownloadCard(
 }
 
 // ============================================================================
-// 3. UNIFIED SEARCH & EXPLORE HUB (Identical UX to Nanami Anime SearchScreen!)
+// 3. UNIFIED SEARCH & EXPLORE HUB (Clean Single-Row Category Strip!)
 // ============================================================================
 @Composable
 internal fun MoviesSearchScreen(
@@ -1384,14 +1294,14 @@ internal fun MoviesSearchScreen(
     isLoggedIn: Boolean,
     username: String,
     hideMature: Boolean,
-    onConnectClick: () -> Unit,
+    @Suppress("UNUSED_PARAMETER") onConnectClick: () -> Unit,
     open: (MovieTitle) -> Unit,
 ) {
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
 
     var query by rememberSaveable { mutableStateOf("") }
-    var kindFilter by rememberSaveable { mutableStateOf<MovieKind?>(null) }
+    var searchKindFilter by rememberSaveable { mutableStateOf<MovieKind?>(null) }
     var selectedCategory by rememberSaveable { mutableStateOf("For You") }
 
     val term = query.trim()
@@ -1400,9 +1310,9 @@ internal fun MoviesSearchScreen(
     var isSearching by remember(term) { mutableStateOf(term.length >= 2) }
     var searchFailed by remember(term) { mutableStateOf(false) }
 
-    var browseItems by remember(selectedCategory, kindFilter) { mutableStateOf<List<MovieTitle>>(emptyList()) }
-    var isBrowseLoading by remember(selectedCategory, kindFilter) { mutableStateOf(true) }
-    var browseFailed by remember(selectedCategory, kindFilter) { mutableStateOf(false) }
+    var browseItems by remember(selectedCategory) { mutableStateOf<List<MovieTitle>>(emptyList()) }
+    var isBrowseLoading by remember(selectedCategory) { mutableStateOf(true) }
+    var browseFailed by remember(selectedCategory) { mutableStateOf(false) }
     var browseRetry by remember { mutableIntStateOf(0) }
 
     fun dismissKeyboard() {
@@ -1429,25 +1339,26 @@ internal fun MoviesSearchScreen(
         (recent.map(WatchProgress::title) + saved).distinct().take(6)
     }
 
-    LaunchedEffect(term.isEmpty(), selectedCategory, kindFilter, browseRetry, seedRefs) {
+    LaunchedEffect(term.isEmpty(), selectedCategory, browseRetry, seedRefs) {
         if (term.isNotEmpty()) return@LaunchedEffect
         isBrowseLoading = true
         browseFailed = false
-        val kinds = kindFilter?.let(::listOf) ?: MovieKind.entries
         attempt {
             when (selectedCategory) {
                 "For You" -> {
                     val seedGenre = if (seedRefs.isNotEmpty()) {
                         catalog.resolve(seedRefs.take(3)).flatMap(MovieTitle::genres).firstOrNull()
                     } else null
-                    kinds.map { k -> async { catalog.discover(k, MovieFeed.POPULAR, genre = seedGenre).titles.take(20) } }
+                    MovieKind.entries.map { k -> async { catalog.discover(k, MovieFeed.POPULAR, genre = seedGenre).titles.take(20) } }
                         .awaitAll().flatten()
                 }
-                "Trending Now" -> kinds.map { k -> async { catalog.discover(k, MovieFeed.POPULAR).titles.take(20) } }.awaitAll().flatten()
-                "New Releases" -> kinds.map { k -> async { catalog.discover(k, MovieFeed.NEW).titles.take(20) } }.awaitAll().flatten()
-                "Top Rated" -> kinds.map { k -> async { catalog.discover(k, MovieFeed.TOP_RATED).titles.take(20) } }.awaitAll().flatten()
-                "Cartoons & Animation" -> kinds.map { k -> async { catalog.discover(k, MovieFeed.POPULAR, genre = "Animation").titles.take(20) } }.awaitAll().flatten()
-                else -> kinds.map { k -> async { catalog.discover(k, MovieFeed.POPULAR, genre = selectedCategory).titles.take(20) } }.awaitAll().flatten()
+                "Trending Now" -> MovieKind.entries.map { k -> async { catalog.discover(k, MovieFeed.POPULAR).titles.take(20) } }.awaitAll().flatten()
+                "New Releases" -> MovieKind.entries.map { k -> async { catalog.discover(k, MovieFeed.NEW).titles.take(20) } }.awaitAll().flatten()
+                "Top Rated" -> MovieKind.entries.map { k -> async { catalog.discover(k, MovieFeed.TOP_RATED).titles.take(20) } }.awaitAll().flatten()
+                "Movies" -> catalog.discover(MovieKind.MOVIE, MovieFeed.POPULAR).titles.take(36)
+                "TV Shows" -> catalog.discover(MovieKind.SERIES, MovieFeed.POPULAR).titles.take(36)
+                "Cartoons" -> MovieKind.entries.map { k -> async { catalog.discover(k, MovieFeed.POPULAR, genre = "Animation").titles.take(20) } }.awaitAll().flatten()
+                else -> MovieKind.entries.map { k -> async { catalog.discover(k, MovieFeed.POPULAR, genre = selectedCategory).titles.take(20) } }.awaitAll().flatten()
             }.distinctBy(MovieTitle::ref)
         }.onSuccess { browseItems = it }
             .onFailure { browseFailed = true }
@@ -1467,7 +1378,7 @@ internal fun MoviesSearchScreen(
                 onValueChange = { query = it },
                 placeholder = {
                     Text(
-                        text = "Search movies, TV shows, cartoons…",
+                        text = "Search movies, TV shows & cartoons…",
                         color = NetflixTextMuted,
                         fontSize = 13.5.sp,
                         maxLines = 1,
@@ -1500,29 +1411,17 @@ internal fun MoviesSearchScreen(
                 singleLine = true,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 8.dp),
+                    .padding(top = 8.dp, bottom = 10.dp),
             )
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                NetflixChip("All", kindFilter == null) { kindFilter = null }
-                NetflixChip("Movies", kindFilter == MovieKind.MOVIE) { kindFilter = MovieKind.MOVIE }
-                NetflixChip("TV Shows", kindFilter == MovieKind.SERIES) { kindFilter = MovieKind.SERIES }
-            }
 
             AnimatedContent(
                 targetState = term.length < 2,
-                transitionSpec = { fadeIn(tween(160)) togetherWith fadeOut(tween(120)) },
+                transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(130)) },
                 label = "movies_search_or_browse",
                 modifier = Modifier.fillMaxSize(),
             ) { showingBrowseHub ->
                 if (showingBrowseHub) {
-                    val visibleBrowse = browseItems.visible(hideMature).filter { kindFilter == null || it.kind == kindFilter }
+                    val visibleBrowse = browseItems.visible(hideMature)
                     LazyVerticalGrid(
                         columns = GridCells.Adaptive(134.dp),
                         modifier = Modifier.fillMaxSize(),
@@ -1530,6 +1429,7 @@ internal fun MoviesSearchScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
+                        // Single Clean Category Strip (No stacked duplicate filter rows!)
                         item(span = { GridItemSpan(maxLineSpan) }, key = "search_categories_bar") {
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 items(browseCategories, key = { it }) { cat ->
@@ -1547,7 +1447,7 @@ internal fun MoviesSearchScreen(
                                 selectedCategory != "For You" -> selectedCategory
                                 isLoggedIn -> "For You, @$username"
                                 seedRefs.isNotEmpty() -> "Recommended From Your List"
-                                else -> "Top Picks on Nanami Movies"
+                                else -> "Top Picks"
                             }
                             Text(
                                 text = heading,
@@ -1558,33 +1458,16 @@ internal fun MoviesSearchScreen(
                             )
                         }
 
-                        if (!isLoggedIn && seedRefs.isEmpty() && selectedCategory == "For You") {
-                            item(span = { GridItemSpan(maxLineSpan) }, key = "search_guest_hint") {
-                                NetflixCard(modifier = Modifier.fillMaxWidth()) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Text(
-                                            text = "Save titles to My List or connect SIMKL to personalize For You.",
-                                            color = NetflixTextMuted,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            modifier = Modifier.weight(1f),
-                                        )
-                                        TextButton(onClick = onConnectClick) {
-                                            Text("Connect", color = NetflixRed, fontWeight = FontWeight.Bold)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
                         when {
-                            isBrowseLoading -> item(span = { GridItemSpan(maxLineSpan) }, key = "browse_spin") {
-                                Box(Modifier.fillMaxWidth().padding(vertical = 48.dp), contentAlignment = Alignment.Center) {
-                                    CircularProgressIndicator(color = NetflixRed)
-                                }
+                            isBrowseLoading -> items(6, key = { "shimmer_$it" }) {
+                                val shimmer = rememberShimmerBrush()
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .aspectRatio(2f / 3f)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(shimmer),
+                                )
                             }
                             browseFailed -> item(span = { GridItemSpan(maxLineSpan) }, key = "browse_err") {
                                 EmptyState("Couldn't load this category.") { browseRetry++ }
@@ -1593,33 +1476,50 @@ internal fun MoviesSearchScreen(
                                 EmptyState("No titles matched in this category.")
                             }
                             else -> items(visibleBrowse, key = { "br_${it.ref.key}" }) { item ->
-                                NetflixPosterCard(
-                                    title = item,
-                                    userRating = ratings[item.ref] ?: 0,
-                                    onClick = {
-                                        dismissKeyboard()
-                                        open(item)
-                                    },
-                                )
+                                Box(modifier = Modifier.animateItem()) {
+                                    NetflixPosterCard(
+                                        title = item,
+                                        userRating = ratings[item.ref] ?: 0,
+                                        onClick = {
+                                            dismissKeyboard()
+                                            open(item)
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
                 } else {
-                    val visibleSearch = searchResults.visible(hideMature).filter { kindFilter == null || it.kind == kindFilter }
-                    when {
-                        isSearching -> Loading()
-                        searchFailed -> EmptyState("Couldn't search right now.") { searchSubmit++ }
-                        visibleSearch.isEmpty() -> EmptyState("No movies or TV shows found for “$term”.")
-                        else -> PosterGrid(
-                            titles = visibleSearch,
-                            ratings = ratings,
-                            watchedRefs = emptySet(),
-                            open = {
-                                dismissKeyboard()
-                                open(it)
-                            },
-                            contentPadding = PaddingValues(top = 6.dp, bottom = 28.dp),
-                        )
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            NetflixChip("All", searchKindFilter == null) { searchKindFilter = null }
+                            NetflixChip("Movies", searchKindFilter == MovieKind.MOVIE) { searchKindFilter = MovieKind.MOVIE }
+                            NetflixChip("TV Shows", searchKindFilter == MovieKind.SERIES) { searchKindFilter = MovieKind.SERIES }
+                        }
+
+                        val visibleSearch = searchResults.visible(hideMature)
+                            .filter { searchKindFilter == null || it.kind == searchKindFilter }
+                        when {
+                            isSearching -> Loading()
+                            searchFailed -> EmptyState("Couldn't search right now.") { searchSubmit++ }
+                            visibleSearch.isEmpty() -> EmptyState("No movies or TV shows found for “$term”.")
+                            else -> PosterGrid(
+                                titles = visibleSearch,
+                                ratings = ratings,
+                                watchedRefs = emptySet(),
+                                open = {
+                                    dismissKeyboard()
+                                    open(it)
+                                },
+                                contentPadding = PaddingValues(top = 6.dp, bottom = 28.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -1628,7 +1528,7 @@ internal fun MoviesSearchScreen(
 }
 
 // ============================================================================
-// 4. SHARED SHELVES, COLLECTION DRILLDOWN & UPCOMING
+// 4. SHARED SHELVES & COLLECTION DRILLDOWN
 // ============================================================================
 @Composable
 private fun MovieCollectionScreen(
@@ -1707,7 +1607,7 @@ internal fun TitleShelf(
     titles: List<MovieTitle>,
     ratings: Map<TitleRef, Int> = emptyMap(),
     watchedRefs: Set<TitleRef> = emptySet(),
-    posterWidth: androidx.compose.ui.unit.Dp = 138.dp,
+    posterWidth: androidx.compose.ui.unit.Dp = 142.dp,
     more: (() -> Unit)? = null,
     open: (MovieTitle) -> Unit,
 ) {
@@ -1743,13 +1643,15 @@ internal fun TitleShelf(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             items(titles, key = { it.ref.key }) { title ->
-                NetflixPosterCard(
-                    title = title,
-                    userRating = ratings[title.ref] ?: 0,
-                    watched = title.ref in watchedRefs,
-                    onClick = { open(title) },
-                    modifier = Modifier.width(posterWidth),
-                )
+                Box(modifier = Modifier.animateItem()) {
+                    NetflixPosterCard(
+                        title = title,
+                        userRating = ratings[title.ref] ?: 0,
+                        watched = title.ref in watchedRefs,
+                        onClick = { open(title) },
+                        modifier = Modifier.width(posterWidth),
+                    )
+                }
             }
         }
     }
@@ -1772,80 +1674,18 @@ private fun PosterGrid(
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         items(titles, key = { it.ref.key }) { title ->
-            NetflixPosterCard(
-                title = title,
-                userRating = ratings[title.ref] ?: 0,
-                watched = title.ref in watchedRefs,
-                onClick = { open(title) },
-            )
+            Box(modifier = Modifier.animateItem()) {
+                NetflixPosterCard(
+                    title = title,
+                    userRating = ratings[title.ref] ?: 0,
+                    watched = title.ref in watchedRefs,
+                    onClick = { open(title) },
+                )
+            }
         }
         if (footer != null) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Box(Modifier.fillMaxWidth().padding(10.dp), contentAlignment = Alignment.Center) { footer() }
-            }
-        }
-    }
-}
-
-@Composable
-private fun UpcomingReleases(titles: List<MovieTitle>, open: (MovieTitle) -> Unit) {
-    val upcoming = remember(titles) {
-        titles.mapNotNull { title ->
-            val episode = title.episodes.filterNot(MovieEpisode::available).minByOrNull { it.releasedAt ?: Instant.MAX }
-            val whenReleased = if (title.kind == MovieKind.MOVIE && !title.available) title.releasedAt else episode?.releasedAt
-            whenReleased?.let { Triple(title, episode, it) }
-        }.sortedBy { it.third }
-    }
-    if (upcoming.isEmpty()) {
-        EmptyState("Upcoming episodes and movies from My List will appear here.")
-        return
-    }
-    val date = remember {
-        java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.MEDIUM)
-            .withZone(java.time.ZoneId.systemDefault())
-    }
-    LazyColumn(
-        contentPadding = PaddingValues(PagePadding),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        items(upcoming, key = { it.first.ref.key }) { (title, episode, released) ->
-            NetflixCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .pressableClick { open(title) },
-            ) {
-                Row(
-                    modifier = Modifier.padding(10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    CrossfadeArtwork(
-                        model = episode?.thumbnail ?: title.backdrop ?: title.poster,
-                        contentDescription = title.title,
-                        modifier = Modifier
-                            .width(116.dp)
-                            .aspectRatio(16f / 9f)
-                            .clip(RoundedCornerShape(4.dp)),
-                    )
-                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text(title.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                        if (episode != null) {
-                            Text(
-                                "S${episode.season}:E${episode.episode} • ${episode.title}",
-                                color = NetflixTextMuted,
-                                fontSize = 12.sp,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        Text(
-                            text = "Coming ${date.format(released)}",
-                            color = NetflixRed,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.5.sp,
-                        )
-                    }
-                }
             }
         }
     }

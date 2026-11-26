@@ -1,8 +1,14 @@
 package io.maru.movies
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -16,13 +22,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeJoin
@@ -38,15 +43,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.compose.AsyncImagePainter
 import coil.request.ImageRequest
+import io.maru.manime.extensions.StremioAddonClient
 import java.util.Locale
 
 // Authentic Netflix Cinema OLED Pitch Black & Tudum Crimson Palette
 internal val NetflixBlack = Color(0xFF000000)
-internal val NetflixSurface = Color(0xFF101013)
-internal val NetflixCardBg = Color(0xFF18181D)
+internal val NetflixSurface = Color(0xFF101014)
+internal val NetflixCardBg = Color(0xFF17171C)
 internal val NetflixElevated = Color(0xFF222229)
-internal val NetflixBorder = Color(0xFF2A2A33)
+internal val NetflixBorder = Color(0xFF282832)
 internal val NetflixRed = Color(0xFFE50914)
 internal val NetflixRedBright = Color(0xFFF40612)
 internal val NetflixMatchGreen = Color(0xFF46D369)
@@ -106,7 +113,7 @@ internal fun deriveMovieAdvisory(title: MovieTitle): MovieContentAdvisory {
 
 internal fun Modifier.pressableClick(
     enabled: Boolean = true,
-    pressedScale: Float = 0.965f,
+    pressedScale: Float = 0.962f,
     role: Role? = Role.Button,
     onClick: () -> Unit,
 ): Modifier = composed {
@@ -135,6 +142,33 @@ internal fun Modifier.pressableClick(
 }
 
 @Composable
+internal fun rememberShimmerBrush(): Brush {
+    val transition = rememberInfiniteTransition(label = "netflix_shimmer")
+    val translate by transition.animateFloat(
+        initialValue = -300f,
+        targetValue = 900f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1150, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "shimmer_x",
+    )
+    return Brush.linearGradient(
+        colors = listOf(
+            Color(0xFF15151A),
+            Color(0xFF23232C),
+            Color(0xFF15151A),
+        ),
+        start = Offset(translate, translate * 0.4f),
+        end = Offset(translate + 280f, (translate + 280f) * 0.4f),
+    )
+}
+
+/**
+ * Poster & backdrop image loader with smooth crossfade and shimmer skeleton while loading.
+ * Do NOT use this for transparent clear-logos; use [ClearLogoImage] instead!
+ */
+@Composable
 internal fun CrossfadeArtwork(
     model: Any?,
     contentDescription: String? = null,
@@ -142,19 +176,100 @@ internal fun CrossfadeArtwork(
     contentScale: ContentScale = ContentScale.Crop,
 ) {
     val context = LocalContext.current
-    Box(modifier.background(NetflixCardBg)) {
+    var loaded by remember(model) { mutableStateOf(false) }
+    val shimmer = rememberShimmerBrush()
+
+    Box(modifier = modifier.background(if (loaded) NetflixCardBg else Color.Transparent)) {
+        if (!loaded) {
+            Box(modifier = Modifier.fillMaxSize().background(shimmer))
+        }
         if (model != null) {
             val request = remember(model, context) {
                 ImageRequest.Builder(context)
                     .data(model)
-                    .crossfade(220)
+                    .addHeader("User-Agent", StremioAddonClient.BROWSER_UA)
+                    .crossfade(260)
                     .build()
             }
             AsyncImage(
                 model = request,
                 contentDescription = contentDescription,
                 contentScale = contentScale,
+                onState = { state ->
+                    if (state is AsyncImagePainter.State.Success) loaded = true
+                },
                 modifier = Modifier.fillMaxSize(),
+            )
+        }
+    }
+}
+
+/**
+ * Transparent clear-logo renderer for movie/series title logos (`title.logo`).
+ * Strictly 100% transparent background (zero dark bar behind logos!) and falls back
+ * gracefully to clean typography if the logo is absent or fails to load.
+ */
+@Composable
+internal fun ClearLogoImage(
+    logoUrl: String?,
+    titleFallback: String,
+    modifier: Modifier = Modifier,
+    fallbackFontSize: Int = 26,
+) {
+    val context = LocalContext.current
+    var loadFailed by remember(logoUrl) { mutableStateOf(logoUrl.isNullOrBlank()) }
+    var loaded by remember(logoUrl) { mutableStateOf(false) }
+    val alpha by animateFloatAsState(
+        targetValue = if (loaded) 1f else 0f,
+        animationSpec = tween(240),
+        label = "logo_alpha",
+    )
+
+    if (logoUrl.isNullOrBlank() || loadFailed) {
+        Text(
+            text = titleFallback,
+            fontSize = fallbackFontSize.sp,
+            fontWeight = FontWeight.Black,
+            color = Color.White,
+            lineHeight = (fallbackFontSize + 5).sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    } else {
+        val request = remember(logoUrl, context) {
+            ImageRequest.Builder(context)
+                .data(logoUrl)
+                .addHeader("User-Agent", StremioAddonClient.BROWSER_UA)
+                .crossfade(220)
+                .build()
+        }
+        Box(modifier = modifier, contentAlignment = Alignment.BottomStart) {
+            if (!loaded) {
+                Text(
+                    text = titleFallback,
+                    fontSize = fallbackFontSize.sp,
+                    fontWeight = FontWeight.Black,
+                    color = Color.White.copy(alpha = 0.85f),
+                    lineHeight = (fallbackFontSize + 5).sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            AsyncImage(
+                model = request,
+                contentDescription = titleFallback,
+                contentScale = ContentScale.Fit,
+                alignment = Alignment.BottomStart,
+                onState = { state ->
+                    when (state) {
+                        is AsyncImagePainter.State.Success -> loaded = true
+                        is AsyncImagePainter.State.Error -> loadFailed = true
+                        else -> Unit
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { this.alpha = alpha },
             )
         }
     }
@@ -257,17 +372,19 @@ internal fun NetflixChip(
     selected: Boolean,
     accent: Color = NetflixRed,
     leadingIcon: ImageVector? = null,
+    pill: Boolean = true,
     onClick: () -> Unit,
 ) {
     val selectedTextColor = if (accent == NetflixWhite || accent == NetflixGold || accent == NetflixMatchGreen) Color.Black else Color.White
+    val shape = if (pill) CircleShape else RoundedCornerShape(6.dp)
     Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(6.dp),
-        color = if (selected) accent else NetflixCardBg,
-        border = BorderStroke(1.dp, if (selected) accent else NetflixBorder),
+        shape = shape,
+        color = if (selected) accent else Color(0xFF191920),
+        border = BorderStroke(1.dp, if (selected) accent else Color(0xFF32323E)),
+        modifier = Modifier.pressableClick(pressedScale = 0.94f, onClick = onClick),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(5.dp),
         ) {
@@ -281,9 +398,9 @@ internal fun NetflixChip(
             }
             Text(
                 text = label,
-                fontSize = 12.sp,
+                fontSize = 12.5.sp,
                 fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.SemiBold,
-                color = if (selected) selectedTextColor else Color.White,
+                color = if (selected) selectedTextColor else Color(0xFFE6E8F0),
                 maxLines = 1,
                 softWrap = false,
             )
@@ -339,7 +456,7 @@ internal fun NetflixContinueCard(
     modifier: Modifier = Modifier,
 ) {
     val rawFrac = if (progress.duration > 0L) {
-        (progress.position.toFloat() / progress.duration).coerceIn(0.03f, 1f)
+        (progress.position.toFloat() / progress.duration).coerceIn(0.04f, 1f)
     } else 0f
     val animFrac by animateFloatAsState(
         targetValue = rawFrac,
@@ -350,14 +467,14 @@ internal fun NetflixContinueCard(
 
     Column(
         modifier = modifier
-            .width(196.dp)
+            .width(198.dp)
             .pressableClick(onClick = onClick),
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
-                .clip(RoundedCornerShape(topStart = 5.dp, topEnd = 5.dp))
+                .clip(RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp))
                 .background(NetflixCardBg),
         ) {
             CrossfadeArtwork(
@@ -381,14 +498,14 @@ internal fun NetflixContinueCard(
                 border = BorderStroke(1.5.dp, Color.White),
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .size(38.dp),
+                    .size(40.dp),
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         Icons.Default.PlayArrow,
                         contentDescription = "Resume",
                         tint = Color.White,
-                        modifier = Modifier.size(22.dp),
+                        modifier = Modifier.size(23.dp),
                     )
                 }
             }
@@ -428,11 +545,11 @@ internal fun NetflixContinueCard(
 
         Surface(
             color = NetflixCardBg,
-            shape = RoundedCornerShape(bottomStart = 5.dp, bottomEnd = 5.dp),
+            shape = RoundedCornerShape(bottomStart = 6.dp, bottomEnd = 6.dp),
             modifier = Modifier.fillMaxWidth(),
         ) {
             Column(
-                modifier = Modifier.padding(horizontal = 9.dp, vertical = 7.dp),
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 Text(
@@ -451,7 +568,7 @@ internal fun NetflixContinueCard(
                         } else if (remainingMin > 0L) {
                             append("${remainingMin}m remaining")
                         } else {
-                            append("Resume playback")
+                            append("Resume")
                         }
                     },
                     fontSize = 11.sp,
@@ -501,7 +618,7 @@ internal fun NetflixPosterCard(
                     .fillMaxWidth()
                     .padding(start = if (rankNumber != null) 22.dp else 0.dp)
                     .aspectRatio(2f / 3f)
-                    .clip(RoundedCornerShape(5.dp))
+                    .clip(RoundedCornerShape(6.dp))
                     .background(NetflixCardBg),
             ) {
                 CrossfadeArtwork(
@@ -510,14 +627,14 @@ internal fun NetflixPosterCard(
                     modifier = Modifier.fillMaxSize(),
                 )
 
-                if (rankNumber != null || (title.rating ?: 0.0) >= 8.0) {
+                if (rankNumber != null) {
                     Surface(
                         color = NetflixRed,
                         shape = RoundedCornerShape(bottomEnd = 5.dp),
                         modifier = Modifier.align(Alignment.TopStart),
                     ) {
                         Text(
-                            text = if (rankNumber != null) "TOP 10" else "HD",
+                            text = "TOP 10",
                             color = Color.White,
                             fontSize = 8.5.sp,
                             fontWeight = FontWeight.Black,

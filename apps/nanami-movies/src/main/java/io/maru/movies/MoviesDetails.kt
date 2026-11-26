@@ -1,8 +1,12 @@
 package io.maru.movies
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -31,7 +35,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -73,7 +76,7 @@ internal fun MovieDetails(
     var chosenSeason by rememberSaveable(preview.ref.key) { mutableStateOf<Int?>(null) }
     var downloadDialog by remember { mutableStateOf(false) }
     var ratingDialog by remember(preview.ref) { mutableStateOf(false) }
-    var statusMenu by remember(preview.ref) { mutableStateOf(false) }
+    var listMenu by remember(preview.ref) { mutableStateOf(false) }
     var expandedOverview by rememberSaveable(preview.ref.key) { mutableStateOf(false) }
     var detailsTab by rememberSaveable(preview.ref.key) {
         mutableStateOf(if (preview.kind == MovieKind.SERIES) DetailsTab.EPISODES else DetailsTab.RELATED)
@@ -181,17 +184,20 @@ internal fun MovieDetails(
         )
     }
 
+    val isListed = saved || watchStatus != null
+    val activeListLabel = watchStatus?.label ?: if (saved) "In My List" else "My List"
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
             .background(NetflixBlack),
         verticalArrangement = Arrangement.spacedBy(14.dp),
-        contentPadding = PaddingValues(bottom = 32.dp),
+        contentPadding = PaddingValues(bottom = 36.dp),
     ) {
-        // 1. Cinematic Edge-to-Edge Backdrop Header
+        // 1. Crisp 1080p Edge-to-Edge Backdrop + Poster & Title Header (Matching Nanami Anime's clean polish!)
         item(key = "detail_hero") {
             BoxWithConstraints(Modifier.fillMaxWidth()) {
-                val heroHeight = if (maxWidth >= 600.dp) 340.dp else 265.dp
+                val heroHeight = if (maxWidth >= 600.dp) 350.dp else 290.dp
                 Box(Modifier.fillMaxWidth().height(heroHeight)) {
                     if (!blocked) {
                         CrossfadeArtwork(
@@ -205,9 +211,9 @@ internal fun MovieDetails(
                             .fillMaxSize()
                             .background(
                                 Brush.verticalGradient(
-                                    0f to Color(0x66000000),
-                                    0.45f to Color(0x22000000),
-                                    0.82f to Color(0xDE000000),
+                                    0f to Color(0x55000000),
+                                    0.40f to Color(0x66000000),
+                                    0.78f to Color(0xE8000000),
                                     1f to NetflixBlack,
                                 ),
                             ),
@@ -222,89 +228,99 @@ internal fun MovieDetails(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                     }
 
-                    if (!blocked && !title.logo.isNullOrBlank()) {
-                        CrossfadeArtwork(
-                            model = title.logo,
-                            contentDescription = title.title,
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier
-                                .align(Alignment.BottomStart)
-                                .padding(horizontal = PagePadding, vertical = 10.dp)
-                                .height(54.dp)
-                                .widthIn(max = 260.dp)
-                                .background(Color.Transparent),
-                        )
+                    // Crisp side-by-side Poster + Single Clean Title (zero black logo box, zero duplicate titles!)
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .padding(horizontal = PagePadding, vertical = 6.dp),
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        if (!blocked && !title.poster.isNullOrBlank()) {
+                            Box(
+                                modifier = Modifier
+                                    .width(96.dp)
+                                    .aspectRatio(2f / 3f)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(NetflixCardBg),
+                            ) {
+                                CrossfadeArtwork(
+                                    model = title.poster,
+                                    contentDescription = title.title,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            }
+                        }
+
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = title.title,
+                                fontSize = 23.sp,
+                                fontWeight = FontWeight.Black,
+                                color = Color.White,
+                                lineHeight = 27.sp,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+
+                            val metaParts = remember(title, seasons, hasEnglishAudio) {
+                                buildList {
+                                    title.rating?.takeIf { it > 0 }?.let { score ->
+                                        add("★ " + String.format(Locale.US, "%.1f", score))
+                                    }
+                                    title.year?.takeIf(String::isNotBlank)?.let(::add)
+                                    if (title.kind == MovieKind.MOVIE) {
+                                        title.runtime?.takeIf(String::isNotBlank)?.let(::add)
+                                    } else if (seasons.any { it > 0 }) {
+                                        val count = seasons.count { it > 0 }
+                                        add("$count " + if (count == 1) "Season" else "Seasons")
+                                    }
+                                    if (hasEnglishAudio == true) add("English")
+                                }
+                            }
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                title.rating?.takeIf { it > 0 }?.let { score ->
+                                    val match = (score * 10).toInt().coerceIn(75, 99)
+                                    Text(
+                                        text = "$match% Match",
+                                        color = NetflixMatchGreen,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 12.5.sp,
+                                    )
+                                }
+                                if (metaParts.isNotEmpty()) {
+                                    Text(
+                                        text = metaParts.joinToString("  •  "),
+                                        color = Color(0xFFD5D7E0),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+
+                            NetflixAdvisoryRow(advisory = advisory, compact = true)
+                        }
                     }
                 }
             }
         }
 
-        // 2. Title, Metadata, Stacked Netflix Play + Download CTAs, Synopsis & Quick Actions
+        // 2. Play + Download CTAs, Synopsis & Clean Unified Action Bar
         item(key = "detail_meta") {
             Column(
                 modifier = Modifier.padding(horizontal = PagePadding),
-                verticalArrangement = Arrangement.spacedBy(11.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Surface(color = NetflixRed, shape = RoundedCornerShape(2.dp)) {
-                        Text(
-                            text = "N",
-                            color = Color.White,
-                            fontWeight = FontWeight.Black,
-                            fontSize = 10.sp,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
-                        )
-                    }
-                    Text(
-                        text = if (title.kind == MovieKind.SERIES) "SERIES" else "FILM",
-                        color = NetflixTextMuted,
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 11.sp,
-                        letterSpacing = 1.4.sp,
-                    )
-                }
-
-                Text(
-                    text = title.title,
-                    fontSize = 25.sp,
-                    fontWeight = FontWeight.Black,
-                    color = Color.White,
-                    lineHeight = 30.sp,
-                )
-
-                // Match %, Year, IMDb Score, Seasons, Audio Badge
-                Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    title.rating?.takeIf { it > 0 }?.let { score ->
-                        val match = (score * 10).toInt().coerceIn(75, 99)
-                        Text(
-                            text = "$match% Match",
-                            color = NetflixMatchGreen,
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 13.sp,
-                        )
-                        DetailBadge("★ " + String.format(Locale.US, "%.1f", score), accent = NetflixGold)
-                    }
-                    title.year?.let { DetailBadge(it) }
-                    title.runtime?.takeIf { title.kind == MovieKind.MOVIE }?.let { DetailBadge(it) }
-                    if (seasons.any { it > 0 }) {
-                        val count = seasons.count { it > 0 }
-                        DetailBadge("$count " + if (count == 1) "Season" else "Seasons")
-                    }
-                    if (hasEnglishAudio == true) {
-                        DetailBadge("English Audio", accent = NetflixMatchGreen)
-                    }
-                    DetailBadge("HD")
-                }
-
-                NetflixAdvisoryRow(advisory = advisory)
-
                 if (blocked) {
                     Text("Hidden by your maturity setting in Account preferences.", color = NetflixTextMuted)
                     return@Column
@@ -330,6 +346,7 @@ internal fun MovieDetails(
                         Spacer(Modifier.width(6.dp))
                         Text(
                             text = when {
+                                details == null -> "Loading…"
                                 resume != null && resumeEpisode != null -> "Resume S${resumeEpisode.season}:E${resumeEpisode.episode}"
                                 resume != null -> "Resume"
                                 firstEpisode != null -> "Play S${firstEpisode.season}:E${firstEpisode.episode}"
@@ -370,9 +387,10 @@ internal fun MovieDetails(
                             Spacer(Modifier.width(6.dp))
                             Text(
                                 text = when {
-                                    movieDownloaded -> "Downloaded Offline"
+                                    movieDownloaded -> "Downloaded"
                                     title.kind == MovieKind.MOVIE -> "Download"
-                                    else -> "Download Season ${activeSeason ?: 1}"
+                                    downloadableEpisodes.isNotEmpty() -> "Download Unwatched (${downloadableEpisodes.size})"
+                                    else -> "Season Downloaded"
                                 },
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 14.sp,
@@ -400,7 +418,7 @@ internal fun MovieDetails(
                     }
                 }
 
-                // Synopsis
+                // Synopsis with smooth expansion
                 title.overview?.takeIf(String::isNotBlank)?.let { synopsis ->
                     Column(modifier = Modifier.animateContentSize()) {
                         Text(
@@ -412,9 +430,9 @@ internal fun MovieDetails(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.clickable { expandedOverview = !expandedOverview },
                         )
-                        if (synopsis.length > 165) {
+                        if (synopsis.length > 160) {
                             Text(
-                                text = if (expandedOverview) "Less" else "More",
+                                text = if (expandedOverview) "Show less" else "More",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = NetflixTextMuted,
@@ -426,7 +444,6 @@ internal fun MovieDetails(
                     }
                 }
 
-                // Compact Cast & Director Preview Line (Netflix Style)
                 if (title.cast.isNotEmpty()) {
                     Text(
                         text = "Starring: " + title.cast.take(4).joinToString(", "),
@@ -446,38 +463,38 @@ internal fun MovieDetails(
                     )
                 }
 
-                // Netflix Action Icon Bar (+ My List | Status | Rate | Watched | Trailer)
+                // Clean, Unconfusing Action Row (Unified My List + Rate + Watched + Optional Trailer!)
                 if (verified != null) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(20.dp),
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        NetflixActionIcon(
-                            icon = if (saved) Icons.Default.Check else Icons.Default.Add,
-                            label = "My List",
-                            tint = if (saved) NetflixRed else Color.White,
-                            onClick = onSave,
-                        )
-
-                        if (onWatchStatus != null) {
-                            Box {
-                                NetflixActionIcon(
-                                    icon = Icons.Default.BookmarkBorder,
-                                    label = watchStatus?.label ?: "Status",
-                                    tint = if (watchStatus != null) NetflixRed else Color.White,
-                                    onClick = { statusMenu = true },
-                                )
-                                DropdownMenu(
-                                    expanded = statusMenu,
-                                    onDismissRequest = { statusMenu = false },
-                                    containerColor = NetflixSurface,
-                                ) {
+                        Box {
+                            NetflixActionIcon(
+                                icon = if (isListed) Icons.Default.Check else Icons.Default.Add,
+                                label = activeListLabel,
+                                tint = if (isListed) NetflixRed else Color.White,
+                                onClick = {
+                                    if (!isListed && onWatchStatus == null) {
+                                        onSave()
+                                    } else if (!isListed) {
+                                        onSave()
+                                    } else {
+                                        listMenu = true
+                                    }
+                                },
+                            )
+                            DropdownMenu(
+                                expanded = listMenu,
+                                onDismissRequest = { listMenu = false },
+                                containerColor = NetflixSurface,
+                            ) {
+                                if (onWatchStatus != null) {
                                     MovieWatchStatus.entries.forEach { status ->
-                                        val isCurrent = status == watchStatus
+                                        val isCurrent = status == watchStatus || (watchStatus == null && saved && status == MovieWatchStatus.PLAN)
                                         DropdownMenuItem(
                                             text = {
                                                 Text(
@@ -490,11 +507,21 @@ internal fun MovieDetails(
                                                 { Icon(Icons.Default.Check, null, tint = NetflixRed) }
                                             } else null,
                                             onClick = {
-                                                statusMenu = false
+                                                listMenu = false
                                                 onWatchStatus(title, status)
                                             },
                                         )
                                     }
+                                    HorizontalDivider(color = NetflixBorder)
+                                }
+                                if (saved) {
+                                    DropdownMenuItem(
+                                        text = { Text("Remove from My List", color = MaterialTheme.colorScheme.error) },
+                                        onClick = {
+                                            listMenu = false
+                                            onSave()
+                                        },
+                                    )
                                 }
                             }
                         }
@@ -512,7 +539,7 @@ internal fun MovieDetails(
                             val watched = progressFor(null)?.completed == true
                             NetflixActionIcon(
                                 icon = if (watched) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                                label = if (watched) "Watched" else "Mark Seen",
+                                label = if (watched) "Watched" else "Mark Watched",
                                 tint = if (watched) NetflixMatchGreen else Color.White,
                                 onClick = { onWatched(title, null, !watched) },
                             )
@@ -530,7 +557,7 @@ internal fun MovieDetails(
 
                 when {
                     details == null -> LinearProgressIndicator(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().height(2.5.dp),
                         color = NetflixRed,
                         trackColor = NetflixBorder,
                     )
@@ -540,7 +567,7 @@ internal fun MovieDetails(
                     verified == null -> Text("This title is currently unavailable.", color = NetflixTextMuted)
                     title.kind == MovieKind.SERIES && seasons.isEmpty() -> Text("No episodes are listed yet.", color = NetflixTextMuted)
                     title.kind == MovieKind.MOVIE && !title.available -> Text(
-                        "Scheduled release: " + title.releasedAt?.toString()?.take(10).orEmpty(),
+                        "Releases " + title.releasedAt?.toString()?.take(10).orEmpty(),
                         color = NetflixRed,
                         fontWeight = FontWeight.Bold,
                     )
@@ -565,13 +592,13 @@ internal fun MovieDetails(
                             .fillMaxWidth()
                             .padding(horizontal = PagePadding)
                             .selectableGroup(),
-                        horizontalArrangement = Arrangement.spacedBy(20.dp),
+                        horizontalArrangement = Arrangement.spacedBy(22.dp),
                     ) {
                         visibleTabs.forEach { tab ->
                             val selected = activeTab == tab
                             val barColor by animateColorAsState(
                                 targetValue = if (selected) NetflixRed else Color.Transparent,
-                                animationSpec = tween(180),
+                                animationSpec = tween(200),
                                 label = "detail_tab_bar",
                             )
                             Column(
@@ -586,7 +613,9 @@ internal fun MovieDetails(
                                         .background(barColor),
                                 )
                                 Text(
-                                    text = tab.label,
+                                    text = if (tab == DetailsTab.EPISODES && episodes.isNotEmpty()) {
+                                        "Episodes (${episodes.size})"
+                                    } else tab.label,
                                     fontSize = 13.5.sp,
                                     fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.SemiBold,
                                     color = if (selected) Color.White else NetflixTextMuted,
@@ -599,53 +628,62 @@ internal fun MovieDetails(
             }
         }
 
-        // 4A. Episodes Tab
+        // 4A. Episodes Tab with Season Selector & Smooth Item Animations
         if (!blocked && activeTab == DetailsTab.EPISODES && seasons.isNotEmpty()) {
-            item(key = "season_selector") {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = PagePadding),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    seasons.forEach { season ->
-                        NetflixChip(
-                            label = if (season == 0) "Specials" else "Season $season",
-                            selected = season == activeSeason,
-                            onClick = { chosenSeason = season },
-                        )
+            if (seasons.size > 1) {
+                item(key = "season_selector") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = PagePadding),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        seasons.forEach { season ->
+                            NetflixChip(
+                                label = if (season == 0) "Specials" else "Season $season",
+                                selected = season == activeSeason,
+                                onClick = { chosenSeason = season },
+                            )
+                        }
                     }
                 }
             }
 
             items(episodes, key = MovieEpisode::id) { episode ->
-                MovieEpisodeCard(
-                    title = title,
-                    episode = episode,
-                    progress = progressFor(episode),
-                    downloaded = isDownloaded(title, episode),
-                    onPlay = { onPlay(title, episode) },
-                    onDownload = onDownload?.let { cb -> { cb(title, listOf(episode)) } },
-                    onWatched = onWatched?.let { cb -> { w -> cb(title, episode, w) } },
-                )
+                Box(modifier = Modifier.animateItem()) {
+                    MovieEpisodeCard(
+                        title = title,
+                        episode = episode,
+                        progress = progressFor(episode),
+                        downloaded = isDownloaded(title, episode),
+                        onPlay = { onPlay(title, episode) },
+                        onDownload = onDownload?.let { cb -> { cb(title, listOf(episode)) } },
+                        onWatched = onWatched?.let { cb -> { w -> cb(title, episode, w) } },
+                    )
+                }
             }
         }
 
-        // 4B. More Like This Grid
+        // 4B. More Like This Shelf / Grid
         if (!blocked && activeTab == DetailsTab.RELATED && onOpenRelated != null) {
             item(key = "related_shelf") {
-                val options = related
-                when {
-                    options == null -> Box(Modifier.fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = NetflixRed, modifier = Modifier.size(26.dp))
+                AnimatedContent(
+                    targetState = related,
+                    transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(140)) },
+                    label = "related_content",
+                ) { options ->
+                    when {
+                        options == null -> Box(Modifier.fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = NetflixRed, modifier = Modifier.size(26.dp))
+                        }
+                        options.isNotEmpty() -> TitleShelf(
+                            label = "More Like This",
+                            titles = options.visible(hideMature),
+                            open = onOpenRelated,
+                        )
+                        else -> Text("No similar titles available right now.", Modifier.padding(horizontal = PagePadding), color = NetflixTextMuted)
                     }
-                    options.isNotEmpty() -> TitleShelf(
-                        label = "More Like This",
-                        titles = options.visible(hideMature),
-                        open = onOpenRelated,
-                    )
-                    else -> Text("No similar titles available right now.", Modifier.padding(horizontal = PagePadding), color = NetflixTextMuted)
                 }
             }
         }
@@ -686,29 +724,12 @@ private fun NetflixActionIcon(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(5.dp),
         modifier = Modifier
-            .widthIn(min = 56.dp)
+            .widthIn(min = 64.dp)
             .pressableClick(onClick = onClick)
             .padding(vertical = 4.dp),
     ) {
         Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(23.dp))
         Text(label, fontSize = 11.sp, color = NetflixTextMuted, fontWeight = FontWeight.Medium, maxLines = 1)
-    }
-}
-
-@Composable
-private fun DetailBadge(label: String, accent: Color? = null) {
-    Surface(
-        shape = RoundedCornerShape(4.dp),
-        color = NetflixCardBg,
-        border = BorderStroke(1.dp, accent?.copy(alpha = 0.55f) ?: NetflixBorder),
-    ) {
-        Text(
-            text = label,
-            fontSize = 11.5.sp,
-            fontWeight = FontWeight.Bold,
-            color = accent ?: Color(0xFFE0E2EC),
-            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.5.dp),
-        )
     }
 }
 
@@ -759,7 +780,7 @@ private fun MovieEpisodeCard(
                 ) {
                     Box(
                         modifier = Modifier
-                            .width(122.dp)
+                            .width(124.dp)
                             .aspectRatio(16f / 9f)
                             .clip(RoundedCornerShape(4.dp))
                             .background(NetflixSurface),
@@ -808,7 +829,7 @@ private fun MovieEpisodeCard(
                         val statusText = when {
                             !episode.available && !downloaded -> "Airs " + episode.releasedAt?.toString()?.take(10).orEmpty()
                             downloaded && watched -> "Downloaded • Watched"
-                            downloaded -> "Downloaded Offline"
+                            downloaded -> "Downloaded"
                             watched -> "Watched"
                             progress?.canResume == true -> "In Progress"
                             episode.rating != null && episode.rating > 0 -> String.format(Locale.US, "★ %.1f", episode.rating)
@@ -829,7 +850,6 @@ private fun MovieEpisodeCard(
                     }
                 }
 
-                // Direct 1-tap Download icon + More menu (just like Netflix & Nanami Anime!)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (downloaded) {
                         Icon(
@@ -884,13 +904,13 @@ private fun DownloadEpisodesDialog(available: Int, close: () -> Unit, enqueue: (
     AlertDialog(
         onDismissRequest = close,
         containerColor = NetflixSurface,
-        title = { Text("Download Season Episodes", color = Color.White, fontWeight = FontWeight.ExtraBold) },
+        title = { Text("Download Episodes", color = Color.White, fontWeight = FontWeight.ExtraBold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("$available unwatched episodes ready to download", color = NetflixTextMuted, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (available > 5) {
-                        NetflixChip("Next 5 Unwatched", selected = false, onClick = { enqueue(5) })
+                        NetflixChip("Next 5", selected = false, onClick = { enqueue(5) })
                     }
                     if (available > 0) {
                         NetflixChip("All Unwatched ($available)", selected = true, onClick = { enqueue(available) })
@@ -914,7 +934,7 @@ private fun DownloadEpisodesDialog(available: Int, close: () -> Unit, enqueue: (
         },
         confirmButton = {
             TextButton(enabled = custom != null, onClick = { custom?.let(enqueue) }) {
-                Text("Queue Custom", color = if (custom != null) NetflixRed else NetflixTextMuted, fontWeight = FontWeight.Bold)
+                Text("Download", color = if (custom != null) NetflixRed else NetflixTextMuted, fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {

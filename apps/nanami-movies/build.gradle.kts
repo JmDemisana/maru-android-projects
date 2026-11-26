@@ -28,7 +28,7 @@ android {
         versionName = providers.environmentVariable("NANAMI_MOVIES_VERSION_NAME").getOrElse("0.2.0")
         val simklId = providers.gradleProperty("SIMKL_MOVIES_CLIENT_ID")
             .orElse(providers.environmentVariable("SIMKL_MOVIES_CLIENT_ID"))
-            .getOrElse("")
+            .getOrElse("ac2e17ef7382fa9f3113b74345d22eadb36de496d3f2b5b52ebd1d030abce6fe")
         buildConfigField("String", "SIMKL_CLIENT_ID", "\"${simklId.filter { it.isLetterOrDigit() || it in "-_" }}\"")
     }
 
@@ -74,6 +74,7 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime)
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.3")
+    implementation("androidx.browser:browser:1.8.0")
     implementation(libs.coil.compose)
     implementation(libs.okhttp)
     implementation(libs.coroutines.android)

@@ -168,6 +168,27 @@ internal fun languageName(language: String?): String {
 internal fun StremioStreamResult.movieQuality(): String? = resolution.find("$name $title $filename")
     ?.value?.lowercase()?.let { if (it == "2160p" || it == "4k") "4K" else it }
 
+internal fun StremioStreamResult.friendlyCinemaDetail(index: Int): String {
+    val raw = "$name $title $filename"
+    val tags = buildList {
+        if (index == 0) add("Recommended")
+        if (httpUri() != null) add("Direct stream")
+        when {
+            Regex("(?i)\\batmos\\b").containsMatchIn(raw) -> add("Dolby Atmos")
+            Regex("(?i)\\b(?:ddp?[ ._-]?5[ ._-]?1|5\\.1|eac3|ac3|truehd|dts)\\b").containsMatchIn(raw) -> add("Surround 5.1")
+            Regex("(?i)\\b(?:aac|2\\.0|stereo)\\b").containsMatchIn(raw) -> add("Stereo")
+        }
+        when {
+            Regex("(?i)\\b(?:dv|dolby[ ._-]?vision)\\b").containsMatchIn(raw) -> add("Dolby Vision")
+            Regex("(?i)\\bhdr10\\+?\\b|\\bhdr\\b").containsMatchIn(raw) -> add("HDR")
+        }
+        if (listsEnglishAudio() || Regex("(?i)\\bmulti\\b").containsMatchIn(raw)) {
+            add("Multi-Audio")
+        }
+    }
+    return if (tags.isNotEmpty()) tags.distinct().joinToString(" • ") else "Alternate video stream"
+}
+
 internal fun StremioStreamResult.movieSourceName(): String =
     name?.lineSequence()?.joinToString(" ")?.trim()?.takeIf(String::isNotBlank)
         ?: httpUri()?.host ?: "Torrent"

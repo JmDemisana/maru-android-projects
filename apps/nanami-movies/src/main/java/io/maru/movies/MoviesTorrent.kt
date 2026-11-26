@@ -145,7 +145,7 @@ internal suspend fun downloadMoviesTorrent(
         if (speedCapKib > 0) session.downloadRateLimit(speedCapKib * 1024)
         val handle = addMoviesTorrent(session, magnet, directory)
         val info = withTimeoutOrNull(30_000L) { awaitMovieTorrentMetadata(handle) }
-            ?: throw MovieDownloadException("No peers returned torrent metadata.")
+            ?: throw MovieDownloadException("This download source isn't responding right now.")
         val selected = chooseMovieFile(info, source, episode)
         val files = info.files()
         val file = torrentVideoFile(directory, files.filePath(selected))
@@ -178,7 +178,7 @@ internal suspend fun downloadMoviesTorrent(
             }
             val timeout = if (best == 0L) 40_000L else 95_000L
             if (now - lastProgress >= timeout) {
-                throw MovieDownloadException(if (best == 0L) "No peers sent video data." else "This source stalled.")
+                throw MovieDownloadException(if (best == 0L) "This download source didn't start." else "Download connection stalled.")
             }
             delay(900)
         }

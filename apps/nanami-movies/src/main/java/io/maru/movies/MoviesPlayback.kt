@@ -433,7 +433,7 @@ private fun MoviePlaybackSession(
             activeMedia = PlayerMedia(direct, factory)
             return@LaunchedEffect
         }
-        status = "Connecting to peers…"
+        status = "Loading video…"
         try {
             withMoviesTorrent(context.cacheDir, source, episode, onBuffer = {
                 withContext(Dispatchers.Main) { status = "Buffering opening scene…" }
@@ -445,11 +445,11 @@ private fun MoviePlaybackSession(
             }
         } catch (_: TimeoutCancellationException) {
             currentCoroutineContext().ensureActive()
-            failure = "This source timed out while connecting."
+            failure = "This source took too long to respond."
         } catch (error: CancellationException) {
             throw error
         } catch (_: LinkageError) {
-            failure = "The torrent engine could not start on this device."
+            failure = "Playback engine could not start on this device."
         } catch (_: Exception) {
             failure = "This source could not be opened."
         }
@@ -565,12 +565,20 @@ private fun MoviePlaybackSession(
         else -> null
     }
 
-    val sourceBadgeLabel = remember(useOffline, selected) {
-        if (useOffline) "Offline Vault"
-        else {
+    val sourceBadgeLabel = remember(useOffline, selected, sources) {
+        if (useOffline) {
+            "Downloaded"
+        } else if (selected == null) {
+            "Sources"
+        } else {
+            val idx = sources?.indexOf(selected)?.takeIf { it >= 0 }?.plus(1)
             val qual = selected?.movieQuality()
-            val name = selected?.movieSourceName() ?: "Sources"
-            if (qual != null) "$qual • $name" else name
+            when {
+                idx != null && qual != null -> "Source $idx • $qual"
+                idx != null -> "Source $idx"
+                qual != null -> qual
+                else -> "Sources"
+            }
         }
     }
 
