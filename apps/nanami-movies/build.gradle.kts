@@ -25,7 +25,7 @@ android {
     defaultConfig {
         applicationId = "io.maru.nanamimovies"
         versionCode = providers.environmentVariable("NANAMI_MOVIES_VERSION_CODE").orNull?.toIntOrNull() ?: 1
-        versionName = providers.environmentVariable("NANAMI_MOVIES_VERSION_NAME").getOrElse("0.2.0")
+        versionName = providers.environmentVariable("NANAMI_MOVIES_VERSION_NAME").getOrElse("1.0.0")
         val simklId = providers.gradleProperty("SIMKL_MOVIES_CLIENT_ID")
             .orElse(providers.environmentVariable("SIMKL_MOVIES_CLIENT_ID"))
             .getOrElse("ac2e17ef7382fa9f3113b74345d22eadb36de496d3f2b5b52ebd1d030abce6fe")
