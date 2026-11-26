@@ -85,12 +85,15 @@ internal fun MovieDetails(
     history: List<WatchProgress>? = null,
     rating: Int = 0,
     onRate: ((MovieTitle, Int) -> Unit)? = null,
+    watchStatus: MovieWatchStatus? = null,
+    onWatchStatus: ((MovieTitle, MovieWatchStatus) -> Unit)? = null,
 ) {
     var details by remember(preview.ref) { mutableStateOf<Result<MovieTitle?>?>(null) }
     var retry by remember(preview.ref) { mutableIntStateOf(0) }
     var chosenSeason by rememberSaveable(preview.ref.key) { mutableStateOf<Int?>(null) }
     var downloadDialog by remember { mutableStateOf(false) }
     var ratingDialog by remember(preview.ref) { mutableStateOf(false) }
+    var statusMenu by remember(preview.ref) { mutableStateOf(false) }
     var expandedOverview by rememberSaveable(preview.ref.key) { mutableStateOf(false) }
     var detailsTab by rememberSaveable(preview.ref.key) { mutableStateOf(DetailsTab.EPISODES) }
     var related by remember(preview.ref) { mutableStateOf<List<MovieTitle>?>(null) }
@@ -201,6 +204,20 @@ internal fun MovieDetails(
                     }
                 }
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    if (verified != null && onWatchStatus != null) Box {
+                        TextButton(onClick = { statusMenu = true }) { Text(watchStatus?.label ?: "Set watch status") }
+                        DropdownMenu(statusMenu, { statusMenu = false }) {
+                            MovieWatchStatus.entries.forEach { status ->
+                                DropdownMenuItem(
+                                    text = { Text(status.label) },
+                                    onClick = { statusMenu = false; onWatchStatus(title, status) },
+                                    trailingIcon = if (status == watchStatus) {
+                                        { Icon(Icons.Default.Check, "Current status") }
+                                    } else null,
+                                )
+                            }
+                        }
+                    }
                     if (verified != null && onDownload != null) {
                         if (title.kind == MovieKind.MOVIE) {
                             TextButton(onClick = { onDownload(title, listOf(null)) }, enabled = canPlay && !isDownloaded(title, null)) {

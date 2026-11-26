@@ -91,6 +91,7 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
     var remote by remember { mutableStateOf(emptySet<TitleRef>()) }
     var remoteHistory by remember { mutableStateOf(emptyList<WatchProgress>()) }
     var ratings by remember { mutableStateOf(library.ratings()) }
+    var tracking by remember { mutableStateOf(library.tracking()) }
     var account by remember { mutableStateOf(simkl.connectionKey.takeIf { simkl.isConnected }) }
     var syncMessage by remember { mutableStateOf<String?>(null) }
     val syncSignal = remember { Channel<Unit>(Channel.CONFLATED) }
@@ -116,8 +117,9 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
         remote = emptySet()
         remoteHistory = emptyList()
         syncMessage = null
-        val key = account ?: run { ratings = library.ratings(); return@LaunchedEffect }
+        val key = account ?: run { ratings = library.ratings(); tracking = library.tracking(); return@LaunchedEffect }
         ratings = library.pendingRatings(key).associate { it.title to it.score }
+        tracking = library.pendingStatuses(key).associate { it.title to it.status }
         while (isActive) {
             var retry = false
             try {
@@ -141,21 +143,32 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
                     catch (_: SimklTitleUnavailable) { /* SIMKL has no entry for the IMDb title. */ }
                     library.finishRating(key, rating)
                 }
+                for (status in library.pendingStatuses(key)) {
+                    try { simkl.track(status.title, status.status, key) }
+                    catch (_: SimklTitleUnavailable) { /* The provider could not match this title. */ }
+                    library.finishStatus(key, status)
+                }
                 val snapshot = simkl.librarySnapshot()
                 val listFromSimkl = snapshot.planned.toMutableSet()
                 for (pending in library.pendingList(key)) {
                     if (pending.listed) listFromSimkl.add(pending.title) else listFromSimkl.remove(pending.title)
                 }
+                val pendingStatuses = library.pendingStatuses(key)
+                for (pending in pendingStatuses) {
+                    if (pending.status == MovieWatchStatus.PLAN) listFromSimkl.add(pending.title) else listFromSimkl.remove(pending.title)
+                }
                 remote = listFromSimkl
                 val pendingDeletes = library.pendingWatch(key).filterNot { it.watched }.mapTo(mutableSetOf()) { it.progress.key }
                 remoteHistory = snapshot.completed.filterNot { it.key in pendingDeletes }
                 ratings = snapshot.ratings + library.pendingRatings(key).associate { it.title to it.score }
+                tracking = snapshot.statuses + pendingStatuses.associate { it.title to it.status }
                 syncMessage = "My List and watch history synced."
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
                 account = simkl.connectionKey.takeIf { simkl.isConnected }
-                val pending = library.pendingList(key).size + library.pendingWatch(key).size + library.pendingRatings(key).size
+                val pending = library.pendingList(key).size + library.pendingWatch(key).size + library.pendingRatings(key).size +
+                    library.pendingStatuses(key).size
                 syncMessage = if (pending > 0) "$pending changes saved to sync when connected."
                     else "Couldn't refresh SIMKL."
                 retry = pending > 0
@@ -180,6 +193,11 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
             library.queueList(key, ref, adding)
             syncSignal.trySend(Unit)
         }
+        if (account == null && (adding && ref !in tracking || !adding && tracking[ref] == MovieWatchStatus.PLAN)) {
+            val status = MovieWatchStatus.PLAN.takeIf { adding }
+            library.track(ref, status, null)
+            tracking = library.tracking()
+        }
     }
 
     fun markWatched(title: MovieTitle, episode: MovieEpisode?, watched: Boolean) {
@@ -196,6 +214,21 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
         library.rate(title.ref, score, account)
         ratings = ratings + (title.ref to score)
         if (account != null) syncSignal.trySend(Unit)
+    }
+
+    fun track(title: MovieTitle, status: MovieWatchStatus) {
+        val key = account
+        val ref = title.ref
+        library.track(ref, status, key)
+        tracking = tracking + (ref to status)
+        if (key == null) {
+            saved = if (status == MovieWatchStatus.PLAN) saved + ref else saved - ref
+            library.save(saved)
+            savedOrder = library.savedOrder()
+        } else {
+            remote = if (status == MovieWatchStatus.PLAN) remote + ref else remote - ref
+            syncSignal.trySend(Unit)
+        }
     }
 
     fun queueDownloads(title: MovieTitle, episodes: List<MovieEpisode?>) {
@@ -256,7 +289,7 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
                 onBack = { selected = null }, onPlay = { item, episode -> startPlayback(item, episode) },
                 modifier = Modifier.padding(insets), hideMature = hideMature, onDownload = ::queueDownloads,
                 onWatched = ::markWatched, onOpenRelated = { selected = it }, history = combinedHistory,
-                rating = ratings[title.ref] ?: 0, onRate = ::rate,
+                rating = ratings[title.ref] ?: 0, onRate = ::rate, watchStatus = tracking[title.ref], onWatchStatus = ::track,
                 isDownloaded = { item, episode -> downloads.isNotEmpty() && vault.completedFile(activity, item, episode) != null },
             )
             settings -> MoviesSettings(
@@ -280,7 +313,7 @@ private fun MoviesApp(activity: MainActivity, catalog: MoviesCatalog, library: M
                     },
                     openSettings = { settings = true }, modifier = Modifier.padding(insets),
                     openDownloads = { downloadsOpen = true }, toggleSaved = ::toggleSaved, history = combinedHistory,
-                    savedOrder = savedOrder, hideMature = hideMature,
+                    savedOrder = savedOrder, hideMature = hideMature, tracking = tracking,
                     playFeatured = { item, episode -> selected = item; startPlayback(item, episode) },
                 )
             }

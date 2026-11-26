@@ -50,7 +50,10 @@ data class SimklWatchlistEntry(
 
 internal data class SimklAccount(val id: String, val label: String)
 internal class SimklTitleUnavailable : IOException("SIMKL couldn't match this title or episode.")
-internal data class SimklLibrarySnapshot(val planned: Set<TitleRef>, val ratings: Map<TitleRef, Int>, val completed: List<WatchProgress>)
+internal data class SimklLibrarySnapshot(
+    val planned: Set<TitleRef>, val ratings: Map<TitleRef, Int>, val completed: List<WatchProgress>,
+    val statuses: Map<TitleRef, MovieWatchStatus>,
+)
 
 class Simkl(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("simkl", Context.MODE_PRIVATE)
@@ -157,7 +160,23 @@ class Simkl(context: Context) {
             completed = library.filter { it.status == "completed" || !it.media.isSeries && it.lastWatched > 0 }.map {
                 WatchProgress(it.title, null, null, 0L, 0L, it.lastWatched, completed = true)
             },
+            statuses = library.mapNotNull { row -> MovieWatchStatus.parse(row.status)?.let { row.title to it } }.toMap(),
         )
+    }
+
+    internal suspend fun track(title: TitleRef, status: MovieWatchStatus, account: String) = mutex.withLock {
+        check(account == connectionKey) { "SIMKL account changed." }
+        val type = if (title.kind == MovieKind.SERIES) "shows" else "movies"
+        val before = syncLibrary().firstOrNull { it.title == title }
+        if (before?.status == status.code) return@withLock
+        val item = imdbItem(title.imdbId).put("to", status.code)
+        val result = authorized("sync/add-to-list", JSONObject().put(type, JSONArray().put(item)))
+        checkFound(result)
+        val updated = result.optJSONObject("added")?.optJSONArray(type)?.optJSONObject(0)
+            ?: throw IOException("SIMKL did not confirm the status change.")
+        val remoteId = updated.optJSONObject("ids")?.text("simkl") ?: before?.simklId
+        putCachedEntry(type, title.imdbId, libraryEntry(title.imdbId, title.kind == MovieKind.SERIES, remoteId,
+            updated.text("to") ?: status.code, before?.hasPreservedActivity ?: false, before?.rating, before?.lastWatched ?: 0L))
     }
 
     internal suspend fun rate(title: TitleRef, score: Int, account: String) = mutex.withLock {

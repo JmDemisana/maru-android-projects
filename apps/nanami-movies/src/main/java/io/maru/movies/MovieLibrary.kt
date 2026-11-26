@@ -34,6 +34,16 @@ internal data class WatchProgress(
 internal data class PendingListChange(val title: TitleRef, val listed: Boolean)
 internal data class PendingWatchChange(val progress: WatchProgress, val watched: Boolean)
 internal data class PendingRating(val title: TitleRef, val score: Int)
+internal data class PendingStatus(val title: TitleRef, val status: MovieWatchStatus)
+
+internal enum class MovieWatchStatus(val code: String, val label: String) {
+    PLAN("plantowatch", "Plan to Watch"), WATCHING("watching", "Watching"), HOLD("hold", "On Hold"),
+    DROPPED("dropped", "Dropped"), COMPLETED("completed", "Completed");
+
+    companion object {
+        fun parse(value: String?) = entries.firstOrNull { it.code == value }
+    }
+}
 
 internal class MovieLibrary(context: Context) {
     private val prefs = context.getSharedPreferences("nanami_movies_library", Context.MODE_PRIVATE)
@@ -79,6 +89,28 @@ internal class MovieLibrary(context: Context) {
         if (prefs.all[key] == rating.score) prefs.edit().remove(key).apply()
     }
 
+    fun tracking(): Map<TitleRef, MovieWatchStatus> = statuses("tracking/").associate { it.title to it.status }
+
+    fun track(title: TitleRef, status: MovieWatchStatus?, account: String?) {
+        val prefix = if (account == null) "tracking/" else "status/$account/"
+        val edit = prefs.edit().putString(prefix + title.key, status?.code)
+        if (account != null) edit.remove("list/$account/${title.key}")
+        edit.apply()
+    }
+
+    fun pendingStatuses(account: String): List<PendingStatus> = statuses("status/$account/")
+
+    fun finishStatus(account: String, pending: PendingStatus) {
+        val key = "status/$account/${pending.title.key}"
+        if (prefs.getString(key, null) == pending.status.code) prefs.edit().remove(key).apply()
+    }
+
+    private fun statuses(prefix: String): List<PendingStatus> = prefs.all.mapNotNull { (key, value) ->
+        if (!key.startsWith(prefix) || value !is String) return@mapNotNull null
+        val title = TitleRef.parse(key.removePrefix(prefix)) ?: return@mapNotNull null
+        MovieWatchStatus.parse(value)?.let { PendingStatus(title, it) }
+    }
+
     fun history(): List<WatchProgress> = prefs.all.keys.asSequence()
         .filter { it.startsWith("progress/") }
         .mapNotNull(::read)
@@ -121,7 +153,10 @@ internal class MovieLibrary(context: Context) {
     fun sent(key: String): Boolean = prefs.getBoolean("simkl/$key", false)
 
     fun queueList(account: String, title: TitleRef, listed: Boolean) {
-        prefs.edit().putBoolean("list/$account/${title.key}", listed).apply()
+        val edit = prefs.edit().putBoolean("list/$account/${title.key}", listed)
+        val statusKey = "status/$account/${title.key}"
+        if (prefs.getString(statusKey, null) == MovieWatchStatus.PLAN.code) edit.remove(statusKey)
+        edit.apply()
     }
 
     fun pendingList(account: String): List<PendingListChange> {

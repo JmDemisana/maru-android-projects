@@ -135,6 +135,7 @@ internal fun MoviesBrowse(
     history: List<WatchProgress> = recent,
     hideMature: Boolean = false,
     savedOrder: Map<TitleRef, Long> = emptyMap(),
+    tracking: Map<TitleRef, MovieWatchStatus> = emptyMap(),
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var collectionKey by rememberSaveable(page) { mutableStateOf<String?>(null) }
@@ -192,7 +193,8 @@ internal fun MoviesBrowse(
                     else when (page) {
                         BrowsePage.HOME, BrowsePage.MOVIES, BrowsePage.SERIES -> BrowseShelves(page, catalog, recent, open, resume,
                             saved, playFeatured, toggleSaved, hideMature, wide) { collectionKey = it.encode() }
-                        BrowsePage.LIST -> ResultsPage(saved, catalog, open, openDownloads, recent, history, savedOrder, hideMature, resume)
+                        BrowsePage.LIST -> ResultsPage(saved, catalog, open, openDownloads, recent, history, savedOrder,
+                            hideMature, resume, tracking)
                         BrowsePage.SEARCH -> SearchResults(query.trim(), catalog, open, hideMature)
                     }
                 }
@@ -389,7 +391,7 @@ private fun SearchResults(query: String, catalog: MoviesCatalog, open: (MovieTit
 }
 
 private enum class LibraryTab(val label: String) {
-    SAVED("My List"), CONTINUE("Continue Watching"), WATCHED("Watched"), UPCOMING("Upcoming"),
+    SAVED("My List"), CONTINUE("Continue Watching"), WATCHED("Watched"), STATUS("Watch Status"), UPCOMING("Upcoming"),
 }
 
 @Composable
@@ -403,19 +405,26 @@ private fun ResultsPage(
     savedOrder: Map<TitleRef, Long>,
     hideMature: Boolean,
     resume: (MovieTitle, WatchProgress) -> Unit,
+    tracking: Map<TitleRef, MovieWatchStatus>,
 ) {
     var tab by rememberSaveable { mutableStateOf(LibraryTab.SAVED) }
     var kind by rememberSaveable { mutableStateOf<MovieKind?>(null) }
     var sorting by rememberSaveable { mutableStateOf(PosterSort.ADDED) }
+    var watchStatus by rememberSaveable { mutableStateOf(MovieWatchStatus.WATCHING) }
     val watched = remember(history) { history.filter(WatchProgress::completed).distinctBy(WatchProgress::title) }
+    val planned = saved + tracking.filterValues { it == MovieWatchStatus.PLAN }.keys
     val refs = when (tab) {
-        LibraryTab.SAVED -> saved.toList()
+        LibraryTab.SAVED -> planned.toList()
         LibraryTab.CONTINUE -> recent.map(WatchProgress::title)
-        LibraryTab.WATCHED -> watched.map(WatchProgress::title)
-        LibraryTab.UPCOMING -> (saved + recent.map(WatchProgress::title)).toList()
+        LibraryTab.WATCHED -> (watched.map(WatchProgress::title) +
+            tracking.filterValues { it == MovieWatchStatus.COMPLETED }.keys).distinct()
+        LibraryTab.STATUS -> if (watchStatus == MovieWatchStatus.PLAN) planned.toList()
+            else tracking.filterValues { it == watchStatus }.keys.toList()
+        LibraryTab.UPCOMING -> (planned + recent.map(WatchProgress::title) +
+            tracking.filterValues { it == MovieWatchStatus.WATCHING }.keys).toList()
     }
     val order = when (tab) {
-        LibraryTab.SAVED -> savedOrder
+        LibraryTab.SAVED, LibraryTab.STATUS -> savedOrder
         LibraryTab.CONTINUE -> recent.associate { it.title to it.updated }
         LibraryTab.WATCHED -> watched.associate { it.title to it.updated }
         LibraryTab.UPCOMING -> emptyMap()
@@ -434,8 +443,16 @@ private fun ResultsPage(
                 FilterChip(tab == item, { tab = item }, label = { Text(item.label) })
             }
         }
+        if (tab == LibraryTab.STATUS) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = PagePadding),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MovieWatchStatus.entries.forEach { status ->
+                    FilterChip(watchStatus == status, { watchStatus = status }, label = { Text(status.label) })
+                }
+            }
+        }
         if (tab != LibraryTab.UPCOMING) ListFilters(kind, { kind = it }, sorting, { sorting = it },
-            if (tab == LibraryTab.SAVED) "Recently added" else "Recently watched")
+            if (tab == LibraryTab.SAVED || tab == LibraryTab.STATUS) "Recently added" else "Recently watched")
         if (titles == null && refs.isNotEmpty()) Loading()
         else if (tab == LibraryTab.UPCOMING) UpcomingReleases(titles.orEmpty().visible(hideMature), open)
         else ResultItems(sorting.sort(titles.orEmpty().visible(hideMature).filter { kind == null || it.kind == kind }, order),
@@ -443,6 +460,7 @@ private fun ResultsPage(
                 LibraryTab.SAVED -> "Save a movie or show to find it here."
                 LibraryTab.CONTINUE -> "Pick up a movie or episode you’ve started."
                 LibraryTab.WATCHED -> "Completed movies and episodes will appear here."
+                LibraryTab.STATUS -> "Change a title’s watch status from its details."
                 LibraryTab.UPCOMING -> "No upcoming releases listed."
             }, open = { title ->
             val savedProgress = recent.firstOrNull { it.title == title.ref }
