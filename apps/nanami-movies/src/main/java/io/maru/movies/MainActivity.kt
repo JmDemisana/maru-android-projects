@@ -229,6 +229,7 @@ private fun MoviesApp(
     }
 
     fun openDetail(title: MovieTitle) {
+        if (playback != null) return
         if (hideMature && title.isMature) return
         if (detailStack.lastOrNull()?.title?.ref == title.ref) return
         detailStack = detailStack + MoviesRoute.Detail(title, nextRouteId++)
@@ -356,10 +357,11 @@ private fun MoviesApp(
                     if (pending.status == MovieWatchStatus.PLAN) listFromSimkl.add(pending.title) else listFromSimkl.remove(pending.title)
                 }
                 remote = listFromSimkl
+                val pendingUnlisted = library.pendingList(key).filterNot { it.listed }.mapTo(mutableSetOf()) { it.title }
                 val pendingDeletes = library.pendingWatch(key).filterNot { it.watched }.mapTo(mutableSetOf()) { it.progress.key }
-                remoteHistory = snapshot.completed.filterNot { it.key in pendingDeletes }
+                remoteHistory = snapshot.completed.filterNot { it.key in pendingDeletes || it.title in pendingUnlisted }
                 ratings = snapshot.ratings + library.pendingRatings(key).associate { it.title to it.score }
-                tracking = snapshot.statuses + pendingStatuses.associate { it.title to it.status }
+                tracking = (snapshot.statuses - pendingUnlisted) + pendingStatuses.associate { it.title to it.status }
                 pendingSyncCount = computePendingCount(key)
                 syncMessage = "My List & watch history synced"
             } catch (error: CancellationException) {
@@ -763,13 +765,13 @@ private fun MoviesApp(
                                 catalog = catalog,
                                 library = library,
                                 saved = route.title.ref in saved || route.title.ref in remote,
-                                onSave = { toggleSaved(route.title) },
-                                onBack = { closeDetail(route) },
-                                onPlay = { item, episode -> startPlayback(item, episode) },
+                                onSave = { if (playback == null) toggleSaved(route.title) },
+                                onBack = { if (playback == null) closeDetail(route) },
+                                onPlay = { item, episode -> if (playback == null) startPlayback(item, episode) },
                                 hideMature = hideMature,
                                 onDownload = ::queueDownloads,
                                 onWatched = ::markWatched,
-                                onOpenRelated = { if (route == currentRoute) openDetail(it) },
+                                onOpenRelated = { if (playback == null && route == currentRoute) openDetail(it) },
                                 history = combinedHistory,
                                 rating = ratings[route.title.ref] ?: 0,
                                 onRate = ::rate,
@@ -789,11 +791,12 @@ private fun MoviesApp(
                                     hideMature = hideMature,
                                     open = ::openDetail,
                                     resume = { item, entry ->
+                                        if (playback != null) return@MoviesHomeScreen
                                         val episode = item.episodes.firstOrNull { it.season == entry.season && it.episode == entry.episode && it.available }
                                         if (item.kind == MovieKind.MOVIE || episode != null) startPlayback(item, episode)
                                         else openDetail(item)
                                     },
-                                    playFeatured = { item, episode -> startPlayback(item, episode) },
+                                    playFeatured = { item, episode -> if (playback == null) startPlayback(item, episode) },
                                     toggleSaved = ::toggleSaved,
                                 )
                                 MoviesNavTab.LIST -> MoviesMyListScreen(
@@ -811,11 +814,12 @@ private fun MoviesApp(
                                     onConnectClick = { openSimklWebAuth(clearCookies = false) },
                                     open = ::openDetail,
                                     resume = { item, entry ->
+                                        if (playback != null) return@MoviesMyListScreen
                                         val episode = item.episodes.firstOrNull { it.season == entry.season && it.episode == entry.episode && it.available }
                                         if (item.kind == MovieKind.MOVIE || episode != null) startPlayback(item, episode)
                                         else openDetail(item)
                                     },
-                                    playOffline = { item, episode, file -> startPlayback(item, episode, file) },
+                                    playOffline = { item, episode, file -> if (playback == null) startPlayback(item, episode, file) },
                                 )
                                 MoviesNavTab.SEARCH -> MoviesSearchScreen(
                                     catalog = catalog,

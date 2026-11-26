@@ -27,6 +27,8 @@ private val IntroDbSegments = "https://api.introdb.app/segments".toHttpUrl()
 private val releaseGroup = Regex("-([A-Za-z][A-Za-z0-9]{1,26})$")
 private val resolution = Regex("(?i)\\b(?:2160p|1080p|720p|480p|360p|4K)\\b")
 private val reportedSeeders = Regex("(?:👤\\s*|\\bseeders?\\s*[:=]?\\s*)(\\d[\\d,]*)", RegexOption.IGNORE_CASE)
+private val reportedSize = Regex("(?:💾\\s*)?(\\d+(?:\\.\\d+)?)\\s*(GB|GiB|MB|MiB)", RegexOption.IGNORE_CASE)
+private val heavyRemux = Regex("(?i)\\b(?:remux|bdremux|uhd[ ._-]?remux)\\b")
 
 internal fun movieStreamId(title: MovieTitle, episode: MovieEpisode?): String =
     episode?.let { "${title.imdbId}:${it.season}:${it.episode}" } ?: title.imdbId
@@ -67,28 +69,48 @@ internal suspend fun findMovieSources(
             .filter { it.httpUri() != null || it.magnetUri() != null }
             .distinctBy { Triple(it.url, it.infoHash, it.fileIdx) },
         preferredQuality = preferredQuality,
+        isEpisode = episode != null,
     )
+}
+
+internal fun StremioStreamResult.reportedSizeMb(): Double? {
+    val match = reportedSize.find("$title $name") ?: return null
+    val num = match.groupValues[1].toDoubleOrNull() ?: return null
+    val unit = match.groupValues[2].uppercase(Locale.ROOT)
+    return if (unit.startsWith("G")) num * 1024.0 else num
+}
+
+internal fun StremioStreamResult.formattedSizeLabel(): String? {
+    val mb = reportedSizeMb() ?: return null
+    return if (mb >= 1024.0) String.format(Locale.US, "%.1f GB", mb / 1024.0) else "${mb.toInt()} MB"
 }
 
 internal fun rankMovieSources(
     sources: List<StremioStreamResult>,
     preferredQuality: String = "1080p",
+    isEpisode: Boolean = false,
 ): List<StremioStreamResult> {
     val normalizedPref = if (preferredQuality.equals("2160p", true) || preferredQuality.equals("4K", true)) "4K" else preferredQuality.lowercase(Locale.ROOT)
+    val comfortableMaxMb = if (isEpisode) 4_200.0 else 12_500.0
     return sources.map { stream ->
         val seeds = stream.reportedSeeds()
         val direct = stream.url?.startsWith("https://", ignoreCase = true) == true
         val quality = stream.movieQuality()
         val matchesPref = quality != null && quality.equals(normalizedPref, ignoreCase = true)
         val balancedHd = quality in setOf("1080p", "720p")
+        val sizeMb = stream.reportedSizeMb()
+        val rawText = "${stream.name} ${stream.title} ${stream.filename}"
+        val isOversizedOrRemux = heavyRemux.containsMatchIn(rawText) || (sizeMb != null && sizeMb > comfortableMaxMb && normalizedPref != "4K")
         val group = when {
             direct && matchesPref -> 0
             direct -> 1
-            seeds != null && seeds > 0 && matchesPref -> 2
-            seeds != null && seeds > 0 && balancedHd -> 3
-            seeds != null && seeds > 0 -> 4
-            seeds == null -> 5
-            else -> 6
+            seeds != null && seeds > 0 && matchesPref && !isOversizedOrRemux -> 2
+            seeds != null && seeds > 0 && balancedHd && !isOversizedOrRemux -> 3
+            seeds != null && seeds > 0 && matchesPref -> 4
+            seeds != null && seeds > 0 && balancedHd -> 5
+            seeds != null && seeds > 0 -> 6
+            seeds == null -> 7
+            else -> 8
         }
         Triple(stream, group, seeds ?: 0)
     }.sortedWith(compareBy<Triple<StremioStreamResult, Int, Int>> { it.second }.thenByDescending { it.third })
@@ -173,6 +195,7 @@ internal fun StremioStreamResult.friendlyCinemaDetail(index: Int): String {
     val tags = buildList {
         if (index == 0) add("Recommended")
         if (httpUri() != null) add("Direct stream")
+        formattedSizeLabel()?.let(::add)
         when {
             Regex("(?i)\\batmos\\b").containsMatchIn(raw) -> add("Dolby Atmos")
             Regex("(?i)\\b(?:ddp?[ ._-]?5[ ._-]?1|5\\.1|eac3|ac3|truehd|dts)\\b").containsMatchIn(raw) -> add("Surround 5.1")

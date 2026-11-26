@@ -340,9 +340,19 @@ internal fun MoviesHomeScreen(
                                         startingHeroId = hero.ref.key
                                         try {
                                             val full = attempt { catalog.details(hero.kind, hero.imdbId) }.getOrNull()
-                                            val first = full?.episodes?.firstOrNull { it.season > 0 && it.available }
-                                            if (full == null || (full.kind == MovieKind.SERIES && first == null)) open(hero)
-                                            else playFeatured(full, first)
+                                            val targetEpisode = if (full?.kind == MovieKind.SERIES) {
+                                                val heroHistory = history.filter { it.title == full.ref }
+                                                val resumeEntry = heroHistory.filter(WatchProgress::canResume).maxByOrNull(WatchProgress::updated)
+                                                val completedKeys = heroHistory.filter(WatchProgress::completed)
+                                                    .mapTo(mutableSetOf()) { "${it.season}:${it.episode}" }
+                                                full.episodes.firstOrNull {
+                                                    resumeEntry != null && it.season == resumeEntry.season && it.episode == resumeEntry.episode && it.available
+                                                } ?: full.episodes.firstOrNull {
+                                                    it.season > 0 && it.available && "${it.season}:${it.episode}" !in completedKeys
+                                                } ?: full.episodes.firstOrNull { it.season > 0 && it.available }
+                                            } else null
+                                            if (full == null || (full.kind == MovieKind.SERIES && targetEpisode == null)) open(hero)
+                                            else playFeatured(full, targetEpisode)
                                         } finally {
                                             startingHeroId = null
                                         }

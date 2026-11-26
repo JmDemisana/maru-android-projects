@@ -18,11 +18,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.app.PictureInPictureModeChangedInfo
@@ -218,6 +220,9 @@ private fun MoviePlaybackSession(
     var ensureTextOverride by remember(streamId) { mutableStateOf<String?>(null) }
     var showOpeningAdvisory by remember(streamId) { mutableStateOf(false) }
     var advisoryShownForStream by remember(streamId) { mutableStateOf(false) }
+    var hasRenderedFrame by remember(streamId) { mutableStateOf(false) }
+    var isBufferingMidPlay by remember(streamId) { mutableStateOf(false) }
+    var showRebuffering by remember(streamId) { mutableStateOf(false) }
 
     fun resetControls() {
         controls = true
@@ -241,8 +246,9 @@ private fun MoviePlaybackSession(
 
     fun captureProgress() {
         if (remotePlayback) return
+        val stateReady = hasRenderedFrame || player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_ENDED
         val duration = player.duration
-        if (duration > 0) {
+        if (stateReady && duration > 0 && (player.currentPosition > 0 || resumePosition == 0L)) {
             resumePosition = player.currentPosition.coerceIn(0, duration)
             progressCallback(resumePosition, duration)
         }
@@ -303,13 +309,21 @@ private fun MoviePlaybackSession(
         }
     }
 
-    // 4-Second Opening Content Advisory when video becomes ready (identical to Nanami Anime!)
-    LaunchedEffect(ui.ready) {
-        if (ui.ready && !advisoryShownForStream) {
+    // 4-Second Opening Content Advisory when first frame renders (identical to Nanami Anime!)
+    LaunchedEffect(hasRenderedFrame, remotePlayback) {
+        if ((hasRenderedFrame || remotePlayback) && !advisoryShownForStream) {
             advisoryShownForStream = true
             showOpeningAdvisory = true
             delay(4_200L)
             showOpeningAdvisory = false
+        }
+    }
+
+    LaunchedEffect(isBufferingMidPlay, hasRenderedFrame, remotePlayback) {
+        showRebuffering = false
+        if (isBufferingMidPlay && hasRenderedFrame && !remotePlayback) {
+            delay(250L)
+            showRebuffering = true
         }
     }
 
@@ -322,6 +336,7 @@ private fun MoviePlaybackSession(
             }
             else -> {
                 captureProgress()
+                player.pause()
                 onBack()
             }
         }
@@ -341,7 +356,13 @@ private fun MoviePlaybackSession(
 
     DisposableEffect(player, lifecycle) {
         val listener = object : Player.Listener {
+            override fun onRenderedFirstFrame() {
+                hasRenderedFrame = true
+                isBufferingMidPlay = false
+            }
+
             override fun onPlaybackStateChanged(playbackState: Int) {
+                isBufferingMidPlay = playbackState == Player.STATE_BUFFERING && hasRenderedFrame
                 if (playbackState == Player.STATE_ENDED) {
                     captureProgress()
                     ended = true
@@ -420,6 +441,8 @@ private fun MoviePlaybackSession(
         activeMedia = null
         failure = null
         ended = false
+        hasRenderedFrame = false
+        isBufferingMidPlay = false
         prebufferPercent = 0
         ui = MoviePlaybackUi(position = resumePosition)
         val source = selected
@@ -541,7 +564,7 @@ private fun MoviePlaybackSession(
                     duration = duration,
                     buffered = player.bufferedPosition.coerceAtLeast(0),
                     playing = player.isPlaying,
-                    ready = player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_ENDED,
+                    ready = hasRenderedFrame || player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_ENDED,
                     seekable = player.isCurrentMediaItemSeekable && duration > 0,
                     tracks = tracks,
                 )
@@ -552,7 +575,7 @@ private fun MoviePlaybackSession(
     }
 
     LaunchedEffect(ui.playing, controlPulse, controls, showSettingsSheet, locked, isScrubbing) {
-        if (ui.playing && controls && !showSettingsSheet && !locked && !isScrubbing) {
+        if ((ui.playing || locked) && controls && !showSettingsSheet && !isScrubbing) {
             delay(4_000)
             controls = false
         }
@@ -579,7 +602,8 @@ private fun MoviePlaybackSession(
         problem != null -> null
         failure != null && canAutoFallback -> "Trying another source…"
         !useOffline && sources == null && selected == null -> "Finding fastest video source…"
-        !ui.ready -> status
+        !hasRenderedFrame && !remotePlayback && !ui.ready -> status
+        !hasRenderedFrame && !remotePlayback -> status
         else -> null
     }
 
@@ -606,6 +630,20 @@ private fun MoviePlaybackSession(
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
+        // Bottom-most pointer shield so NO touch event inside MoviesPlayback can ever leak to screens behind it!
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            event.changes.forEach { it.consume() }
+                        }
+                    }
+                },
+        )
+
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { PlayerView(it).apply { useController = false; this.player = player } },
@@ -638,7 +676,8 @@ private fun MoviePlaybackSession(
             showOpeningAdvisory = showOpeningAdvisory && !showSettingsSheet,
             segments = segmentOptions,
             loading = loading,
-            loadingProgressPercent = if (loading != null && !ui.ready) prebufferPercent else 0,
+            loadingProgressPercent = if (loading != null && !hasRenderedFrame) prebufferPercent else 0,
+            rebuffering = showRebuffering,
             problem = problem,
             controls = controls && !inPip && !showSettingsSheet,
             locked = locked && !inPip,
@@ -654,10 +693,14 @@ private fun MoviePlaybackSession(
             onCancelNext = { nextCountdown = null },
             onSkipSegment = { segment -> seekTo(segment.end) },
             onToggleControls = { if (controls) controls = false else resetControls() },
-            onBack = { captureProgress(); onBack() },
+            onBack = {
+                captureProgress()
+                player.pause()
+                onBack()
+            },
             // Open half-screen Playback Settings (Video Sources FIRST when still loading or on error, matching Nanami Anime!)
             onSettings = {
-                showVideoSourcesFirst = !ui.ready || loading != null || problem != null
+                showVideoSourcesFirst = !hasRenderedFrame || loading != null || problem != null
                 showSettingsSheet = true
             },
             onSources = {

@@ -539,8 +539,7 @@ class Simkl(context: Context) {
                 added.optJSONObject("ids")?.text("simkl"), status, false))
             status == "plantowatch"
         } else {
-            if (entry?.status != "plantowatch") return@withLock false
-            if (entry.hasPreservedActivity) return@withLock true
+            if (entry == null) return@withLock false
             checkFound(authorized("sync/history/remove", JSONObject().put(type, JSONArray().put(item))))
             putCachedEntry(type, imdbId, null)
             false

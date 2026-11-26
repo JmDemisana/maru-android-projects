@@ -14,6 +14,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -64,6 +65,7 @@ internal fun MoviePlayerChrome(
     segments: List<MovieSegment>,
     loading: String?,
     loadingProgressPercent: Int = 0,
+    rebuffering: Boolean = false,
     problem: String?,
     controls: Boolean,
     locked: Boolean,
@@ -128,16 +130,16 @@ internal fun MoviePlayerChrome(
     }
 
     Box(Modifier.fillMaxSize()) {
-        // Touch & Vertical Gesture Surface (active during playback)
-        if (!hideChrome && !locked && !isStatusOverlay) {
+        // Touch & Vertical Gesture Surface (absorbs taps in locked mode too so nothing ever leaks beneath!)
+        if (!hideChrome && !isStatusOverlay) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(Unit) {
+                    .pointerInput(locked) {
                         detectTapGestures(
                             onTap = { toggleControls() },
                             onDoubleTap = { touch ->
-                                if (state.seekable) {
+                                if (!locked && state.seekable) {
                                     val forward = touch.x >= size.width / 2f
                                     seek(state.position + if (forward) 10_000L else -10_000L)
                                     doubleTapDeltaSec = if (forward) 10 else -10
@@ -146,8 +148,8 @@ internal fun MoviePlayerChrome(
                             },
                         )
                     }
-                    .pointerInput(swipeGestures) {
-                        if (!swipeGestures) return@pointerInput
+                    .pointerInput(swipeGestures, locked) {
+                        if (!swipeGestures || locked) return@pointerInput
                         var left = false
                         var level = 0f
                         detectVerticalDragGestures(
@@ -182,12 +184,17 @@ internal fun MoviePlayerChrome(
             )
         }
 
-        // Clean Pitch-Black Loading / Problem Layout (Exact Parity with Nanami Anime!)
+        // Clean Pitch-Black Loading / Problem Layout (blocks all touches from leaking to screens beneath!)
         if (isStatusOverlay) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color(0xFA050507))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {},
+                    )
                     .windowInsetsPadding(WindowInsets.safeDrawing),
             ) {
                 Row(
@@ -361,17 +368,21 @@ internal fun MoviePlayerChrome(
                     .padding(top = if (showButtons) 60.dp else 18.dp, start = 16.dp),
             )
 
-            // Screen Lock Shield Button
-            if (!hideChrome && locked) {
+            // Screen Lock Shield Button (auto-hides with controls so video stays unobstructed, tap anywhere to reveal!)
+            AnimatedVisibility(
+                visible = !hideChrome && locked && controls,
+                enter = fadeIn(tween(150)) + scaleIn(tween(150)),
+                exit = fadeOut(tween(150)),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End))
+                    .padding(16.dp),
+            ) {
                 Surface(
                     onClick = onLock,
                     shape = CircleShape,
                     color = Color(0xE014151A),
                     border = BorderStroke(1.dp, NetflixRed),
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End))
-                        .padding(16.dp),
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
@@ -382,6 +393,17 @@ internal fun MoviePlayerChrome(
                         Text("Tap to Unlock", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
+            }
+
+            // Subtle Mid-Playback Rebuffering Indicator (never covers seekbar or flashes black loading screen!)
+            if (!hideChrome && rebuffering && !showButtons && nextCountdown == null) {
+                CircularProgressIndicator(
+                    color = NetflixRed,
+                    strokeWidth = 3.dp,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(34.dp),
+                )
             }
 
             if (showButtons && nextCountdown == null) {

@@ -54,4 +54,23 @@ class MoviesCatalogFilterTest {
         assertEquals("2019", "2019–".cleanReleaseInfo())
         assertEquals("2019–2023", "2019–2023".cleanReleaseInfo())
     }
+
+    @Test
+    fun prefersFastWebStreamOverOversizedRemuxAtPreferredQuality() {
+        val remux = StremioStreamResult(
+            name = "1080p",
+            title = "Movie.2024.1080p.BluRay.REMUX.AVC\n👤 95 💾 28.4 GB",
+            url = null,
+            infoHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        val fastStream = StremioStreamResult(
+            name = "1080p",
+            title = "Movie.2024.1080p.WEB-DL.DDP5.1\n👤 60 💾 2.1 GB",
+            url = null,
+            infoHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        val ranked = rankMovieSources(listOf(remux, fastStream), preferredQuality = "1080p", isEpisode = false)
+        assertEquals(fastStream, ranked.first())
+        assertEquals("2.1 GB", fastStream.formattedSizeLabel())
+    }
 }
