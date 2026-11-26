@@ -1,0 +1,141 @@
+name: Nanami Movies Rotator
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/nanami-movies/**"
+      - "apps/manime/src/main/java/io/maru/manime/HttpRequests.kt"
+      - "apps/manime/src/main/java/io/maru/manime/extensions/StremioAddonClient.kt"
+      - "apps/manime/src/main/java/io/maru/manime/torrent/StreamSafety.kt"
+      - "build-logic/**"
+      - "gradle/**"
+      - "build.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - "settings.gradle.kts"
+      - ".github/workflows/nanami-movies-rotator.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nanami-movies-rotator
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check the rolling tag
+        run: |
+          if git show-ref --verify --quiet refs/tags/nanami-movies-rotator &&
+             ! git merge-base --is-ancestor refs/tags/nanami-movies-rotator HEAD; then
+            echo "::error::This run is older than the published Rotator. Run the workflow from main."
+            exit 1
+          fi
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: gradle
+
+      - name: Prepare Android SDK
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$(command -v sdkmanager || find "$SDK" -name sdkmanager -type f -print -quit)"
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --sdk_root="$SDK" "platforms;android-36" "build-tools;36.1.0" > /dev/null
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
+      - name: Resolve Rotator version
+        run: |
+          set -euo pipefail
+          STABLE_VERSION=$(git tag --merged HEAD --list 'nanami-movies-v*' --sort=-version:refname |
+            awk '/^nanami-movies-v[0-9]+\.[0-9]+\.[0-9]+$/ && !found { sub(/^nanami-movies-v/, ""); print; found=1 }')
+          if [ -n "$STABLE_VERSION" ]; then
+            IFS=. read -r major minor patch <<< "$STABLE_VERSION"
+            NEXT_VERSION="$major.$minor.$((10#$patch + 1))"
+          else
+            NEXT_VERSION="0.1.0"
+          fi
+          VERSION_NAME="$NEXT_VERSION-rotator.$GITHUB_RUN_NUMBER"
+          VERSION_CODE=$((1000 + 2 * $(git rev-list --count HEAD)))
+          echo "NANAMI_MOVIES_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "NANAMI_MOVIES_VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "Building Nanami Movies Rotator $VERSION_NAME (code $VERSION_CODE)"
+
+      - name: Prepare signing key
+        env:
+          MARU_STUDY_KEYSTORE_B64: ${{ secrets.MARU_STUDY_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MARU_STUDY_KEYSTORE_B64:-}" ]; then
+            echo "::error::Missing MARU_STUDY_KEYSTORE_B64 repository secret."
+            exit 1
+          fi
+          mkdir -p apps/nanami-movies/keystore
+          printf '%s' "$MARU_STUDY_KEYSTORE_B64" | base64 --decode > apps/nanami-movies/keystore/nanami-movies-release.jks
+          cat > apps/nanami-movies/keystore.properties <<'EOF'
+          storeFile=keystore/nanami-movies-release.jks
+          storePassword=maru-study-release
+          keyAlias=maru-study
+          keyPassword=maru-study-release
+          EOF
+
+      - name: Test and build Nanami Movies Rotator APK
+        env:
+          SIMKL_MOVIES_CLIENT_ID: ${{ vars.SIMKL_MOVIES_CLIENT_ID }}
+        run: |
+          chmod +x gradlew
+          ./gradlew :apps:nanami-movies:testDebugUnitTest :apps:nanami-movies:assembleRelease --console=plain
+
+      - name: Verify and stage APK
+        run: |
+          APK=$(find apps/nanami-movies/build/outputs/apk/release -name '*.apk' -print -quit)
+          test -f "$APK"
+          "$ANDROID_HOME/build-tools/36.1.0/apksigner" verify --print-certs "$APK"
+          mkdir -p out
+          cp "$APK" out/nanami-movies-rotator.apk
+          (cd out && sha256sum nanami-movies-rotator.apk > SHA256SUMS.txt)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanami-movies-rotator-${{ env.NANAMI_MOVIES_VERSION_NAME }}
+          path: out/*
+          if-no-files-found: error
+
+      - name: Update the rolling Rotator prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nanami-movies-rotator
+          target_commitish: ${{ github.sha }}
+          name: Nanami Movies Rotator (${{ env.NANAMI_MOVIES_VERSION_NAME }})
+          draft: false
+          prerelease: true
+          make_latest: "false"
+          fail_on_unmatched_files: true
+          files: |
+            out/nanami-movies-rotator.apk
+            out/SHA256SUMS.txt
+          body: |
+            Rolling development build for **Nanami Movies** (`${{ env.NANAMI_MOVIES_VERSION_NAME }}`).
+
+            [GitHub Actions run ${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) built and tested commit `${{ github.sha }}`.
+
+      - name: Point the rolling tag at the published commit
+        run: git push origin "+HEAD:refs/tags/nanami-movies-rotator"

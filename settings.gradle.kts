@@ -28,6 +28,7 @@ include(":apps:marucast-gaming")
 include(":apps:tup-ers")
 include(":apps:nami-space")
 include(":apps:manime")
+include(":apps:nanami-movies")
 include(":apps:maru-study")
 
 
