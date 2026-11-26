@@ -26,6 +26,7 @@ private val sourceHttp = OkHttpClient.Builder().callTimeout(15, TimeUnit.SECONDS
 private val IntroDbSegments = "https://api.introdb.app/segments".toHttpUrl()
 private val releaseGroup = Regex("-([A-Za-z][A-Za-z0-9]{1,26})$")
 private val resolution = Regex("(?i)\\b(?:2160p|1080p|720p|480p|360p|4K)\\b")
+private val reportedSeeders = Regex("(?:👤\\s*|\\bseeders?\\s*[:=]?\\s*)(\\d[\\d,]*)", RegexOption.IGNORE_CASE)
 
 internal fun movieStreamId(title: MovieTitle, episode: MovieEpisode?): String =
     episode?.let { "${title.imdbId}:${it.season}:${it.episode}" } ?: title.imdbId
@@ -57,10 +58,24 @@ internal suspend fun findMovieSources(
         }
     }.awaitAll()
     if (results.all { it == null }) throw IOException("Your video sources could not be reached.")
-    results.filterNotNull().flatten()
+    rankMovieSources(results.filterNotNull().flatten()
         .filter { it.httpUri() != null || it.magnetUri() != null }
-        .distinctBy { Triple(it.url, it.infoHash, it.fileIdx) }
+        .distinctBy { Triple(it.url, it.infoHash, it.fileIdx) })
 }
+
+internal fun rankMovieSources(sources: List<StremioStreamResult>): List<StremioStreamResult> = sources.map { stream ->
+    val seeds = reportedSeeders.find(stream.title.orEmpty())?.groupValues?.get(1)?.replace(",", "")?.toIntOrNull()
+    val direct = stream.url?.startsWith("https://", ignoreCase = true) == true
+    val balanced = stream.movieQuality() in setOf("1080p", "720p")
+    val group = when {
+        direct -> 0
+        seeds != null && seeds > 0 && balanced -> 1
+        seeds != null && seeds > 0 -> 2
+        seeds == null -> 3
+        else -> 4
+    }
+    Triple(stream, group, seeds ?: 0)
+}.sortedWith(compareBy<Triple<StremioStreamResult, Int, Int>> { it.second }.thenByDescending { it.third }).map { it.first }
 
 internal suspend fun findMovieSubtitles(title: MovieTitle, episode: MovieEpisode?): List<SubtitleTrack> {
     for (addon in subtitleAddons) {
