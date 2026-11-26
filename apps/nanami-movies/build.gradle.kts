@@ -6,6 +6,7 @@ plugins {
 }
 
 // Compile the same Stremio client and verified-range torrent helpers as Nanami Anime.
+val streamingSourceDir = layout.buildDirectory.dir("generated/nanamiStreaming")
 val syncStreamingSources by tasks.registering(Sync::class) {
     from(rootProject.layout.projectDirectory.dir("apps/manime/src/main/java")) {
         include(
@@ -14,7 +15,7 @@ val syncStreamingSources by tasks.registering(Sync::class) {
             "io/maru/manime/torrent/StreamSafety.kt"
         )
     }
-    into(layout.buildDirectory.dir("generated/nanamiStreaming"))
+    into(streamingSourceDir)
 }
 
 android {
@@ -31,7 +32,7 @@ android {
 
     buildFeatures.buildConfig = true
     sourceSets.named("main") {
-        java.srcDir(syncStreamingSources)
+        java.srcDir(streamingSourceDir.get().asFile)
     }
 
     val signingFile = file("keystore.properties")
@@ -50,6 +51,13 @@ android {
         jniLibs.useLegacyPackaging = true
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    dependsOn(syncStreamingSources)
+}
+tasks.withType<JavaCompile>().configureEach {
+    dependsOn(syncStreamingSources)
 }
 
 tasks.withType<com.android.build.gradle.internal.tasks.CheckAarMetadataTask>().configureEach {

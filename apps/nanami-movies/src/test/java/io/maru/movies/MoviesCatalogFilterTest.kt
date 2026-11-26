@@ -20,8 +20,8 @@ class MoviesCatalogFilterTest {
     }
 
     @Test
-    fun fallsBackToUnambiguousOriginsWhenLookupIsUnavailable() {
-        assertTrue(includeAnimation(listOf("United States"), null))
+    fun holdsBackUnverifiedAnimationWhenLookupIsUnavailable() {
+        assertFalse(includeAnimation(listOf("United States"), null))
         assertFalse(includeAnimation(listOf("United States", "Japan"), null))
         assertFalse(includeAnimation(emptyList(), null))
     }

@@ -321,11 +321,11 @@ internal fun MovieDetails(
     val verified = details?.getOrNull()
     val title = verified ?: preview
     val seasons = title.episodes.map(MovieEpisode::season).distinct().sorted()
-    val activeSeason = chosenSeason ?: seasons.firstOrNull()
-    val episodes = title.episodes.filter { it.season == activeSeason }
     val resume = library.recent().firstOrNull { it.title == title.ref }
     val resumeEpisode = title.episodes.firstOrNull { it.season == resume?.season && it.episode == resume?.episode }
     val firstEpisode = resumeEpisode ?: title.episodes.firstOrNull { it.season > 0 } ?: title.episodes.firstOrNull()
+    val activeSeason = chosenSeason ?: firstEpisode?.season
+    val episodes = title.episodes.filter { it.season == activeSeason }
     val canPlay = verified != null && (title.kind == MovieKind.MOVIE || firstEpisode != null)
 
     LazyColumn(modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(13.dp), contentPadding = PaddingValues(bottom = 22.dp)) {

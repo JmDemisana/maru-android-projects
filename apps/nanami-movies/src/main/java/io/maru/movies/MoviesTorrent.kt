@@ -35,13 +35,22 @@ import java.util.UUID
 
 private val torrentHash = Regex("[A-Fa-f0-9]{40}")
 private val videoExtensions = setOf("mkv", "mp4", "webm", "m4v", "avi", "ts")
+private val peerDiscoveryTrackers = listOf(
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://tracker.torrent.eu.org:451/announce"
+)
 
 internal fun StremioStreamResult.magnetUri(): String? {
     val hash = infoHash?.takeIf(torrentHash::matches) ?: return null
+    val providerTrackers = sources.filter {
+        it.startsWith("udp://") || it.startsWith("https://") || it.startsWith("http://")
+    }
     return buildString {
         append("magnet:?xt=urn:btih:")
-        append(hash)
-        sources.distinct().filter { it.startsWith("udp://") || it.startsWith("https://") || it.startsWith("http://") }
+        append(hash.lowercase())
+        (providerTrackers + peerDiscoveryTrackers).distinct()
             .forEach { tracker -> append("&tr=").append(Uri.encode(tracker)) }
     }
 }

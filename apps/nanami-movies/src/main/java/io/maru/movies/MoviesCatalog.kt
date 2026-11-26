@@ -5,6 +5,7 @@ import io.maru.manime.readResponse
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -44,6 +45,11 @@ data class MovieEpisode(
 
 class MoviesCatalog(private val client: OkHttpClient = OkHttpClient()) {
     private val animeMappings = LruCache<String, Boolean>(512)
+    private val responses = object : LruCache<HttpUrl, CatalogResponse>(6 * 1024 * 1024) {
+        override fun sizeOf(key: HttpUrl, value: CatalogResponse): Int = value.size
+    }
+
+    private data class CatalogResponse(val data: JSONObject, val size: Int, val loadedAt: Long)
 
     suspend fun popular(kind: MovieKind, skip: Int = 0, genre: String? = null): List<MovieTitle> {
         val extras = buildList {
@@ -163,13 +169,21 @@ class MoviesCatalog(private val client: OkHttpClient = OkHttpClient()) {
         return isAnime
     }
 
-    private suspend fun json(request: Request): JSONObject? =
-        client.newCall(request).apply { timeout().timeout(12, TimeUnit.SECONDS) }.readResponse {
+    private suspend fun json(request: Request): JSONObject? {
+        val url = request.url
+        responses.get(url)?.takeIf {
+            System.nanoTime() - it.loadedAt < TimeUnit.MINUTES.toNanos(3)
+        }?.let { return it.data }
+
+        return client.newCall(request).apply { timeout().timeout(12, TimeUnit.SECONDS) }.readResponse {
             if (it.code == 404) return@readResponse null
             if (!it.isSuccessful) throw IOException("Catalog request failed (${it.code}).")
-            val body = it.body ?: throw IOException("Catalog response was empty.")
-            JSONObject(body.string())
+            val body = it.body?.string() ?: throw IOException("Catalog response was empty.")
+            val data = JSONObject(body)
+            responses.put(url, CatalogResponse(data, body.length * 3, System.nanoTime()))
+            data
         }
+    }
 
     private suspend fun <T, R> List<T>.mapParallel(transform: suspend (T) -> R): List<R> = coroutineScope {
         chunked(12).flatMap { batch -> batch.map { async { transform(it) } }.awaitAll() }
@@ -187,9 +201,8 @@ class MoviesCatalog(private val client: OkHttpClient = OkHttpClient()) {
 
 internal fun includeAnimation(countries: List<String>, animeLookup: Boolean?): Boolean {
     val primaryCountry = countries.firstOrNull()
-    if (primaryCountry.isNullOrBlank() || primaryCountry.isJapan() || animeLookup == true) return false
-    // A Japanese co-production can still be a western cartoon. Check its external classification.
-    return animeLookup == false || countries.none { it.isJapan() }
+    // The origin check catches unmapped Japanese anime. A successful lookup can clear co-productions.
+    return !primaryCountry.isNullOrBlank() && !primaryCountry.isJapan() && animeLookup == false
 }
 
 private fun String?.isJapan(): Boolean =

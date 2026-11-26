@@ -1,6 +1,7 @@
 package io.maru.movies
 
 import android.net.Uri
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.AlertDialog
@@ -99,7 +101,7 @@ internal fun MoviesPlayback(
 
     val currentSources = sources
     val selected = currentSources?.getOrNull(sourceIndex)
-    Column(Modifier.fillMaxSize().background(Color.Black)) {
+    Column(Modifier.fillMaxSize().background(Color.Black).safeDrawingPadding()) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -272,7 +274,7 @@ private fun MovieSourcePlayer(
         } catch (_: LinkageError) {
             failure = "The torrent engine could not start on this device."
         } catch (error: Exception) {
-            android.util.Log.w("MoviesPlayback", "Could not prepare source", error)
+            Log.w("MoviesPlayback", "Could not prepare source", error)
             failure = "This source could not be played."
         }
     }
@@ -297,7 +299,7 @@ private fun MovieSourcePlayer(
 }
 
 private fun StremioStreamResult.httpUri(): Uri? = url?.let(Uri::parse)?.takeIf { uri ->
-    (uri.scheme == "https" || uri.scheme == "http") && !uri.host.isNullOrBlank()
+    uri.scheme == "https" && !uri.host.isNullOrBlank()
 }
 
 @Composable

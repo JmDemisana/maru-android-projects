@@ -8,6 +8,7 @@ import android.util.Base64
 import java.io.IOException
 import java.security.GeneralSecurityException
 import java.security.KeyStore
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -62,6 +63,9 @@ class Simkl(context: Context) {
     val isConnected: Boolean
         get() = storedToken() != null
 
+    internal val connectionKey: String?
+        get() = prefs.getString("connection_key", null)
+
     suspend fun setClientId(value: String) = mutex.withLock {
         val override = value.trim().takeIf(String::isNotEmpty)
         val effectiveId = override ?: BuildConfig.SIMKL_CLIENT_ID.trim()
@@ -104,7 +108,8 @@ class Simkl(context: Context) {
                     val token = parseToken(response.requireSuccess())
                     require("media:write" in token.scope.split(' ')) { "Simkl did not grant permission to sync your list." }
                     val encrypted = withContext(Dispatchers.IO) { vault.encrypt(token.toJson().toString()) }
-                    prefs.edit().remove("library").putString("token", encrypted).apply()
+                    prefs.edit().remove("library").putString("token", encrypted)
+                        .putString("connection_key", UUID.randomUUID().toString()).apply()
                     activeSignIn = null
                 }
                 response
@@ -126,25 +131,29 @@ class Simkl(context: Context) {
         syncLibrary().filter { it.status == "plantowatch" }.map { it.media }
     }
 
-    suspend fun setWatchlisted(imdbId: String, isSeries: Boolean, listed: Boolean) = mutex.withLock {
+    suspend fun setWatchlisted(imdbId: String, isSeries: Boolean, listed: Boolean): Boolean = mutex.withLock {
         val item = imdbItem(imdbId)
         val type = if (isSeries) "shows" else "movies"
         val entry = syncLibrary().firstOrNull { it.media.imdbId == imdbId && it.media.isSeries == isSeries }
         if (listed) {
             // An existing Watchlist state belongs to the user. Adding again could move watched titles back to planned.
-            if (entry != null) return@withLock
+            if (entry != null) return@withLock entry.status == "plantowatch"
             item.put("to", "plantowatch")
             val result = authorized("sync/add-to-list", JSONObject().put(type, JSONArray().put(item)))
             checkFound(result)
             val added = result.optJSONObject("added")?.optJSONArray(type)?.optJSONObject(0)
                 ?: throw IOException("Simkl did not confirm the watchlist update.")
+            val status = added.text("to") ?: "plantowatch"
             putCachedEntry(type, imdbId, libraryEntry(imdbId, isSeries,
-                added.optJSONObject("ids")?.text("simkl"), added.text("to") ?: "plantowatch", false))
+                added.optJSONObject("ids")?.text("simkl"), status, false))
+            status == "plantowatch"
         } else {
             // Simkl's removal endpoint deletes the whole entry, including any watch history it holds.
-            if (entry?.status != "plantowatch" || entry.hasPreservedActivity) return@withLock
+            if (entry?.status != "plantowatch") return@withLock false
+            if (entry.hasPreservedActivity) return@withLock true
             checkFound(authorized("sync/history/remove", JSONObject().put(type, JSONArray().put(item))))
             putCachedEntry(type, imdbId, null)
+            false
         }
     }
 
@@ -162,7 +171,7 @@ class Simkl(context: Context) {
     private suspend fun disconnectLocked() {
         val previous = storedToken()
         activeSignIn = null
-        prefs.edit().remove("token").remove("library").apply()
+        prefs.edit().remove("token").remove("library").remove("connection_key").apply()
         if (previous != null) {
             try {
                 oauth("revoke", clientId, "token" to previous.refresh, "token_type_hint" to "refresh_token")
@@ -286,7 +295,7 @@ class Simkl(context: Context) {
     private suspend fun refresh(token: Token): Token = withContext(Dispatchers.IO + NonCancellable) {
         val response = oauth("token", clientId, "grant_type" to "refresh_token", "refresh_token" to token.refresh)
         if (response.error in setOf("invalid_grant", "invalid_client")) {
-            prefs.edit().remove("token").remove("library").apply()
+            prefs.edit().remove("token").remove("library").remove("connection_key").apply()
             throw IOException("Your Simkl connection expired. Connect your account again.")
         }
         val updated = parseToken(response.requireSuccess())

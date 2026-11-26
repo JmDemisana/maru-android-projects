@@ -10,7 +10,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -127,8 +126,8 @@ private fun MoviesApp(context: Context, catalog: MoviesCatalog, library: MovieLi
         scope.launch {
             try {
                 if (connected) {
-                    simkl.setWatchlisted(title.imdbId, title.kind == MovieKind.SERIES, adding)
-                    remote = if (adding) remote + ref else remote - ref
+                    val listedRemotely = simkl.setWatchlisted(title.imdbId, title.kind == MovieKind.SERIES, adding)
+                    remote = if (listedRemotely) remote + ref else remote - ref
                 }
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
@@ -155,29 +154,32 @@ private fun MoviesApp(context: Context, catalog: MoviesCatalog, library: MovieLi
         val request = playback
         val title = selected
         when {
-            request != null -> Box(Modifier.fillMaxSize().padding(insets)) { MoviesPlayback(
+            request != null -> MoviesPlayback(
                 title = request.title,
                 episode = request.episode,
                 startPosition = request.position,
                 onProgress = { position, duration ->
                     val progress = library.record(request.title.ref, request.episode, position, duration)
-                    if (connected && progress?.completed == true && !library.sent(progress.key) && pendingWatched.add(progress.key)) {
+                    val syncKey = simkl.connectionKey?.let { connection -> progress?.let { "$connection/${it.key}" } }
+                    if (connected && progress?.completed == true && syncKey != null &&
+                        !library.sent(syncKey) && pendingWatched.add(syncKey)
+                    ) {
                         scope.launch {
                             try {
                                 simkl.markWatched(progress.title.imdbId, progress.season, progress.episode)
-                                library.markSent(progress.key)
+                                library.markSent(syncKey)
                             } catch (error: Exception) {
                                 if (error is CancellationException) throw error
                                 connected = simkl.isConnected
                                 snackbar.showSnackbar("Couldn't send watch progress to SIMKL.")
                             } finally {
-                                pendingWatched.remove(progress.key)
+                                pendingWatched.remove(syncKey)
                             }
                         }
                     }
                 },
                 onBack = ::stopPlayback,
-            ) }
+            )
             title != null -> MovieDetails(
                 preview = title,
                 catalog = catalog,
@@ -265,15 +267,13 @@ private fun SimklSettings(
                     }) { Text("Disconnect") }
                 } else {
                     Text("Connect to sync My List and watched movies and episodes.")
-                    if (simkl.clientId.isBlank() || id.isNotBlank()) {
-                        OutlinedTextField(
-                            value = id,
-                            onValueChange = { id = it },
-                            enabled = !busy,
-                            singleLine = true,
-                            label = { Text("SIMKL V2 client ID") },
-                        )
-                    }
+                    OutlinedTextField(
+                        value = id,
+                        onValueChange = { id = it },
+                        enabled = !busy,
+                        singleLine = true,
+                        label = { Text("SIMKL V2 client ID") },
+                    )
                     if (id.isBlank()) TextButton(onClick = {
                         runCatching { openInBrowser("https://simkl.com/settings/developer/new/") }
                             .onFailure { status = "Couldn't open the browser." }
