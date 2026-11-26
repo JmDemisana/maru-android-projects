@@ -375,7 +375,7 @@ private fun MoviesClipStudioOverlay(
                 val name = if (episode == null) title.title else "${title.title} S${episode.season}"
                 result = exporter.exportToGallery(
                     videoUri = exportUri,
-                    subtitleUri = null,
+                    mimeType = null,
                     headers = source?.headers.orEmpty(),
                     animeTitle = name,
                     episodeNum = episode?.episode ?: 0,
