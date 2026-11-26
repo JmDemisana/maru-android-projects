@@ -1,6 +1,8 @@
 package io.maru.movies
 
 import android.util.LruCache
+import io.maru.manime.extensions.StremioAddonClient
+import io.maru.manime.extensions.StremioStreamResult
 import io.maru.manime.readResponse
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -14,6 +16,9 @@ import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
 import java.net.URLEncoder
+import java.time.Instant
+import java.time.LocalDate
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 enum class MovieKind(val addonType: String) {
@@ -31,8 +36,20 @@ data class MovieTitle(
     val runtime: String? = null,
     val overview: String? = null,
     val genres: List<String> = emptyList(),
-    val episodes: List<MovieEpisode> = emptyList()
-)
+    val episodes: List<MovieEpisode> = emptyList(),
+    val logo: String? = null,
+    val rating: Double? = null,
+    val certification: String? = null,
+    val explicitlyAdult: Boolean = false,
+    val cast: List<String> = emptyList(),
+    val directors: List<String> = emptyList(),
+    val writers: List<String> = emptyList(),
+    val trailerId: String? = null,
+    val status: String? = null,
+    val releasedAt: Instant? = null,
+) {
+    val isMature: Boolean get() = isMatureCertification(certification) || explicitlyAdult
+}
 
 data class MovieEpisode(
     val id: String,
@@ -40,25 +57,43 @@ data class MovieEpisode(
     val season: Int,
     val episode: Int,
     val thumbnail: String? = null,
-    val overview: String? = null
+    val overview: String? = null,
+    val releasedAt: Instant? = null,
+    val rating: Double? = null,
 )
+
+internal enum class MovieFeed(val catalogId: String) {
+    POPULAR("top"), NEW("year"), TOP_RATED("imdbRating")
+}
+
+internal data class MoviePage(val titles: List<MovieTitle>, val nextOffset: Int?)
 
 class MoviesCatalog(private val client: OkHttpClient = OkHttpClient()) {
     private val animeMappings = LruCache<String, Boolean>(512)
+    private val englishAudio = LruCache<String, Boolean>(128)
+    private val torrentio = StremioAddonClient("https://torrentio.strem.fun", client)
     private val responses = object : LruCache<HttpUrl, CatalogResponse>(6 * 1024 * 1024) {
         override fun sizeOf(key: HttpUrl, value: CatalogResponse): Int = value.size
     }
 
     private data class CatalogResponse(val data: JSONObject, val size: Int, val loadedAt: Long)
 
-    suspend fun popular(kind: MovieKind, skip: Int = 0, genre: String? = null): List<MovieTitle> {
+    suspend fun popular(kind: MovieKind, skip: Int = 0, genre: String? = null): List<MovieTitle> =
+        discover(kind, MovieFeed.POPULAR, skip, genre).titles
+
+    internal suspend fun discover(kind: MovieKind, feed: MovieFeed, skip: Int = 0, genre: String? = null): MoviePage {
         val extras = buildList {
-            genre?.takeIf(String::isNotBlank)?.let { add("genre" to it) }
+            val category = if (feed == MovieFeed.NEW) LocalDate.now().year.toString() else genre
+            category?.takeIf(String::isNotBlank)?.let { add("genre" to it) }
             if (skip > 0) add("skip" to skip.toString())
         }
-        return catalog(kind, extras).mapParallel { item ->
+        val raw = catalog(kind, extras, feed)
+        val titles = raw.mapParallel { item ->
             parse(kind, item, includeEpisodes = false)
-        }.filterNotNull()
+        }.filterNotNull().distinctBy(MovieTitle::imdbId)
+        // A provider page can contain filtered items, so advance by the provider's page size.
+        val nextOffset = (skip + 50).takeIf { raw.isNotEmpty() }
+        return MoviePage(titles, nextOffset)
     }
 
     suspend fun search(query: String): List<MovieTitle> = coroutineScope {
@@ -85,29 +120,50 @@ class MoviesCatalog(private val client: OkHttpClient = OkHttpClient()) {
         return metadata(kind, imdbId)?.let { parse(kind, it, includeEpisodes = true) }
     }
 
-    private suspend fun catalog(kind: MovieKind, extras: List<Pair<String, String>>): List<JSONObject> {
+    internal suspend fun hasListedEnglishAudio(title: MovieTitle): Boolean {
+        val first = if (title.kind == MovieKind.SERIES) {
+            val episodes = details(title.kind, title.imdbId)?.episodes.orEmpty()
+            episodes.firstOrNull { it.season > 0 && it.releasedAt?.isAfter(Instant.now()) != true } ?: return false
+        } else null
+        val streamId = first?.id ?: title.imdbId
+        englishAudio.get(streamId)?.let { return it }
+        val available = torrentio.getStreams(title.kind.addonType, streamId).any(StremioStreamResult::listsEnglishAudio)
+        englishAudio.put(streamId, available)
+        return available
+    }
+
+    private suspend fun catalog(
+        kind: MovieKind,
+        extras: List<Pair<String, String>>,
+        feed: MovieFeed = MovieFeed.POPULAR,
+    ): List<JSONObject> {
         val url = CINEMETA.newBuilder()
             .addPathSegments("catalog/${kind.addonType}")
             .apply {
-                if (extras.isEmpty()) addPathSegment("top.json")
+                if (extras.isEmpty()) addPathSegment("${feed.catalogId}.json")
                 else {
                     val encoded = extras.joinToString("&") { (key, value) ->
                         val escaped = URLEncoder.encode(value, "UTF-8").replace("+", "%20")
                         "$key=$escaped"
                     }
-                    addPathSegment("top").addEncodedPathSegment("$encoded.json")
+                    addPathSegment(feed.catalogId).addEncodedPathSegment("$encoded.json")
                 }
             }
             .build()
-        return json(Request.Builder().url(url).build())?.optJSONArray("metas").objects()
+        return json(cinemetaRequest(url))?.optJSONArray("metas").objects()
     }
 
     private suspend fun metadata(kind: MovieKind, imdbId: String): JSONObject? {
         val url = CINEMETA.newBuilder()
             .addPathSegments("meta/${kind.addonType}/$imdbId.json")
             .build()
-        return json(Request.Builder().url(url).build())?.optJSONObject("meta")
+        return json(cinemetaRequest(url))?.optJSONObject("meta")
     }
+
+    private fun cinemetaRequest(url: HttpUrl): Request = Request.Builder().url(url)
+        .header("User-Agent", StremioAddonClient.BROWSER_UA)
+        .header("Accept", "application/json")
+        .build()
 
     private suspend fun parse(kind: MovieKind, item: JSONObject, includeEpisodes: Boolean): MovieTitle? {
         val imdbId = item.imdbId() ?: return null
@@ -129,7 +185,19 @@ class MoviesCatalog(private val client: OkHttpClient = OkHttpClient()) {
             runtime = item.text("runtime"),
             overview = item.text("description"),
             genres = genres,
-            episodes = if (includeEpisodes && kind == MovieKind.SERIES) episodes(item, imdbId) else emptyList()
+            episodes = if (includeEpisodes && kind == MovieKind.SERIES) episodes(item, imdbId) else emptyList(),
+            logo = item.art("logo"),
+            rating = item.rating("imdbRating"),
+            certification = item.certification(),
+            explicitlyAdult = item.optBoolean("adult") || item.optBoolean("isAdult") ||
+                genres.any { it.equals("Adult", ignoreCase = true) },
+            cast = item.optJSONArray("cast").strings(),
+            directors = item.optJSONArray("director").strings(),
+            writers = item.optJSONArray("writer").strings(),
+            trailerId = item.optJSONArray("trailers").objects()
+                .firstNotNullOfOrNull { trailer -> trailer.text("source")?.takeIf(YOUTUBE_ID::matches) },
+            status = item.text("status"),
+            releasedAt = item.instant("released"),
         )
     }
 
@@ -144,7 +212,9 @@ class MoviesCatalog(private val client: OkHttpClient = OkHttpClient()) {
                 season = season,
                 episode = episode,
                 thumbnail = video.art("thumbnail"),
-                overview = video.text("overview") ?: video.text("description")
+                overview = video.text("overview") ?: video.text("description"),
+                releasedAt = video.instant("released") ?: video.instant("firstAired"),
+                rating = video.rating("rating")?.takeIf { it > 0 },
             )
         }.distinctBy(MovieEpisode::id).sortedWith(compareBy(MovieEpisode::season, MovieEpisode::episode))
     }
@@ -196,6 +266,7 @@ class MoviesCatalog(private val client: OkHttpClient = OkHttpClient()) {
         private val CINEMETA = "https://v3-cinemeta.strem.io".toHttpUrl()
         private val ANIME_INDEX = "https://api.ani.zip/mappings".toHttpUrl()
         private val IMDB_ID = Regex("tt[0-9]+")
+        private val YOUTUBE_ID = Regex("[A-Za-z0-9_-]{11}")
     }
 }
 
@@ -212,6 +283,29 @@ private fun JSONObject.text(key: String): String? =
     (opt(key) as? String)?.trim()?.takeUnless { it.isEmpty() || it.equals("N/A", ignoreCase = true) }
 
 private fun JSONObject.art(key: String): String? = text(key)?.takeIf { it.startsWith("https://") }
+
+private fun JSONObject.instant(key: String): Instant? = text(key)?.let { runCatching { Instant.parse(it) }.getOrNull() }
+
+private fun JSONObject.rating(key: String): Double? = opt(key)?.toString()?.toDoubleOrNull()?.takeIf { it in 0.0..10.0 }
+
+private fun JSONObject.certification(): String? = sequenceOf("certification", "contentRating", "ageRating", "rated")
+    .mapNotNull(::text)
+    .map { it.uppercase(Locale.ROOT) }
+    .firstOrNull { it in CERTIFICATIONS }
+
+internal fun isMatureCertification(value: String?): Boolean = value?.uppercase(Locale.ROOT) in MATURE_CERTIFICATIONS
+
+private val MATURE_CERTIFICATIONS = setOf("R", "NC-17", "TV-MA", "X", "18", "18+", "R18", "R18+", "M18", "R-18")
+private val CERTIFICATIONS = MATURE_CERTIFICATIONS + setOf(
+    "G", "PG", "PG-13", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "TV-PG", "TV-14", "12", "12A", "13", "15", "16", "16+",
+)
+
+private val explicitEnglishAudio = Regex(
+    """(?i)(?:\b(?:english|eng)[ ._-]*(?:dub(?:bed)?|audio)\b|\b(?:dubbed\s+in|audio\s*[:=])\s*(?:english|eng)\b)"""
+)
+
+internal fun StremioStreamResult.listsEnglishAudio(): Boolean =
+    listOfNotNull(title, filename).any(explicitEnglishAudio::containsMatchIn)
 
 private fun JSONArray?.objects(): List<JSONObject> = if (this == null) emptyList() else
     (0 until length()).mapNotNull(::optJSONObject)

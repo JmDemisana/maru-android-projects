@@ -17,6 +17,7 @@ import io.maru.manime.torrent.verifiedFileRange
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withTimeout
 import org.libtorrent4j.AddTorrentParams
 import org.libtorrent4j.ErrorCode
@@ -75,8 +76,7 @@ internal suspend fun withMoviesTorrent(
         val info = withTimeout(30_000L) { awaitMovieTorrentMetadata(handle) }
         val fileIndex = chooseMovieFile(info, source, episode)
         val files = info.files()
-        val file = File(saveDir, files.filePath(fileIndex)).canonicalFile
-        check(file.path.startsWith(saveDir.canonicalPath + File.separator)) { "Invalid torrent video path." }
+        val file = torrentVideoFile(saveDir, files.filePath(fileIndex))
         check(info.pieceLength() > 0 && info.numPieces() > 0) { "The torrent has no valid pieces." }
         selectMovieTorrentFile(handle, info.numFiles(), fileIndex)
 
@@ -98,6 +98,92 @@ internal suspend fun withMoviesTorrent(
         stream?.stopReading()
         runCatching { session.stop() }
         saveDir.deleteRecursively()
+    }
+}
+
+private fun torrentVideoFile(directory: File, path: String): File = File(directory, path).canonicalFile.also { file ->
+    check(file.path.startsWith(directory.canonicalPath + File.separator)) { "Invalid torrent video path." }
+}
+
+/** The finished session can seed from its original path when the vault uses a hard link. */
+internal class MovieTorrentTransfer(
+    val file: File,
+    private val session: SessionManager,
+    private val handle: TorrentHandle,
+    private val size: Long,
+) {
+    suspend fun seed(allowed: () -> Boolean) {
+        if (!allowed() || !handle.isValid) return
+        val started = SystemClock.elapsedRealtime()
+        val initialUpload = handle.status().totalPayloadUpload()
+        handle.resume()
+        while (allowed() && handle.isValid && SystemClock.elapsedRealtime() - started < 30 * 60 * 1_000L) {
+            val status = handle.status()
+            if (status.errorCode().isError || status.totalPayloadUpload() - initialUpload >= size) break
+            delay(1_000)
+        }
+    }
+
+    fun stop() {
+        runCatching { handle.pause() }
+        runCatching { session.stop() }
+    }
+}
+
+internal suspend fun downloadMoviesTorrent(
+    directory: File,
+    source: StremioStreamResult,
+    episode: MovieEpisode?,
+    speedCapKib: Int,
+    onProgress: (MovieDownloadProgress) -> Unit,
+): MovieTorrentTransfer {
+    val magnet = requireNotNull(source.magnetUri()) { "Invalid torrent source." }
+    val session = SessionManager()
+    var transfer: MovieTorrentTransfer? = null
+    try {
+        session.start()
+        if (speedCapKib > 0) session.downloadRateLimit(speedCapKib * 1024)
+        val handle = addMoviesTorrent(session, magnet, directory)
+        val info = withTimeoutOrNull(30_000L) { awaitMovieTorrentMetadata(handle) }
+            ?: throw MovieDownloadException("No peers returned torrent metadata.")
+        val selected = chooseMovieFile(info, source, episode)
+        val files = info.files()
+        val file = torrentVideoFile(directory, files.filePath(selected))
+        val size = files.fileSize(selected)
+        val offset = files.fileOffset(selected)
+        if (directory.usableSpace < size) throw DownloadStorageException()
+        selectMovieTorrentFile(handle, info.numFiles(), selected)
+        handle.unsetFlags(TorrentFlags.UPLOAD_MODE.or_(TorrentFlags.SEQUENTIAL_DOWNLOAD))
+        handle.resume()
+        var best = 0L
+        var lastProgress = SystemClock.elapsedRealtime()
+        while (true) {
+            check(handle.isValid) { "Torrent session stopped." }
+            val status = handle.status()
+            check(!status.errorCode().isError) { "Torrent download failed." }
+            val done = status.totalWantedDone().coerceIn(0L, size)
+            if (done == size && file.isFile && file.length() == size &&
+                verifiedFileRange(0, size, size, offset, info.pieceLength(), info.numPieces(), handle::havePiece)
+            ) {
+                handle.pause()
+                val complete = MovieTorrentTransfer(file, session, handle, size)
+                transfer = complete
+                return complete
+            }
+            onProgress(MovieDownloadProgress(done, size, status.downloadPayloadRate().coerceAtLeast(0).toLong(), status.numPeers()))
+            val now = SystemClock.elapsedRealtime()
+            if (done > best) {
+                best = done
+                lastProgress = now
+            }
+            val timeout = if (best == 0L) 40_000L else 95_000L
+            if (now - lastProgress >= timeout) {
+                throw MovieDownloadException(if (best == 0L) "No peers sent video data." else "This source stalled.")
+            }
+            delay(900)
+        }
+    } finally {
+        if (transfer == null) runCatching { session.stop() }
     }
 }
 
@@ -148,12 +234,14 @@ private suspend fun selectMovieTorrentFile(handle: TorrentHandle, fileCount: Int
     val priorities = Array(fileCount) { if (it == selected) Priority.DEFAULT else Priority.IGNORE }
     handle.prioritizeFiles(priorities)
     // A pending file priority update can reset piece deadlines. Wait for it first.
-    withTimeout(5_000L) {
+    val fileSelected = withTimeoutOrNull(5_000L) {
         while (!handle.filePriorities().contentEquals(priorities)) {
             check(!handle.status().errorCode().isError) { "Could not select the torrent video file." }
             delay(50)
         }
+        true
     }
+    if (fileSelected != true) throw IOException("Could not select the torrent video file.")
 }
 
 private class VerifiedMovieFile(

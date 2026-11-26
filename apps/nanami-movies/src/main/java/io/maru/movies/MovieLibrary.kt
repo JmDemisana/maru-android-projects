@@ -1,6 +1,7 @@
 package io.maru.movies
 
 import android.content.Context
+import org.json.JSONArray
 import org.json.JSONObject
 
 internal data class TitleRef(val kind: MovieKind, val imdbId: String) {
@@ -24,11 +25,14 @@ internal data class WatchProgress(
     val position: Long,
     val duration: Long,
     val updated: Long,
+    val completed: Boolean = duration > 0 && position >= duration * 0.9,
 ) {
     val key: String get() = "${title.key}/${season ?: "movie"}/${episode ?: "movie"}"
-    val completed: Boolean get() = duration > 0 && position >= duration * 0.9
-    val canResume: Boolean get() = position >= 5_000 && !completed
+    val canResume: Boolean get() = position >= 5_000 && position < duration && !completed
 }
+
+internal data class PendingListChange(val title: TitleRef, val listed: Boolean)
+internal data class PendingWatchChange(val progress: WatchProgress, val watched: Boolean)
 
 internal class MovieLibrary(context: Context) {
     private val prefs = context.getSharedPreferences("nanami_movies_library", Context.MODE_PRIVATE)
@@ -37,61 +41,119 @@ internal class MovieLibrary(context: Context) {
         .mapNotNull(TitleRef::parse).toSet()
 
     fun save(items: Set<TitleRef>) {
-        prefs.edit().putStringSet("saved", items.map(TitleRef::key).toSet()).apply()
+        val before = savedOrder().filterKeys { it in items }
+        val order = JSONObject()
+        for (item in items) order.put(item.key, before[item] ?: System.currentTimeMillis())
+        prefs.edit().putStringSet("saved", items.map(TitleRef::key).toSet()).putString("saved_order", order.toString()).apply()
     }
 
-    fun recent(): List<WatchProgress> = prefs.all.keys.asSequence()
+    fun savedOrder(): Map<TitleRef, Long> {
+        val data = readJson("saved_order") ?: return emptyMap()
+        return data.keys().asSequence().mapNotNull { key -> TitleRef.parse(key)?.let { it to data.optLong(key) } }.toMap()
+    }
+
+    fun history(): List<WatchProgress> = prefs.all.keys.asSequence()
         .filter { it.startsWith("progress/") }
         .mapNotNull(::read)
         .sortedByDescending(WatchProgress::updated)
+        .toList()
+
+    fun recent(): List<WatchProgress> = history()
         .filter(WatchProgress::canResume)
         .distinctBy(WatchProgress::title)
         .take(15)
-        .toList()
 
     fun progress(title: TitleRef, episode: MovieEpisode?): WatchProgress? =
         read("progress/${WatchProgress(title, episode?.season, episode?.episode, 0, 0, 0).key}")
 
-    fun record(title: TitleRef, episode: MovieEpisode?, position: Long, duration: Long): WatchProgress? {
+    fun record(title: TitleRef, episode: MovieEpisode?, position: Long, duration: Long, completion: Int): WatchProgress? {
         if (position <= 0 || duration <= 0) return null
-        val progress = WatchProgress(title, episode?.season, episode?.episode, position, duration, System.currentTimeMillis())
-        val key = "progress/${progress.key}"
-        val previous = read(key)
-        if (previous != null && previous.completed && progress.completed) return previous
-        if (previous != null && previous.completed && position < 5_000) return previous
+        val previous = progress(title, episode)
+        val completed = previous?.completed == true || position >= duration * completion.coerceIn(50, 100) / 100.0
+        val progress = WatchProgress(title, episode?.season, episode?.episode, position, duration, System.currentTimeMillis(), completed)
+        if (previous != null && previous.completed && completed) return previous
+        if (previous != null && position == previous.position && duration == previous.duration && !completed) return previous
         if (previous != null && !progress.completed && progress.updated - previous.updated < 1_500 &&
             kotlin.math.abs(position - previous.position) < 2_000
         ) return previous
-        prefs.edit().putString(key, JSONObject().apply {
-            put("title", title.key)
-            if (episode != null) {
-                put("season", episode.season)
-                put("episode", episode.episode)
-            }
-            put("position", progress.position)
-            put("duration", progress.duration)
-            put("updated", progress.updated)
-        }.toString()).apply()
+        prefs.edit().putString("progress/${progress.key}", progress.json().toString()).apply()
         return progress
+    }
+
+    fun markWatched(title: TitleRef, episode: MovieEpisode?, watched: Boolean): WatchProgress {
+        val previous = progress(title, episode)
+        val duration = previous?.duration ?: 0
+        val position = if (watched) duration else 0
+        val result = WatchProgress(title, episode?.season, episode?.episode, position, duration, System.currentTimeMillis(), watched)
+        val edit = prefs.edit()
+        if (watched) edit.putString("progress/${result.key}", result.json().toString()) else edit.remove("progress/${result.key}")
+        edit.apply()
+        return result
     }
 
     fun sent(key: String): Boolean = prefs.getBoolean("simkl/$key", false)
 
-    fun markSent(key: String) {
-        prefs.edit().putBoolean("simkl/$key", true).apply()
+    fun queueList(account: String, title: TitleRef, listed: Boolean) {
+        prefs.edit().putBoolean("list/$account/${title.key}", listed).apply()
     }
 
+    fun pendingList(account: String): List<PendingListChange> {
+        val prefix = "list/$account/"
+        return prefs.all.mapNotNull { (key, value) ->
+            if (!key.startsWith(prefix) || value !is Boolean) return@mapNotNull null
+            TitleRef.parse(key.removePrefix(prefix))?.let { PendingListChange(it, value) }
+        }
+    }
+
+    fun finishList(account: String, change: PendingListChange) {
+        val key = "list/$account/${change.title.key}"
+        if (prefs.all[key] == change.listed) prefs.edit().remove(key).apply()
+    }
+
+    fun queueWatch(account: String, progress: WatchProgress, watched: Boolean): Boolean {
+        val key = "watch/$account/${progress.key}"
+        if (prefs.contains(key) && readJson(key)?.optBoolean("completed") == watched) return false
+        if (watched && sent("$account/${progress.key}") && !prefs.contains(key)) return false
+        prefs.edit().putString(key, progress.copy(completed = watched).json().toString()).apply()
+        return true
+    }
+
+    fun pendingWatch(account: String): List<PendingWatchChange> = prefs.all.keys.mapNotNull { key ->
+        if (!key.startsWith("watch/$account/")) return@mapNotNull null
+        read(key)?.let { PendingWatchChange(it, it.completed) }
+    }
+
+    fun finishWatch(account: String, change: PendingWatchChange) {
+        val key = "watch/$account/${change.progress.key}"
+        if (readJson(key)?.optBoolean("completed") != change.watched) return
+        prefs.edit().remove(key).putBoolean("simkl/$account/${change.progress.key}", change.watched).apply()
+    }
+
+    private fun readJson(key: String): JSONObject? = prefs.getString(key, null)?.let { runCatching { JSONObject(it) }.getOrNull() }
+
     private fun read(key: String): WatchProgress? {
-        val raw = prefs.getString(key, null) ?: return null
-        val json = runCatching { JSONObject(raw) }.getOrNull() ?: return null
+        val json = readJson(key) ?: return null
         val title = TitleRef.parse(json.optString("title")) ?: return null
+        val position = json.optLong("position")
+        val duration = json.optLong("duration")
         return WatchProgress(
             title,
             json.optInt("season", -1).takeIf { it >= 0 },
             json.optInt("episode", -1).takeIf { it >= 0 },
-            json.optLong("position"),
-            json.optLong("duration"),
+            position,
+            duration,
             json.optLong("updated"),
+            json.optBoolean("completed", duration > 0 && position >= duration * 0.9),
         )
+    }
+
+    private fun WatchProgress.json() = JSONObject().apply {
+        put("title", title.key)
+        if (season != null) put("season", season)
+        if (episode != null) put("episode", episode)
+        put("position", position)
+        put("duration", duration)
+        put("updated", updated)
+        put("completed", completed)
     }
 }

@@ -12,6 +12,8 @@ val syncStreamingSources by tasks.registering(Sync::class) {
         include(
             "io/maru/manime/HttpRequests.kt",
             "io/maru/manime/extensions/StremioAddonClient.kt",
+            "io/maru/manime/player/SnippetExporter.kt",
+            "io/maru/manime/player/SubtitleBurnIn.kt",
             "io/maru/manime/torrent/StreamSafety.kt"
         )
     }
@@ -23,7 +25,7 @@ android {
     defaultConfig {
         applicationId = "io.maru.nanamimovies"
         versionCode = providers.environmentVariable("NANAMI_MOVIES_VERSION_CODE").orNull?.toIntOrNull() ?: 1
-        versionName = providers.environmentVariable("NANAMI_MOVIES_VERSION_NAME").getOrElse("0.1.0")
+        versionName = providers.environmentVariable("NANAMI_MOVIES_VERSION_NAME").getOrElse("0.2.0")
         val simklId = providers.gradleProperty("SIMKL_MOVIES_CLIENT_ID")
             .orElse(providers.environmentVariable("SIMKL_MOVIES_CLIENT_ID"))
             .getOrElse("")
@@ -76,6 +78,10 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.coroutines.android)
     implementation(libs.bundles.media3)
+    implementation("androidx.media3:media3-transformer:1.4.1")
+    implementation("androidx.media3:media3-effect:1.4.1")
+    implementation("androidx.mediarouter:mediarouter:1.7.0")
+    implementation("com.google.android.gms:play-services-cast-framework:21.5.0")
 
     val torrentVersion = "2.1.0-38"
     implementation("org.libtorrent4j:libtorrent4j:$torrentVersion")

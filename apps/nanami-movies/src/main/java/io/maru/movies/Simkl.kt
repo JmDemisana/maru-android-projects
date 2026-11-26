@@ -1,6 +1,7 @@
 package io.maru.movies
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.SystemClock
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -38,6 +39,7 @@ class SimklSignIn internal constructor(
     internal val deviceCode: String,
     internal val deadline: Long,
     internal val intervalSeconds: Long,
+    internal val label: String,
 )
 
 data class SimklWatchlistEntry(
@@ -45,6 +47,9 @@ data class SimklWatchlistEntry(
     val isSeries: Boolean,
     val simklUrl: String?,
 )
+
+internal data class SimklAccount(val id: String, val label: String)
+internal class SimklTitleUnavailable : IOException("SIMKL couldn't match this title or episode.")
 
 class Simkl(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("simkl", Context.MODE_PRIVATE)
@@ -66,15 +71,27 @@ class Simkl(context: Context) {
     internal val connectionKey: String?
         get() = prefs.getString("connection_key", null)
 
-    suspend fun setClientId(value: String) = mutex.withLock {
-        val override = value.trim().takeIf(String::isNotEmpty)
-        val effectiveId = override ?: BuildConfig.SIMKL_CLIENT_ID.trim()
-        if (effectiveId != clientId) disconnectLocked()
-        prefs.edit().putString("client_id", override).apply()
+    internal fun accounts(): List<SimklAccount> {
+        val ids = prefs.getStringSet("accounts", emptySet()).orEmpty() + listOfNotNull(connectionKey)
+        return ids.mapNotNull { id ->
+            if (id != connectionKey && !prefs.contains("token/$id")) return@mapNotNull null
+            SimklAccount(id, prefs.getString("label/$id", null) ?: "SIMKL account")
+        }.sortedBy { it.label.lowercase() }
     }
 
-    suspend fun beginSignIn(): SimklSignIn = mutex.withLock {
-        val currentClient = clientId
+    internal suspend fun selectAccount(id: String?) = mutex.withLock {
+        if (id == connectionKey) return@withLock
+        val token = id?.let { requireNotNull(prefs.getString("token/$it", null)) { "This account needs to sign in again." } }
+        val edit = prefs.edit()
+        saveCurrent(edit)
+        edit.putString("token", token).putString("connection_key", id)
+            .putString("library", id?.let { prefs.getString("library/$it", null) })
+        if (id != null) edit.putString("client_id", prefs.getString("client/$id", null))
+        edit.apply()
+    }
+
+    suspend fun beginSignIn(client: String = clientId, label: String = ""): SimklSignIn = mutex.withLock {
+        val currentClient = client.trim()
         require(currentClient.isNotBlank()) { "Enter a Simkl AUTH V2 client ID first." }
         val payload = oauth("device", currentClient, "scope" to "media:read media:write").requireSuccess()
         val verificationUrl = payload.text("verification_uri_complete") ?: payload.getString("verification_uri")
@@ -89,6 +106,7 @@ class Simkl(context: Context) {
             deviceCode = payload.getString("device_code"),
             deadline = SystemClock.elapsedRealtime() + payload.getLong("expires_in") * 1_000L,
             intervalSeconds = payload.optLong("interval", 5L).coerceAtLeast(5),
+            label = label.trim().take(40).ifBlank { "SIMKL account ${accounts().size + 1}" },
         ).also { activeSignIn = it }
     }
 
@@ -108,8 +126,11 @@ class Simkl(context: Context) {
                     val token = parseToken(response.requireSuccess())
                     require("media:write" in token.scope.split(' ')) { "Simkl did not grant permission to sync your list." }
                     val encrypted = withContext(Dispatchers.IO) { vault.encrypt(token.toJson().toString()) }
-                    prefs.edit().remove("library").putString("token", encrypted)
-                        .putString("connection_key", UUID.randomUUID().toString()).apply()
+                    val id = UUID.randomUUID().toString()
+                    val edit = prefs.edit()
+                    saveCurrent(edit, id)
+                    edit.remove("library").putString("token", encrypted).putString("label/$id", signIn.label)
+                        .putString("client_id", signIn.clientId).putString("connection_key", id).apply()
                     activeSignIn = null
                 }
                 response
@@ -131,7 +152,8 @@ class Simkl(context: Context) {
         syncLibrary().filter { it.status == "plantowatch" }.map { it.media }
     }
 
-    suspend fun setWatchlisted(imdbId: String, isSeries: Boolean, listed: Boolean): Boolean = mutex.withLock {
+    suspend fun setWatchlisted(imdbId: String, isSeries: Boolean, listed: Boolean, account: String? = null): Boolean = mutex.withLock {
+        check(account == null || account == connectionKey) { "SIMKL account changed." }
         val item = imdbItem(imdbId)
         val type = if (isSeries) "shows" else "movies"
         val entry = syncLibrary().firstOrNull { it.media.imdbId == imdbId && it.media.isSeries == isSeries }
@@ -157,7 +179,10 @@ class Simkl(context: Context) {
         }
     }
 
-    suspend fun markWatched(imdbId: String, season: Int? = null, episode: Int? = null) = mutex.withLock {
+    suspend fun markWatched(
+        imdbId: String, season: Int? = null, episode: Int? = null, watched: Boolean = true, account: String? = null,
+    ) = mutex.withLock {
+        check(account == null || account == connectionKey) { "SIMKL account changed." }
         require((season == null && episode == null) || (season != null && season >= 0 && episode != null && episode > 0))
         val item = imdbItem(imdbId)
         if (season != null) {
@@ -165,13 +190,14 @@ class Simkl(context: Context) {
             item.put("seasons", JSONArray().put(JSONObject().put("number", season).put("episodes", episodes)))
         }
         val type = if (season == null) "movies" else "shows"
-        checkFound(authorized("sync/history", JSONObject().put(type, JSONArray().put(item))))
+        val path = if (watched) "sync/history" else "sync/history/remove"
+        checkFound(authorized(path, JSONObject().put(type, JSONArray().put(item))))
     }
 
     private suspend fun disconnectLocked() {
         val previous = storedToken()
         activeSignIn = null
-        prefs.edit().remove("token").remove("library").remove("connection_key").apply()
+        forgetCurrent()
         if (previous != null) {
             try {
                 oauth("revoke", clientId, "token" to previous.refresh, "token_type_hint" to "refresh_token")
@@ -179,6 +205,26 @@ class Simkl(context: Context) {
                 // Local sign-out still works offline.
             }
         }
+    }
+
+    private fun saveCurrent(edit: SharedPreferences.Editor, newId: String? = null) {
+        val ids = prefs.getStringSet("accounts", emptySet()).orEmpty().toMutableSet()
+        connectionKey?.let { id ->
+            ids.add(id)
+            edit.putString("token/$id", prefs.getString("token", null)).putString("client/$id", clientId)
+                .putString("library/$id", prefs.getString("library", null))
+        }
+        if (newId != null) ids.add(newId)
+        edit.putStringSet("accounts", ids)
+    }
+
+    private fun forgetCurrent() {
+        val edit = prefs.edit().remove("token").remove("library").remove("connection_key")
+        connectionKey?.let { id ->
+            edit.remove("token/$id").remove("client/$id").remove("library/$id").remove("label/$id")
+                .putStringSet("accounts", prefs.getStringSet("accounts", emptySet()).orEmpty() - id)
+        }
+        edit.apply()
     }
 
     private suspend fun syncLibrary(): List<LibraryEntry> {
@@ -265,7 +311,7 @@ class Simkl(context: Context) {
     private fun checkFound(result: JSONObject) {
         val notFound = result.optJSONObject("not_found") ?: return
         if (listOf("movies", "shows", "episodes").any { (notFound.optJSONArray(it)?.length() ?: 0) > 0 }) {
-            throw IOException("Simkl could not match this title or episode.")
+            throw SimklTitleUnavailable()
         }
     }
 
@@ -295,7 +341,7 @@ class Simkl(context: Context) {
     private suspend fun refresh(token: Token): Token = withContext(Dispatchers.IO + NonCancellable) {
         val response = oauth("token", clientId, "grant_type" to "refresh_token", "refresh_token" to token.refresh)
         if (response.error in setOf("invalid_grant", "invalid_client")) {
-            prefs.edit().remove("token").remove("library").remove("connection_key").apply()
+            forgetCurrent()
             throw IOException("Your Simkl connection expired. Connect your account again.")
         }
         val updated = parseToken(response.requireSuccess())

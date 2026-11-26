@@ -1,62 +1,74 @@
 package io.maru.movies
 
+import android.app.Activity
+import android.app.PendingIntent
+import android.app.PictureInPictureParams
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.net.Uri
+import android.provider.Settings
 import android.util.Log
+import android.util.Rational
+import android.view.WindowManager
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.PictureInPictureModeChangedInfo
+import androidx.core.util.Consumer
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.source.SingleSampleMediaSource
+import androidx.media3.session.MediaSession
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
-import io.maru.manime.extensions.StremioAddonClient
+import androidx.media3.ui.SubtitleView
 import io.maru.manime.extensions.StremioStreamResult
+import io.maru.manime.extensions.SubtitleTrack
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -65,8 +77,33 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.util.Locale
+import kotlin.math.roundToInt
 
-private val moviesTorrentio = StremioAddonClient("https://torrentio.strem.fun")
+private const val AutoSourceLimit = 4
+
+internal data class MoviePlaybackUi(
+    val position: Long = 0,
+    val duration: Long = 0,
+    val buffered: Long = 0,
+    val playing: Boolean = false,
+    val ready: Boolean = false,
+    val seekable: Boolean = false,
+    val tracks: Tracks = Tracks.EMPTY,
+)
+
+internal data class MoviePlayerOptions(
+    val speed: Float,
+    val autoplay: Boolean,
+    val persistentProgress: Boolean,
+    val subtitleSize: Float,
+    val subtitleBackground: Boolean,
+    val fillScreen: Boolean,
+    val autoSkipIntro: Boolean,
+)
+
+private data class PlayerMedia(val uri: Uri, val factory: DataSource.Factory, val torrent: Boolean = false)
 
 @Composable
 internal fun MoviesPlayback(
@@ -74,247 +111,580 @@ internal fun MoviesPlayback(
     episode: MovieEpisode?,
     startPosition: Long,
     onProgress: (position: Long, duration: Long) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    offlineFile: File? = null,
+    onNextEpisode: (() -> Unit)? = null,
+    onPreviousEpisode: (() -> Unit)? = null,
 ) {
-    val streamId = episode?.let { "${title.imdbId}:${it.season}:${it.episode}" } ?: title.imdbId
-    var sources by remember(streamId) { mutableStateOf<List<StremioStreamResult>?>(null) }
-    var lookupError by remember(streamId) { mutableStateOf(false) }
-    var lookupAttempt by remember(streamId) { mutableIntStateOf(0) }
-    var playerAttempt by remember(streamId) { mutableIntStateOf(0) }
-    var sourceIndex by remember(streamId) { mutableIntStateOf(0) }
-    var showSources by remember(streamId) { mutableStateOf(false) }
-    var position by remember(streamId) { mutableLongStateOf(startPosition) }
-
-    BackHandler(onBack = onBack)
-    LaunchedEffect(streamId, lookupAttempt) {
-        sources = null
-        lookupError = false
-        try {
-            sources = moviesTorrentio.getStreams(title.kind.addonType, streamId)
-                .filter { it.httpUri() != null || it.magnetUri() != null }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            lookupError = true
-        }
-    }
-
-    val currentSources = sources
-    val selected = currentSources?.getOrNull(sourceIndex)
-    Column(Modifier.fillMaxSize().background(Color.Black).safeDrawingPadding()) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextButton(onClick = onBack) { Text("Back") }
-            Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
-                Text(title.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                episode?.let {
-                    Text("S${it.season} E${it.episode} · ${it.title}", style = MaterialTheme.typography.labelMedium,
-                        color = Color.LightGray, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-            }
-            if (!currentSources.isNullOrEmpty()) {
-                TextButton(onClick = { showSources = true }) { Text("Sources") }
-            }
-        }
-
-        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            when {
-                lookupError -> PlaybackMessage("Could not reach Torrentio.") {
-                    Button(onClick = { lookupAttempt++ }) { Text("Try again") }
-                }
-                currentSources == null -> PlaybackLoading("Looking for sources…")
-                selected == null -> PlaybackMessage("Torrentio found no playable sources.")
-                else -> key(streamId, playerAttempt, sourceIndex) {
-                    MovieSourcePlayer(
-                        source = selected,
-                        episode = episode,
-                        startPosition = position,
-                        onProgress = { current, duration ->
-                            position = current
-                            onProgress(current, duration)
-                        },
-                        onRetry = { playerAttempt++ },
-                        onChooseSource = { showSources = true }
-                    )
-                }
-            }
-        }
-    }
-
-    if (showSources && !currentSources.isNullOrEmpty()) {
-        AlertDialog(
-            onDismissRequest = { showSources = false },
-            title = { Text("Video sources") },
-            text = {
-                LazyColumn(Modifier.heightIn(max = 400.dp)) {
-                    itemsIndexed(currentSources) { index, source ->
-                        TextButton(
-                            onClick = {
-                                sourceIndex = index
-                                playerAttempt++
-                                showSources = false
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(Modifier.fillMaxWidth()) {
-                                Text(source.name?.replace('\n', ' ') ?: "Torrentio", style = MaterialTheme.typography.labelLarge)
-                                source.title?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showSources = false }) { Text("Close") } }
-        )
-    }
+    val activity = LocalContext.current.findMoviesActivity()
+    MovieLandscapeWindow(activity)
+    MoviePlaybackSession(title, episode, startPosition, onProgress, onBack, offlineFile, onNextEpisode, onPreviousEpisode)
 }
 
 @OptIn(UnstableApi::class)
 @Composable
-private fun MovieSourcePlayer(
-    source: StremioStreamResult,
+private fun MoviePlaybackSession(
+    title: MovieTitle,
     episode: MovieEpisode?,
     startPosition: Long,
     onProgress: (Long, Long) -> Unit,
-    onRetry: () -> Unit,
-    onChooseSource: () -> Unit
+    onBack: () -> Unit,
+    offlineFile: File?,
+    onNextEpisode: (() -> Unit)?,
+    onPreviousEpisode: (() -> Unit)?,
 ) {
     val context = LocalContext.current
+    val activity = context.findMoviesActivity()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val view = LocalView.current
-    val reportProgress by rememberUpdatedState(onProgress)
-    val resumePosition = remember { startPosition.coerceAtLeast(0) }
-    var loading by remember { mutableStateOf("Connecting to source…") }
-    var buffering by remember { mutableStateOf(true) }
-    var failure by remember { mutableStateOf<String?>(null) }
-    val player = remember {
-        val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
-        ExoPlayer.Builder(context, renderers).build().apply {
+    val streamId = movieStreamId(title, episode)
+    // A releasing player must flush its own episode after the next one enters composition.
+    val progressState = remember(streamId) { mutableStateOf(onProgress) }
+    val progressCallback by progressState
+    SideEffect { progressState.value = onProgress }
+    val nextCallback by rememberUpdatedState(onNextEpisode)
+    val preferences = remember(context) { context.getSharedPreferences("movies_player", Context.MODE_PRIVATE) }
+    val sourceMemory = remember(context) { MovieSourceMemory(context) }
+    val deviceAudio = remember(context) { context.getSystemService(AudioManager::class.java) }
+    var options by remember { mutableStateOf(MoviePlayerOptions(
+        speed = preferences.getFloat("speed", 1f).coerceIn(0.5f, 2f),
+        autoplay = preferences.getBoolean("autoplay", true),
+        persistentProgress = preferences.getBoolean("persistent_progress", false),
+        subtitleSize = preferences.getFloat("subtitle_size", 1f).coerceIn(0.75f, 1.5f),
+        subtitleBackground = preferences.getBoolean("subtitle_background", true),
+        fillScreen = preferences.getBoolean("fill_screen", false),
+        autoSkipIntro = preferences.getBoolean("auto_skip_intro", false),
+    )) }
+    val player = remember(streamId) {
+        ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true)).build().apply {
             setAudioAttributes(AudioAttributes.DEFAULT, true)
             setHandleAudioBecomingNoisy(true)
+            setPlaybackSpeed(options.speed)
+            trackSelectionParameters = trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
         }
     }
 
-    DisposableEffect(player) {
+    var sources by remember(streamId) { mutableStateOf<List<StremioStreamResult>?>(null) }
+    var selected by remember(streamId) { mutableStateOf<StremioStreamResult?>(null) }
+    val attempted = remember(streamId) { mutableSetOf<StremioStreamResult>() }
+    var lookupError by remember(streamId) { mutableStateOf(false) }
+    var lookupAttempt by remember(streamId) { mutableIntStateOf(0) }
+    var completedLookup by remember(streamId) { mutableIntStateOf(-1) }
+    var sourceAttempt by remember(streamId) { mutableIntStateOf(0) }
+    var useOffline by remember(streamId, offlineFile) { mutableStateOf(offlineFile?.isFile == true) }
+    var activeMedia by remember(streamId) { mutableStateOf<PlayerMedia?>(null) }
+    var resumePosition by remember(streamId) { mutableStateOf(startPosition.coerceAtLeast(0)) }
+    var status by remember(streamId) { mutableStateOf("Finding video sources…") }
+    var failure by remember(streamId) { mutableStateOf<String?>(null) }
+    var ui by remember(streamId) { mutableStateOf(MoviePlaybackUi(position = startPosition.coerceAtLeast(0))) }
+    var ended by remember(streamId) { mutableStateOf(false) }
+    var nextCountdown by remember(streamId) { mutableStateOf<Int?>(null) }
+    var playIntent by remember(streamId) { mutableStateOf(true) }
+    var remotePlayback by remember { mutableStateOf(false) }
+    var remoteTransport by remember { mutableStateOf<MovieRemoteTransport?>(null) }
+    var settings by remember(streamId) { mutableStateOf<MoviePlayerPanel?>(null) }
+    var controls by remember(streamId) { mutableStateOf(true) }
+    var controlPulse by remember(streamId) { mutableIntStateOf(0) }
+    var locked by remember(streamId) { mutableStateOf(false) }
+    var inPip by remember { mutableStateOf(activity?.isInPictureInPictureMode == true) }
+    val supportsPip = remember(context) { context.packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) }
+    var subtitleOptions by remember(streamId) { mutableStateOf<List<SubtitleTrack>?>(null) }
+    var segmentOptions by remember(streamId) { mutableStateOf(emptyList<MovieSegment>()) }
+    var autoSkipped by remember(streamId) { mutableStateOf(false) }
+    var externalSubtitle by remember(streamId) { mutableStateOf<SubtitleTrack?>(null) }
+    var ensureTextOverride by remember(streamId) { mutableStateOf<String?>(null) }
+
+    fun resetControls() {
+        controls = true
+        controlPulse++
+    }
+
+    fun setOptions(value: MoviePlayerOptions) {
+        options = value
+        preferences.edit().putFloat("speed", value.speed).putBoolean("autoplay", value.autoplay)
+            .putBoolean("persistent_progress", value.persistentProgress)
+            .putFloat("subtitle_size", value.subtitleSize).putBoolean("subtitle_background", value.subtitleBackground)
+            .putBoolean("fill_screen", value.fillScreen).putBoolean("auto_skip_intro", value.autoSkipIntro).apply()
+        player.setPlaybackSpeed(value.speed)
+    }
+
+    fun captureProgress() {
+        if (remotePlayback) return
+        val duration = player.duration
+        if (duration > 0) {
+            resumePosition = player.currentPosition.coerceIn(0, duration)
+            progressCallback(resumePosition, duration)
+        }
+    }
+
+    fun chooseSource(source: StremioStreamResult) {
+        captureProgress()
+        sourceMemory.save(title, episode, source)
+        attempted.clear()
+        attempted.add(source)
+        useOffline = false
+        failure = null
+        sourceAttempt++
+        selected = source
+        settings = null
+        resetControls()
+    }
+
+    fun chooseInitial(available: List<StremioStreamResult>) {
+        val source = sourceMemory.preferred(title, episode, available) ?: available.firstOrNull()
+        if (source != null) attempted.add(source)
+        selected = source
+    }
+
+    fun seekTo(position: Long) {
+        if (!ui.seekable) return
+        val value = position.coerceIn(0, ui.duration)
+        if (remotePlayback) {
+            remoteTransport?.seek?.invoke(value) ?: return
+        } else {
+            player.seekTo(value)
+        }
+        resumePosition = value
+        ui = ui.copy(position = value)
+        ended = false
+        nextCountdown = null
+        resetControls()
+    }
+
+    fun selectTrack(type: Int, track: MovieTrack?) {
+        val builder = player.trackSelectionParameters.buildUpon().clearOverridesOfType(type)
+        builder.setTrackTypeDisabled(type, type == C.TRACK_TYPE_TEXT && track == null)
+        if (track != null) builder.setOverrideForType(TrackSelectionOverride(track.group.mediaTrackGroup, track.index))
+        player.trackSelectionParameters = builder.build()
+    }
+
+    fun selectExternal(track: SubtitleTrack) {
+        captureProgress()
+        ensureTextOverride = track.url
+        externalSubtitle = track
+        if (player.currentTracks.groups.any { group ->
+                group.type == C.TRACK_TYPE_TEXT && (0 until group.length).any { group.getTrackFormat(it).id == track.url }
+            }) {
+            val candidate = movieTrackChoices(player.currentTracks, C.TRACK_TYPE_TEXT)
+                .firstOrNull { it.group.getTrackFormat(it.index).id == track.url }
+            selectTrack(C.TRACK_TYPE_TEXT, candidate)
+            ensureTextOverride = null
+        }
+    }
+
+    BackHandler(!inPip) {
+        when {
+            settings != null -> settings = null
+            locked -> {
+                locked = false
+                resetControls()
+            }
+            else -> {
+                captureProgress()
+                onBack()
+            }
+        }
+    }
+
+    val revealControls by rememberUpdatedState<() -> Unit>(::resetControls)
+    val dismissSettings by rememberUpdatedState<() -> Unit>({ settings = null })
+    DisposableEffect(activity) {
+        val component = activity as? ComponentActivity
+        val pipEvents = Consumer<PictureInPictureModeChangedInfo> { info ->
+            inPip = info.isInPictureInPictureMode
+            if (inPip) dismissSettings() else revealControls()
+        }
+        component?.addOnPictureInPictureModeChangedListener(pipEvents)
+        onDispose { component?.removeOnPictureInPictureModeChangedListener(pipEvents) }
+    }
+
+    DisposableEffect(player, lifecycle) {
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
-                buffering = playbackState == Player.STATE_IDLE || playbackState == Player.STATE_BUFFERING
-                if (playbackState == Player.STATE_ENDED && player.duration > 0) {
-                    reportProgress(player.duration, player.duration)
+                if (playbackState == Player.STATE_ENDED) {
+                    captureProgress()
+                    ended = true
+                    resetControls()
                 }
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                failure = "This source could not be played."
+                Log.w("MoviesPlayback", "Media3 playback failed: ${error.errorCodeName}")
+                failure = "This video source stopped playing."
+            }
+        }
+        val session = runCatching {
+            val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+                ?.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            MediaSession.Builder(context, player).setId(streamId).apply {
+                if (intent != null) setSessionActivity(PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_IMMUTABLE))
+            }.build()
+        }.getOrNull()
+        val backgroundAvailable = session != null && MoviesPlaybackService.attach(context, session)
+        val lifecycleObserver = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP && activity?.isInPictureInPictureMode != true) {
+                captureProgress()
+                if (!backgroundAvailable || !player.isPlaying) player.pause()
             }
         }
         player.addListener(listener)
+        lifecycle.addObserver(lifecycleObserver)
         onDispose {
+            captureProgress()
+            lifecycle.removeObserver(lifecycleObserver)
             player.removeListener(listener)
-            if (player.duration > 0 && player.currentPosition > 0) {
-                reportProgress(player.currentPosition, player.duration)
+            if (session != null) {
+                MoviesPlaybackService.detach(context, session)
+                session.release()
             }
             player.release()
         }
     }
 
-    DisposableEffect(lifecycle, player, view) {
-        val wasKeepingScreenOn = view.keepScreenOn
-        view.keepScreenOn = true
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) player.pause()
-        }
-        lifecycle.addObserver(observer)
-        onDispose {
-            lifecycle.removeObserver(observer)
-            view.keepScreenOn = wasKeepingScreenOn
-        }
-    }
-
-    LaunchedEffect(player) {
-        while (true) {
-            delay(2_000)
-            if (player.duration > 0 && player.currentPosition > 0) {
-                reportProgress(player.currentPosition, player.duration)
-            }
-        }
-    }
-
-    LaunchedEffect(player, failure) {
-        if (failure != null) return@LaunchedEffect
+    LaunchedEffect(streamId, lookupAttempt, useOffline) {
+        if ((useOffline && lookupAttempt == 0) || completedLookup == lookupAttempt) return@LaunchedEffect
+        lookupError = false
+        sources = null
         try {
-            val direct = source.httpUri()
-            if (direct != null) {
-                val factory = DefaultHttpDataSource.Factory().setDefaultRequestProperties(source.headers)
-                val item = MediaItem.fromUri(direct)
-                val media = DefaultMediaSourceFactory(context).setDataSourceFactory(factory).createMediaSource(item)
-                player.setMediaSource(media, resumePosition)
-                player.playWhenReady = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
-                player.prepare()
-            } else {
-                withMoviesTorrent(context.cacheDir, source, episode,
-                    onBuffer = { withContext(Dispatchers.Main) { loading = "Buffering video…" } }
-                ) { uri, dataSource ->
-                    withContext(Dispatchers.Main) {
-                        val media = ProgressiveMediaSource.Factory(dataSource).createMediaSource(MediaItem.fromUri(uri))
-                        player.setMediaSource(media, resumePosition)
-                        player.playWhenReady = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
-                        player.prepare()
-                        awaitCancellation()
-                    }
+            val results = findMovieSources(title, episode, context)
+            sources = results
+            completedLookup = lookupAttempt
+            if (selected == null && !useOffline) chooseInitial(results)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            lookupError = true
+        }
+    }
+
+    LaunchedEffect(settings, streamId, useOffline) {
+        if (settings == MoviePlayerPanel.SUBTITLES && subtitleOptions == null) {
+            subtitleOptions = if (useOffline) emptyList() else findMovieSubtitles(title, episode)
+        }
+    }
+
+    LaunchedEffect(streamId, useOffline) {
+        if (!useOffline && segmentOptions.isEmpty()) segmentOptions = findMovieSegments(title, episode)
+    }
+
+    val activeSegment = if (ui.seekable && !remotePlayback) segmentOptions.firstOrNull { it.at(ui.position, ui.duration) } else null
+    LaunchedEffect(activeSegment, options.autoSkipIntro, ui.playing) {
+        if (activeSegment?.type == MovieSegmentType.INTRO && options.autoSkipIntro && ui.playing && !autoSkipped) {
+            autoSkipped = true
+            seekTo(activeSegment.end)
+        }
+    }
+
+    LaunchedEffect(streamId, selected, sourceAttempt, useOffline, offlineFile) {
+        activeMedia = null
+        failure = null
+        ended = false
+        ui = MoviePlaybackUi(position = resumePosition)
+        val source = selected
+        if (useOffline && offlineFile != null) {
+            status = "Opening download…"
+            activeMedia = PlayerMedia(Uri.fromFile(offlineFile), DefaultDataSource.Factory(context))
+            return@LaunchedEffect
+        }
+        if (source == null) return@LaunchedEffect
+        val direct = source.httpUri()
+        if (direct != null) {
+            status = "Connecting to source…"
+            val factory = DefaultHttpDataSource.Factory().setDefaultRequestProperties(source.headers)
+            activeMedia = PlayerMedia(direct, factory)
+            return@LaunchedEffect
+        }
+        status = "Finding peers…"
+        try {
+            withMoviesTorrent(context.cacheDir, source, episode, onBuffer = {
+                withContext(Dispatchers.Main) { status = "Buffering video…" }
+            }) { uri, factory ->
+                withContext(Dispatchers.Main) {
+                    activeMedia = PlayerMedia(uri, factory, torrent = true)
+                    awaitCancellation()
                 }
             }
         } catch (_: TimeoutCancellationException) {
             currentCoroutineContext().ensureActive()
-            failure = "This source timed out while connecting or buffering."
-        } catch (cancelled: CancellationException) {
-            throw cancelled
+            failure = "This torrent timed out while connecting."
+        } catch (error: CancellationException) {
+            throw error
         } catch (_: LinkageError) {
             failure = "The torrent engine could not start on this device."
-        } catch (error: Exception) {
-            Log.w("MoviesPlayback", "Could not prepare source", error)
-            failure = "This source could not be played."
+        } catch (_: Exception) {
+            failure = "This torrent could not be opened."
         }
     }
 
-    val currentFailure = failure
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { PlayerView(it).apply { this.player = player } }
-        )
-        if (currentFailure != null) {
-            PlaybackMessage(currentFailure) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = onRetry) { Text("Retry") }
-                    Button(onClick = onChooseSource) { Text("Choose another source") }
+    LaunchedEffect(activeMedia, externalSubtitle) {
+        player.stop()
+        player.clearMediaItems()
+        val media = activeMedia ?: return@LaunchedEffect
+        val item = MediaItem.Builder().setUri(media.uri).setMediaId(streamId)
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(episode?.title ?: title.title).build()).build()
+        val video = if (media.torrent) ProgressiveMediaSource.Factory(media.factory).createMediaSource(item)
+        else DefaultMediaSourceFactory(context).setDataSourceFactory(media.factory).createMediaSource(item)
+        val subtitle = externalSubtitle?.let { track ->
+            val mime = when (track.url.substringBefore('?').substringBefore('#').substringAfterLast('.').lowercase(Locale.ROOT)) {
+                "vtt" -> MimeTypes.TEXT_VTT
+                "ssa", "ass" -> MimeTypes.TEXT_SSA
+                else -> MimeTypes.APPLICATION_SUBRIP
+            }
+            val spec = MediaItem.SubtitleConfiguration.Builder(Uri.parse(track.url))
+                .setId(track.url).setLabel(languageName(track.language)).setLanguage(track.language).setMimeType(mime).build()
+            SingleSampleMediaSource.Factory(DefaultDataSource.Factory(context)).createMediaSource(spec, C.TIME_UNSET)
+        }
+        player.setMediaSource(if (subtitle == null) video else MergingMediaSource(video, subtitle), resumePosition)
+        if (subtitle != null) {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .clearOverridesOfType(C.TRACK_TYPE_TEXT).setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).build()
+        }
+        player.playWhenReady = playIntent && !remotePlayback && (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) || inPip)
+        player.prepare()
+    }
+
+    LaunchedEffect(failure, sourceAttempt, useOffline) {
+        val error = failure ?: return@LaunchedEffect
+        if (useOffline || attempted.size >= AutoSourceLimit) return@LaunchedEffect
+        val next = sources?.firstOrNull { it !in attempted } ?: return@LaunchedEffect
+        captureProgress()
+        status = "$error Trying another source…"
+        delay(650)
+        attempted.add(next)
+        selected = next
+        sourceAttempt++
+    }
+
+    LaunchedEffect(player) {
+        var ticks = 0
+        while (true) {
+            val duration = player.duration.coerceAtLeast(0)
+            val tracks = player.currentTracks
+            val pending = ensureTextOverride
+            if (pending != null && player.playbackState == Player.STATE_READY) {
+                val match = movieTrackChoices(tracks, C.TRACK_TYPE_TEXT)
+                    .firstOrNull { it.group.getTrackFormat(it.index).id == pending }
+                if (match != null) {
+                    selectTrack(C.TRACK_TYPE_TEXT, match)
+                    ensureTextOverride = null
                 }
             }
-        } else if (buffering) {
-            PlaybackLoading(loading)
+            if (!remotePlayback) {
+                ui = MoviePlaybackUi(
+                    position = if (duration > 0) player.currentPosition.coerceIn(0, duration) else resumePosition,
+                    duration = duration,
+                    buffered = player.bufferedPosition.coerceAtLeast(0),
+                    playing = player.isPlaying,
+                    ready = player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_ENDED,
+                    seekable = player.isCurrentMediaItemSeekable && duration > 0,
+                    tracks = tracks,
+                )
+                if (++ticks % 8 == 0 && player.isPlaying) captureProgress()
+            }
+            delay(250)
+        }
+    }
+
+    LaunchedEffect(ui.playing, controlPulse, controls, settings, locked) {
+        if (ui.playing && controls && settings == null && !locked) {
+            delay(4_000)
+            controls = false
+        }
+    }
+
+    LaunchedEffect(ended, options.autoplay, onNextEpisode != null) {
+        if (!ended || !options.autoplay || nextCallback == null) return@LaunchedEffect
+        for (seconds in 8 downTo 1) {
+            nextCountdown = seconds
+            delay(1_000)
+            if (nextCountdown == null) return@LaunchedEffect
+        }
+        nextCallback?.invoke()
+    }
+
+    val canAutoFallback = !useOffline && attempted.size < AutoSourceLimit && sources.orEmpty().any { it !in attempted }
+    val problem = when {
+        lookupError && selected == null && !useOffline -> "Video sources could not be reached."
+        !useOffline && selected == null && sources?.isEmpty() == true -> "There are no playable sources for this title."
+        !canAutoFallback -> failure
+        else -> null
+    }
+    val loading = when {
+        problem != null -> null
+        failure != null && canAutoFallback -> "Trying another source…"
+        !useOffline && sources == null && selected == null -> "Finding video sources…"
+        !ui.ready -> status
+        else -> null
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { PlayerView(it).apply { useController = false; this.player = player } },
+            update = { view ->
+                if (view.player !== player) view.player = player
+                view.resizeMode = if (options.fillScreen) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
+                view.subtitleView?.apply {
+                    setApplyEmbeddedFontSizes(false)
+                    setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * options.subtitleSize)
+                    setStyle(CaptionStyleCompat(
+                        android.graphics.Color.WHITE,
+                        if (options.subtitleBackground) 0xB0000000.toInt() else android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT,
+                        CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                        android.graphics.Color.BLACK,
+                        null,
+                    ))
+                }
+            },
+        )
+        MoviePlayerChrome(
+            title = title,
+            episode = episode,
+            ui = ui,
+            loading = loading,
+            problem = problem,
+            controls = controls && !inPip,
+            locked = locked && !inPip,
+            hideChrome = inPip,
+            persistentProgress = options.persistentProgress,
+            skipSegment = activeSegment,
+            nextCountdown = nextCountdown,
+            onCancelNext = { nextCountdown = null },
+            onSkipSegment = { segment -> seekTo(segment.end) },
+            onToggleControls = { if (controls) controls = false else resetControls() },
+            onBack = { captureProgress(); onBack() },
+            onSettings = { settings = MoviePlayerPanel.GENERAL; resetControls() },
+            onTracks = { settings = MoviePlayerPanel.SUBTITLES; resetControls() },
+            onSources = { settings = MoviePlayerPanel.SOURCES; resetControls() },
+            onLock = { locked = !locked; resetControls() },
+            onPip = if (supportsPip && ui.ready && activity != null && !remotePlayback) ({
+                runCatching { activity.enterPictureInPictureMode(PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build()) }
+            }) else null,
+            onTogglePlayback = {
+                if (remotePlayback) {
+                    remoteTransport?.toggle?.invoke()
+                } else {
+                    playIntent = !player.playWhenReady || ended
+                    if (ended) seekTo(0)
+                    player.playWhenReady = playIntent
+                }
+                resetControls()
+            },
+            onSeek = ::seekTo,
+            onPreviousEpisode = onPreviousEpisode?.let { { captureProgress(); it() } },
+            onNextEpisode = onNextEpisode?.let { { captureProgress(); it() } },
+            readBrightness = { currentBrightness(activity) },
+            setBrightness = { value -> activity?.window?.let { window ->
+                window.attributes = window.attributes.apply { screenBrightness = value.coerceIn(0.03f, 1f) }
+            } },
+            readVolume = { deviceAudio?.let { it.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() /
+                it.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1) } ?: 0.5f },
+            setVolume = { value -> deviceAudio?.let {
+                runCatching { it.setStreamVolume(AudioManager.STREAM_MUSIC,
+                    (value * it.getStreamMaxVolume(AudioManager.STREAM_MUSIC)).roundToInt(), 0) }
+            } },
+            onRetry = {
+                failure = null
+                if (useOffline) {
+                    useOffline = false
+                    if (selected == null) sources?.let(::chooseInitial)
+                } else if (selected != null && !lookupError) {
+                    val source = selected
+                    attempted.clear()
+                    if (source != null) attempted.add(source)
+                    sourceAttempt++
+                } else lookupAttempt++
+            },
+            tools = { visible ->
+                MoviesPlayerTools(title, episode, selected.takeUnless { useOffline }, offlineFile.takeIf { useOffline },
+                    activeMedia?.uri, activeMedia?.factory, ui.position, ui.duration,
+                    onRemotePlayback = { remotePlayback = true; player.pause() },
+                    visible = visible,
+                    onRemoteEnded = { position ->
+                        remotePlayback = false
+                        remoteTransport = null
+                        if (position > 0 && player.isCurrentMediaItemSeekable) player.seekTo(position)
+                        if (playIntent) player.play()
+                    },
+                    onRemoteProgress = { position, duration, playing ->
+                        if (duration > 0) {
+                            resumePosition = position.coerceIn(0, duration)
+                            ui = ui.copy(position = resumePosition, duration = duration, playing = playing, ready = true, seekable = true)
+                            progressCallback(resumePosition, duration)
+                        }
+                    },
+                    onRemoteTransport = { remoteTransport = it },
+                )
+            },
+        )
+    }
+    if (!inPip) settings?.let { panel ->
+        val addOnSubtitles = selected?.subtitles.orEmpty().filter { Uri.parse(it.url).scheme == "https" }
+        MoviePlaybackSettings(
+            initialPanel = panel,
+            options = options,
+            onOptions = ::setOptions,
+            sources = sources,
+            isOffline = useOffline,
+            offlineAvailable = offlineFile?.isFile == true,
+            selectedSource = selected,
+            onSelectSource = ::chooseSource,
+            onRetrySources = { lookupAttempt++ },
+            onUseOffline = { captureProgress(); useOffline = true; settings = null },
+            tracks = ui.tracks,
+            subtitleOptions = (addOnSubtitles + subtitleOptions.orEmpty()).distinctBy(SubtitleTrack::url),
+            subtitlesLoading = subtitleOptions == null && !useOffline,
+            selectedSubtitle = externalSubtitle,
+            onSelectExternal = ::selectExternal,
+            onSelectTrack = { type, track ->
+                if (type == C.TRACK_TYPE_TEXT) ensureTextOverride = null
+                selectTrack(type, track)
+            },
+            onPanel = { settings = it; resetControls() },
+            onDismiss = { settings = null; resetControls() },
+        )
+    }
+}
+
+@Composable
+private fun MovieLandscapeWindow(activity: Activity?) {
+    if (activity == null) return
+    DisposableEffect(activity) {
+        val window = activity.window
+        val decor = window.decorView
+        val controller = WindowCompat.getInsetsController(window, decor)
+        val insets = ViewCompat.getRootWindowInsets(decor)
+        val statusWasVisible = insets?.isVisible(WindowInsetsCompat.Type.statusBars()) != false
+        val navigationWasVisible = insets?.isVisible(WindowInsetsCompat.Type.navigationBars()) != false
+        val originalOrientation = activity.requestedOrientation
+        val originalBrightness = window.attributes.screenBrightness
+        val originalBehavior = controller.systemBarsBehavior
+        val keepAwake = window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0
+        if (!activity.isInMultiWindowMode) activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+        onDispose {
+            activity.requestedOrientation = originalOrientation
+            window.attributes = window.attributes.apply { screenBrightness = originalBrightness }
+            if (!keepAwake) window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            controller.systemBarsBehavior = originalBehavior
+            val mask = (if (statusWasVisible) WindowInsetsCompat.Type.statusBars() else 0) or
+                if (navigationWasVisible) WindowInsetsCompat.Type.navigationBars() else 0
+            if (mask != 0) controller.show(mask)
         }
     }
 }
 
-private fun StremioStreamResult.httpUri(): Uri? = url?.let(Uri::parse)?.takeIf { uri ->
-    uri.scheme == "https" && !uri.host.isNullOrBlank()
+private tailrec fun Context.findMoviesActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> if (baseContext === this) null else baseContext.findMoviesActivity()
+    else -> null
 }
 
-@Composable
-private fun PlaybackLoading(message: String) {
-    PlaybackMessage(message) { CircularProgressIndicator() }
-}
-
-@Composable
-private fun PlaybackMessage(message: String, actions: @Composable () -> Unit = {}) {
-    Column(
-        Modifier.background(Color.Black.copy(alpha = 0.75f)).padding(20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Text(message, color = Color.White)
-        actions()
-    }
+private fun currentBrightness(activity: Activity?): Float {
+    val windowValue = activity?.window?.attributes?.screenBrightness ?: -1f
+    if (windowValue >= 0f) return windowValue
+    val system = activity?.contentResolver?.let { Settings.System.getInt(it, Settings.System.SCREEN_BRIGHTNESS, 128) } ?: 128
+    return system / 255f
 }

@@ -9,6 +9,8 @@ on:
       - "apps/nanami-movies/**"
       - "apps/manime/src/main/java/io/maru/manime/HttpRequests.kt"
       - "apps/manime/src/main/java/io/maru/manime/extensions/StremioAddonClient.kt"
+      - "apps/manime/src/main/java/io/maru/manime/player/SnippetExporter.kt"
+      - "apps/manime/src/main/java/io/maru/manime/player/SubtitleBurnIn.kt"
       - "apps/manime/src/main/java/io/maru/manime/torrent/StreamSafety.kt"
       - "build-logic/**"
       - "gradle/**"
@@ -70,7 +72,7 @@ jobs:
             IFS=. read -r major minor patch <<< "$STABLE_VERSION"
             NEXT_VERSION="$major.$minor.$((10#$patch + 1))"
           else
-            NEXT_VERSION="0.1.0"
+            NEXT_VERSION="0.2.0"
           fi
           VERSION_NAME="$NEXT_VERSION-rotator.$GITHUB_RUN_NUMBER"
           VERSION_CODE=$((1000 + 2 * $(git rev-list --count HEAD)))
@@ -111,6 +113,20 @@ jobs:
           mkdir -p out
           cp "$APK" out/nanami-movies-rotator.apk
           (cd out && sha256sum nanami-movies-rotator.apk > SHA256SUMS.txt)
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          apk = Path('out/nanami-movies-rotator.apk')
+          digest = Path('out/SHA256SUMS.txt').read_text().split()[0]
+          Path('out/update.json').write_text(json.dumps({
+              'versionName': os.environ['NANAMI_MOVIES_VERSION_NAME'],
+              'versionCode': int(os.environ['NANAMI_MOVIES_VERSION_CODE']),
+              'sha256': digest,
+              'apkSize': apk.stat().st_size,
+          }) + '\n')
+          PY
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -132,6 +148,7 @@ jobs:
           files: |
             out/nanami-movies-rotator.apk
             out/SHA256SUMS.txt
+            out/update.json
           body: |
             Rolling development build for **Nanami Movies** (`${{ env.NANAMI_MOVIES_VERSION_NAME }}`).
 
