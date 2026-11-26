@@ -6,6 +6,7 @@ Nanami Anime is an Android anime player and AniList companion.
 
 ## What's new in 2.1.2
 
+- **Switch sources while loading.** Open Playback Settings to choose from available sources before playback starts. Nanami remembers your choice for replays and prefers a matching source on later episodes.
 - **Smarter source lookup.** Nanami tries romanized, English, and Japanese titles, punctuation variants, and shortened search terms. Playback still checks the episode and edition. An unconfirmed match, a failed provider request, and an empty search now have separate explanations.
 - **Broader device support.** The torrent engine includes all four Android architectures, with 16 KB page alignment on the 64-bit builds. Android 8 and 9 prompt for Gallery permission when exporting clips.
 - **AniList profiles and cast.** Followers and Following load independently with advanced pages and retry. The Cast tab activates when cast data is available.
