@@ -1,44 +1,41 @@
 package io.maru.movies
 
 import androidx.annotation.OptIn
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.C
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import io.maru.manime.extensions.StremioStreamResult
 import io.maru.manime.extensions.SubtitleTrack
-
-// Video Sources FIRST so users can switch streams immediately while loading (matching Nanami Anime!)
-internal enum class MoviePlayerPanel(val label: String) {
-    SOURCES("Video Sources"),
-    SUBTITLES("Audio & Subtitles"),
-    GENERAL("Playback"),
-}
+import kotlin.math.abs
 
 internal data class MovieTrack(val group: Tracks.Group, val index: Int, val label: String) {
     val selected: Boolean get() = group.isTrackSelected(index)
@@ -61,9 +58,14 @@ internal fun movieTrackChoices(tracks: Tracks, type: Int): List<MovieTrack> = bu
     }
 }
 
+/**
+ * Sleek translucent right-side half-screen Playback Settings sheet,
+ * keeping live video visible on the left half — exact parity with Nanami Anime!
+ */
 @Composable
-internal fun MoviePlaybackSettings(
-    initialPanel: MoviePlayerPanel,
+internal fun MoviePlaybackSettingsSheet(
+    visible: Boolean,
+    showVideoSourcesFirst: Boolean,
     options: MoviePlayerOptions,
     onOptions: (MoviePlayerOptions) -> Unit,
     sources: List<StremioStreamResult>?,
@@ -79,273 +81,307 @@ internal fun MoviePlaybackSettings(
     selectedSubtitle: SubtitleTrack?,
     onSelectExternal: (SubtitleTrack) -> Unit,
     onSelectTrack: (Int, MovieTrack?) -> Unit,
-    onPanel: (MoviePlayerPanel) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        BoxWithConstraints(
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(180)) + slideInHorizontally(tween(220)) { it / 4 },
+        exit = fadeOut(tween(160)) + slideOutHorizontally(tween(180)) { it / 4 },
+    ) {
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(14.dp),
-            contentAlignment = Alignment.Center,
+                .fillMaxSize()
+                .background(Color(0x99000000))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss,
+                ),
+            contentAlignment = Alignment.CenterEnd,
         ) {
             Surface(
                 modifier = Modifier
-                    .widthIn(max = 760.dp)
-                    .fillMaxWidth()
-                    .fillMaxHeight(0.90f),
-                shape = RoundedCornerShape(10.dp),
-                color = NetflixSurface,
-                contentColor = Color.White,
+                    .fillMaxHeight()
+                    .widthIn(max = 460.dp)
+                    .fillMaxWidth(0.88f)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) {},
+                color = Color(0xF50E0E12),
                 border = BorderStroke(1.dp, NetflixBorder),
             ) {
-                Column {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .windowInsetsPadding(WindowInsets.safeDrawing),
+                ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(start = 18.dp, top = 8.dp, end = 8.dp),
+                            .background(NetflixSurface)
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
+                        IconButton(onClick = onDismiss) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to video", tint = Color.White)
+                        }
                         Text(
                             text = "Playback Settings",
-                            modifier = Modifier.weight(1f),
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.ExtraBold,
                             color = Color.White,
+                            fontWeight = FontWeight.ExtraBold,
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.weight(1f),
                         )
-                        IconButton(onClick = onDismiss) {
-                            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 16.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        MoviePlayerPanel.entries.forEach { panel ->
-                            NetflixChip(
-                                label = panel.label,
-                                selected = initialPanel == panel,
-                                onClick = { onPanel(panel) },
-                            )
-                        }
                     }
 
                     HorizontalDivider(color = NetflixBorder, thickness = 1.dp)
 
+                    val audioTracks = movieTrackChoices(tracks, C.TRACK_TYPE_AUDIO)
+                    val subtitleTracks = movieTrackChoices(tracks, C.TRACK_TYPE_TEXT)
+                    val subsCurrentlyOff = subtitleTracks.none(MovieTrack::selected)
+
                     LazyColumn(
                         modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp),
-                        contentPadding = PaddingValues(vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                            .fillMaxSize()
+                            .padding(horizontal = 20.dp),
+                        contentPadding = PaddingValues(top = 16.dp, bottom = 36.dp),
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
                     ) {
-                        when (initialPanel) {
-                            MoviePlayerPanel.SOURCES -> {
-                                val video = movieTrackChoices(tracks, C.TRACK_TYPE_VIDEO)
-                                if (video.size > 1) {
-                                    item { PanelSectionLabel("Adaptive Video Track") }
-                                    item { PanelOptionRow("Auto", null, null, false) { onSelectTrack(C.TRACK_TYPE_VIDEO, null) } }
-                                    items(video) { track ->
-                                        PanelOptionRow(track.label, null, null, track.selected) { onSelectTrack(C.TRACK_TYPE_VIDEO, track) }
+                        if (showVideoSourcesFirst) {
+                            movieSourceItems(
+                                sources = sources,
+                                selectedSource = selectedSource,
+                                isOffline = isOffline,
+                                offlineAvailable = offlineAvailable,
+                                onSelectSource = onSelectSource,
+                                onUseOffline = onUseOffline,
+                                onRetrySources = onRetrySources,
+                            )
+                        }
+
+                        // 1. Playback & Gestures
+                        item(key = "section_playback") {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text(
+                                    text = "Playback & Gestures",
+                                    color = NetflixRed,
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.titleSmall,
+                                )
+
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { spd ->
+                                        val sel = abs(options.speed - spd) < 0.03f
+                                        Surface(
+                                            onClick = { onOptions(options.copy(speed = spd)) },
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = if (sel) NetflixRed else NetflixCardBg,
+                                            border = BorderStroke(1.dp, if (sel) NetflixRed else NetflixBorder),
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            Box(modifier = Modifier.padding(vertical = 9.dp), contentAlignment = Alignment.Center) {
+                                                Text(
+                                                    text = "${spd.toString().removeSuffix(".0")}×",
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    color = Color.White,
+                                                )
+                                            }
+                                        }
                                     }
                                 }
-                                if (offlineAvailable) {
-                                    item { PanelSectionLabel("Downloaded Copy") }
-                                    item {
-                                        PanelOptionRow(
-                                            label = "Saved on Device",
-                                            detail = "Instant offline playback",
-                                            badge = "DOWNLOADED",
-                                            selected = isOffline,
-                                            onClick = onUseOffline,
+
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    listOf(
+                                        MovieVideoFit.FIT to "Fit Screen",
+                                        MovieVideoFit.CROP to "Crop / Zoom",
+                                        MovieVideoFit.STRETCH to "Stretch",
+                                    ).forEach { (fit, label) ->
+                                        val sel = options.fit == fit
+                                        Surface(
+                                            onClick = { onOptions(options.copy(fit = fit)) },
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = if (sel) NetflixRed.copy(alpha = 0.20f) else NetflixCardBg,
+                                            border = BorderStroke(1.dp, if (sel) NetflixRed else NetflixBorder),
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            Box(modifier = Modifier.padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+                                                Text(
+                                                    text = label,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (sel) NetflixRed else Color.White,
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                SheetToggleRow(
+                                    label = "Swipe up/down for brightness & volume",
+                                    subtitle = "Left side adjusts brightness, right side adjusts volume",
+                                    checked = options.swipeGestures,
+                                    onCheckedChange = { onOptions(options.copy(swipeGestures = it)) },
+                                )
+
+                                SheetToggleRow(
+                                    label = "Persistent bottom progress bar",
+                                    subtitle = "Shows a slim progress line at the bottom when controls are hidden",
+                                    checked = options.persistentProgress,
+                                    onCheckedChange = { onOptions(options.copy(persistentProgress = it)) },
+                                )
+
+                                SheetToggleRow(
+                                    label = "Autoplay next episode",
+                                    subtitle = "Starts the next episode automatically when an episode finishes",
+                                    checked = options.autoplay,
+                                    onCheckedChange = { onOptions(options.copy(autoplay = it)) },
+                                )
+
+                                SheetToggleRow(
+                                    label = "Auto-skip verified intros",
+                                    subtitle = "Skips opening sequences automatically when timestamps are available",
+                                    checked = options.autoSkipIntro,
+                                    onCheckedChange = { onOptions(options.copy(autoSkipIntro = it)) },
+                                )
+                            }
+                        }
+
+                        // 2. Audio Track
+                        item(key = "section_audio") {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    text = "Audio Track",
+                                    color = NetflixRed,
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.titleSmall,
+                                )
+
+                                if (audioTracks.isEmpty()) {
+                                    Text(
+                                        text = "Audio tracks appear once playback starts.",
+                                        color = NetflixTextMuted,
+                                        fontSize = 12.5.sp,
+                                    )
+                                } else {
+                                    audioTracks.forEach { track ->
+                                        SheetTrackRow(
+                                            label = track.label,
+                                            selected = track.selected,
+                                            onClick = {
+                                                onSelectTrack(C.TRACK_TYPE_AUDIO, track)
+                                                onDismiss()
+                                            },
                                         )
                                     }
                                 }
-                                item {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                    ) {
-                                        PanelSectionLabel("Video Sources")
-                                        TextButton(onClick = onRetrySources) {
-                                            Icon(Icons.Default.Refresh, contentDescription = null, tint = NetflixRed, modifier = Modifier.size(16.dp))
-                                            Spacer(Modifier.width(4.dp))
-                                            Text("Refresh", color = NetflixRed, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                        }
-                                    }
-                                }
-                                if (sources == null) {
-                                    item {
-                                        Row(
-                                            modifier = Modifier.padding(12.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                        ) {
-                                            if (!isOffline) CircularProgressIndicator(color = NetflixRed, modifier = Modifier.size(22.dp), strokeWidth = 2.5.dp)
-                                            Text(
-                                                text = if (isOffline) "Tap Refresh to check online sources." else "Finding available video sources…",
-                                                color = NetflixTextMuted,
-                                                fontSize = 13.sp,
-                                            )
-                                        }
-                                    }
-                                } else if (sources.isEmpty()) {
-                                    item { Text("No video sources available right now.", color = NetflixTextMuted, modifier = Modifier.padding(10.dp)) }
-                                }
-                                itemsIndexed(sources.orEmpty()) { index, source ->
-                                    val qual = source.movieQuality()
-                                    val label = if (qual != null) "Source ${index + 1} • $qual" else "Source ${index + 1}"
-                                    PanelOptionRow(
-                                        label = label,
-                                        detail = source.friendlyCinemaDetail(index),
-                                        badge = qual?.uppercase(),
-                                        selected = !isOffline && source == selectedSource,
-                                    ) { onSelectSource(source) }
-                                }
                             }
+                        }
 
-                            MoviePlayerPanel.SUBTITLES -> {
-                                val audio = movieTrackChoices(tracks, C.TRACK_TYPE_AUDIO)
-                                val subtitles = movieTrackChoices(tracks, C.TRACK_TYPE_TEXT)
+                        // 3. Subtitles
+                        item(key = "section_subs") {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text(
+                                    text = "Subtitles",
+                                    color = NetflixRed,
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.titleSmall,
+                                )
 
-                                item { PanelSectionLabel("Audio Track") }
-                                if (audio.isEmpty()) {
-                                    item { Text("Audio tracks populate once video frames arrive.", color = NetflixTextMuted, fontSize = 12.5.sp, modifier = Modifier.padding(horizontal = 8.dp)) }
+                                SheetToggleRow(
+                                    label = "Black fill behind subtitles",
+                                    subtitle = "Adds a clean dark background box behind subtitle lines",
+                                    checked = options.subtitleBackground,
+                                    onCheckedChange = { onOptions(options.copy(subtitleBackground = it)) },
+                                )
+
+                                Text("Subtitle size", color = Color.White, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    listOf(
+                                        0.8f to "Small",
+                                        1.0f to "Normal",
+                                        1.25f to "Large",
+                                        1.45f to "XL",
+                                    ).forEach { (sz, sizeLabel) ->
+                                        val sel = abs(options.subtitleSize - sz) < 0.05f
+                                        Surface(
+                                            onClick = { onOptions(options.copy(subtitleSize = sz)) },
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = if (sel) NetflixRed else NetflixCardBg,
+                                            border = BorderStroke(1.dp, if (sel) NetflixRed else NetflixBorder),
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            Box(modifier = Modifier.padding(vertical = 9.dp), contentAlignment = Alignment.Center) {
+                                                Text(
+                                                    text = sizeLabel,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    color = Color.White,
+                                                    maxLines = 1,
+                                                    softWrap = false,
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
-                                items(audio) { track ->
-                                    PanelOptionRow(track.label, null, null, track.selected) { onSelectTrack(C.TRACK_TYPE_AUDIO, track) }
-                                }
 
-                                item { PanelSectionLabel("Embedded Subtitles") }
-                                item {
-                                    PanelOptionRow("Off", null, null, subtitles.none(MovieTrack::selected)) {
+                                SheetTrackRow(
+                                    label = "Subtitles Off",
+                                    selected = subsCurrentlyOff,
+                                    onClick = {
                                         onSelectTrack(C.TRACK_TYPE_TEXT, null)
-                                    }
-                                }
-                                items(subtitles) { track ->
-                                    PanelOptionRow(track.label, null, null, track.selected) { onSelectTrack(C.TRACK_TYPE_TEXT, track) }
+                                        onDismiss()
+                                    },
+                                )
+
+                                subtitleTracks.forEach { track ->
+                                    SheetTrackRow(
+                                        label = track.label,
+                                        selected = !subsCurrentlyOff && track.selected,
+                                        onClick = {
+                                            onSelectTrack(C.TRACK_TYPE_TEXT, track)
+                                            onDismiss()
+                                        },
+                                    )
                                 }
 
-                                item { PanelSectionLabel("OpenSubtitles Cloud Captions") }
                                 if (subtitlesLoading) {
-                                    item {
-                                        Row(
-                                            modifier = Modifier.padding(10.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                        ) {
-                                            CircularProgressIndicator(color = NetflixRed, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                                            Text("Loading external subtitles…", color = NetflixTextMuted, fontSize = 12.5.sp)
-                                        }
-                                    }
-                                } else if (subtitleOptions.isEmpty()) {
-                                    item { Text("No external subtitles listed.", color = NetflixTextMuted, fontSize = 12.5.sp, modifier = Modifier.padding(horizontal = 8.dp)) }
-                                }
-                                items(subtitleOptions) { track ->
-                                    PanelOptionRow(
-                                        label = languageName(track.language),
-                                        detail = null,
-                                        badge = track.language.uppercase(),
-                                        selected = subtitles.any(MovieTrack::selected) && selectedSubtitle == track,
-                                    ) { onSelectExternal(track) }
-                                }
-                            }
-
-                            MoviePlayerPanel.GENERAL -> {
-                                item { PanelSectionLabel("Playback Speed") }
-                                item {
                                     Row(
-                                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                        modifier = Modifier.padding(vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     ) {
-                                        listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f).forEach { speed ->
-                                            NetflixChip(
-                                                label = "${speed.toString().removeSuffix(".0")}x",
-                                                selected = options.speed == speed,
-                                                onClick = { onOptions(options.copy(speed = speed)) },
-                                            )
-                                        }
+                                        CircularProgressIndicator(color = NetflixRed, modifier = Modifier.size(15.dp), strokeWidth = 2.dp)
+                                        Text("Checking cloud subtitles…", color = NetflixTextMuted, fontSize = 12.sp)
                                     }
-                                }
-
-                                item { PanelSectionLabel("Aspect & Picture Fit") }
-                                item {
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        MovieVideoFit.entries.forEach { fit ->
-                                            NetflixChip(
-                                                label = fit.label,
-                                                selected = options.fit == fit,
-                                                onClick = { onOptions(options.copy(fit = fit)) },
-                                            )
-                                        }
+                                } else {
+                                    subtitleOptions.take(12).forEach { extSub ->
+                                        val isSelected = !subsCurrentlyOff && selectedSubtitle?.url == extSub.url
+                                        SheetTrackRow(
+                                            label = "${languageName(extSub.language)} (Cloud)",
+                                            selected = isSelected,
+                                            onClick = {
+                                                onSelectExternal(extSub)
+                                                onDismiss()
+                                            },
+                                        )
                                     }
-                                }
-
-                                item { PanelSectionLabel("Subtitle Appearance") }
-                                item {
-                                    Row(
-                                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    ) {
-                                        listOf("Small" to 0.8f, "Normal" to 1f, "Large" to 1.25f, "XL" to 1.45f).forEach { (label, sz) ->
-                                            NetflixChip(
-                                                label = label,
-                                                selected = kotlin.math.abs(options.subtitleSize - sz) < 0.05f,
-                                                onClick = { onOptions(options.copy(subtitleSize = sz)) },
-                                            )
-                                        }
-                                    }
-                                }
-                                item {
-                                    NetflixFeatureRow(
-                                        label = "Subtitle Black Fill",
-                                        checked = options.subtitleBackground,
-                                        onCheckedChange = { onOptions(options.copy(subtitleBackground = it)) },
-                                        modifier = Modifier,
-                                    )
-                                }
-
-                                item { PanelSectionLabel("Behavior") }
-                                item {
-                                    NetflixFeatureRow(
-                                        label = "Autoplay Next Episode",
-                                        checked = options.autoplay,
-                                        onCheckedChange = { onOptions(options.copy(autoplay = it)) },
-                                        modifier = Modifier,
-                                    )
-                                }
-                                item {
-                                    NetflixFeatureRow(
-                                        label = "Auto-Skip Verified Intros (IntroDB)",
-                                        checked = options.autoSkipIntro,
-                                        onCheckedChange = { onOptions(options.copy(autoSkipIntro = it)) },
-                                        modifier = Modifier,
-                                    )
-                                }
-                                item {
-                                    NetflixFeatureRow(
-                                        label = "Always Show Slim Progress Bar",
-                                        checked = options.persistentProgress,
-                                        onCheckedChange = { onOptions(options.copy(persistentProgress = it)) },
-                                        modifier = Modifier,
-                                    )
-                                }
-                                item {
-                                    NetflixFeatureRow(
-                                        label = "Swipe for Brightness & Volume",
-                                        checked = options.swipeGestures,
-                                        onCheckedChange = { onOptions(options.copy(swipeGestures = it)) },
-                                        modifier = Modifier,
-                                    )
                                 }
                             }
+                        }
+
+                        if (!showVideoSourcesFirst) {
+                            movieSourceItems(
+                                sources = sources,
+                                selectedSource = selectedSource,
+                                isOffline = isOffline,
+                                offlineAvailable = offlineAvailable,
+                                onSelectSource = onSelectSource,
+                                onUseOffline = onUseOffline,
+                                onRetrySources = onRetrySources,
+                            )
                         }
                     }
                 }
@@ -354,79 +390,187 @@ internal fun MoviePlaybackSettings(
     }
 }
 
-@Composable
-private fun PanelSectionLabel(label: String) {
-    Text(
-        text = label.uppercase(),
-        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
-        color = NetflixRed,
-        fontSize = 11.sp,
-        fontWeight = FontWeight.ExtraBold,
-        letterSpacing = 0.7.sp,
-    )
+private fun LazyListScope.movieSourceItems(
+    sources: List<StremioStreamResult>?,
+    selectedSource: StremioStreamResult?,
+    isOffline: Boolean,
+    offlineAvailable: Boolean,
+    onSelectSource: (StremioStreamResult) -> Unit,
+    onUseOffline: () -> Unit,
+    onRetrySources: () -> Unit,
+) {
+    item(key = "section_video_sources_header") {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "Video Sources",
+                    color = NetflixRed,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                TextButton(
+                    onClick = onRetrySources,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, tint = NetflixRed, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Refresh", color = NetflixRed, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
+            }
+            if (sources == null && !isOffline) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    CircularProgressIndicator(color = NetflixRed, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text("Looking for video sources…", color = NetflixTextMuted, style = MaterialTheme.typography.bodySmall)
+                }
+            } else if (sources != null && sources.isEmpty() && !offlineAvailable) {
+                Text("No video sources available.", color = NetflixTextMuted, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+
+    if (offlineAvailable) {
+        item(key = "source_offline_saved") {
+            SheetSourceRow(
+                title = "Saved on Device",
+                detail = "Instant offline playback",
+                selected = isOffline,
+                onClick = onUseOffline,
+            )
+        }
+    }
+
+    itemsIndexed(sources.orEmpty()) { index, source ->
+        val qual = source.movieQuality()
+        val label = if (qual != null) "Source ${index + 1} • $qual" else "Source ${index + 1}"
+        SheetSourceRow(
+            title = label,
+            detail = source.friendlyCinemaDetail(index),
+            selected = !isOffline && source == selectedSource,
+            onClick = { onSelectSource(source) },
+        )
+    }
 }
 
 @Composable
-private fun PanelOptionRow(
+private fun SheetTrackRow(
     label: String,
-    detail: String?,
-    badge: String?,
     selected: Boolean,
     onClick: () -> Unit,
 ) {
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(6.dp),
-        color = if (selected) NetflixRed.copy(alpha = 0.16f) else NetflixCardBg,
+        shape = RoundedCornerShape(4.dp),
+        color = if (selected) NetflixRed.copy(alpha = 0.20f) else NetflixCardBg,
         border = BorderStroke(1.dp, if (selected) NetflixRed else NetflixBorder),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            modifier = Modifier.padding(14.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = label,
+                color = Color.White,
+                fontSize = 13.5.sp,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (selected) {
+                Icon(Icons.Default.Check, contentDescription = null, tint = NetflixRed, modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun SheetSourceRow(
+    title: String,
+    detail: String?,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(4.dp),
+        color = if (selected) NetflixRed.copy(alpha = 0.20f) else NetflixCardBg,
+        border = BorderStroke(1.dp, if (selected) NetflixRed else NetflixBorder),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        text = label,
-                        fontSize = 13.5.sp,
-                        fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.SemiBold,
-                        color = Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (badge != null) {
-                        Surface(
-                            color = NetflixMatchGreen.copy(alpha = 0.16f),
-                            shape = RoundedCornerShape(3.dp),
-                        ) {
-                            Text(
-                                text = badge,
-                                color = NetflixMatchGreen,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.5.dp),
-                            )
-                        }
-                    }
-                }
+                Text(
+                    text = title,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 if (!detail.isNullOrBlank()) {
                     Text(
                         text = detail,
-                        fontSize = 11.5.sp,
                         color = NetflixTextMuted,
-                        maxLines = 2,
+                        fontSize = 12.sp,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
             if (selected) {
-                Icon(Icons.Default.Check, contentDescription = "Selected", tint = NetflixRed, modifier = Modifier.size(18.dp))
+                Icon(Icons.Default.Check, contentDescription = "Current source", tint = NetflixRed, modifier = Modifier.size(18.dp))
             }
+        }
+    }
+}
+
+@Composable
+private fun SheetToggleRow(
+    label: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Surface(
+        onClick = { onCheckedChange(!checked) },
+        shape = RoundedCornerShape(4.dp),
+        color = NetflixCardBg,
+        border = BorderStroke(1.dp, NetflixBorder),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(label, color = Color.White, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                Text(subtitle, color = NetflixTextMuted, fontSize = 11.5.sp, lineHeight = 15.sp)
+            }
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = NetflixRed,
+                    uncheckedThumbColor = Color(0xFFB5B8C4),
+                    uncheckedTrackColor = Color(0xFF282830),
+                    uncheckedBorderColor = NetflixBorder,
+                ),
+            )
         }
     }
 }

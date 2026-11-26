@@ -69,7 +69,7 @@ internal fun MovieDetails(
     rating: Int = 0,
     onRate: ((MovieTitle, Int) -> Unit)? = null,
     watchStatus: MovieWatchStatus? = null,
-    onWatchStatus: ((MovieTitle, MovieWatchStatus) -> Unit)? = null,
+    onWatchStatus: ((MovieTitle, MovieWatchStatus?) -> Unit)? = null,
 ) {
     var details by remember(preview.ref) { mutableStateOf<Result<MovieTitle?>?>(null) }
     var retry by remember(preview.ref) { mutableIntStateOf(0) }
@@ -184,8 +184,11 @@ internal fun MovieDetails(
         )
     }
 
-    val isListed = saved || watchStatus != null
-    val activeListLabel = watchStatus?.label ?: if (saved) "In My List" else "My List"
+    val movieCompleted = title.kind == MovieKind.MOVIE && progressFor(null)?.completed == true
+    val effectiveStatus = watchStatus
+        ?: if (movieCompleted) MovieWatchStatus.COMPLETED else if (saved) MovieWatchStatus.PLAN else null
+    val isListed = effectiveStatus != null || saved
+    val activeListLabel = effectiveStatus?.label ?: "My List"
 
     LazyColumn(
         modifier = modifier
@@ -463,7 +466,7 @@ internal fun MovieDetails(
                     )
                 }
 
-                // Clean, Unconfusing Action Row (Unified My List + Rate + Watched + Optional Trailer!)
+                // Clean, Unconfusing Action Row (Unified My List + Rate + Optional Trailer — zero redundant Watched button!)
                 if (verified != null) {
                     Row(
                         modifier = Modifier
@@ -478,12 +481,10 @@ internal fun MovieDetails(
                                 label = activeListLabel,
                                 tint = if (isListed) NetflixRed else Color.White,
                                 onClick = {
-                                    if (!isListed && onWatchStatus == null) {
-                                        onSave()
-                                    } else if (!isListed) {
-                                        onSave()
-                                    } else {
+                                    if (onWatchStatus != null) {
                                         listMenu = true
+                                    } else {
+                                        onSave()
                                     }
                                 },
                             )
@@ -494,7 +495,7 @@ internal fun MovieDetails(
                             ) {
                                 if (onWatchStatus != null) {
                                     MovieWatchStatus.entries.forEach { status ->
-                                        val isCurrent = status == watchStatus || (watchStatus == null && saved && status == MovieWatchStatus.PLAN)
+                                        val isCurrent = status == effectiveStatus
                                         DropdownMenuItem(
                                             text = {
                                                 Text(
@@ -512,9 +513,17 @@ internal fun MovieDetails(
                                             },
                                         )
                                     }
-                                    HorizontalDivider(color = NetflixBorder)
-                                }
-                                if (saved) {
+                                    if (isListed) {
+                                        HorizontalDivider(color = NetflixBorder)
+                                        DropdownMenuItem(
+                                            text = { Text("Remove from My List", color = MaterialTheme.colorScheme.error) },
+                                            onClick = {
+                                                listMenu = false
+                                                onWatchStatus(title, null)
+                                            },
+                                        )
+                                    }
+                                } else if (saved) {
                                     DropdownMenuItem(
                                         text = { Text("Remove from My List", color = MaterialTheme.colorScheme.error) },
                                         onClick = {
@@ -532,16 +541,6 @@ internal fun MovieDetails(
                                 label = if (rating > 0) "Rated $rating/10" else "Rate",
                                 tint = if (rating > 0) NetflixGold else Color.White,
                                 onClick = { ratingDialog = true },
-                            )
-                        }
-
-                        if (title.kind == MovieKind.MOVIE && onWatched != null) {
-                            val watched = progressFor(null)?.completed == true
-                            NetflixActionIcon(
-                                icon = if (watched) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                                label = if (watched) "Watched" else "Mark Watched",
-                                tint = if (watched) NetflixMatchGreen else Color.White,
-                                onClick = { onWatched(title, null, !watched) },
                             )
                         }
 
@@ -665,24 +664,44 @@ internal fun MovieDetails(
             }
         }
 
-        // 4B. More Like This Shelf / Grid
+        // 4B. More Like This 3-Column Netflix Grid (no duplicate heading!)
         if (!blocked && activeTab == DetailsTab.RELATED && onOpenRelated != null) {
-            item(key = "related_shelf") {
-                AnimatedContent(
-                    targetState = related,
-                    transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(140)) },
-                    label = "related_content",
-                ) { options ->
-                    when {
-                        options == null -> Box(Modifier.fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(color = NetflixRed, modifier = Modifier.size(26.dp))
+            val visibleRelated = related?.visible(hideMature)
+            when {
+                visibleRelated == null -> item(key = "related_loading") {
+                    Box(Modifier.fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = NetflixRed, modifier = Modifier.size(26.dp))
+                    }
+                }
+                visibleRelated.isEmpty() -> item(key = "related_empty") {
+                    Text(
+                        "No similar titles available right now.",
+                        Modifier.padding(horizontal = PagePadding),
+                        color = NetflixTextMuted,
+                    )
+                }
+                else -> {
+                    val rows = visibleRelated.take(18).chunked(3)
+                    items(rows.size, key = { idx -> "related_row_$idx" }) { idx ->
+                        val rowItems = rows[idx]
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = PagePadding)
+                                .animateItem(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            rowItems.forEach { option ->
+                                NetflixPosterCard(
+                                    title = option,
+                                    onClick = { onOpenRelated(option) },
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                            repeat(3 - rowItems.size) {
+                                Spacer(Modifier.weight(1f))
+                            }
                         }
-                        options.isNotEmpty() -> TitleShelf(
-                            label = "More Like This",
-                            titles = options.visible(hideMature),
-                            open = onOpenRelated,
-                        )
-                        else -> Text("No similar titles available right now.", Modifier.padding(horizontal = PagePadding), color = NetflixTextMuted)
                     }
                 }
             }

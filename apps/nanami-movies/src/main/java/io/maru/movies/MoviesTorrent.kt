@@ -56,28 +56,35 @@ internal fun StremioStreamResult.magnetUri(): String? {
     }
 }
 
+internal data class MoviePrebufferStatus(
+    val percent: Int = 0,
+    val speedKbps: Int = 0,
+    val peers: Int = 0,
+)
+
 /** Keeps the libtorrent session and its private cache alive only while the player owns it. */
 @OptIn(UnstableApi::class)
 internal suspend fun withMoviesTorrent(
     cacheDir: File,
     source: StremioStreamResult,
     episode: MovieEpisode?,
-    onBuffer: suspend () -> Unit,
+    onBufferProgress: suspend (MoviePrebufferStatus) -> Unit,
     play: suspend (Uri, DataSource.Factory) -> Unit
 ) = withContext(Dispatchers.IO) {
-    val magnet = requireNotNull(source.magnetUri()) { "This torrent source is invalid." }
+    val magnet = requireNotNull(source.magnetUri()) { "This source could not be opened." }
     val saveDir = File(cacheDir, "movies-playback/${UUID.randomUUID()}")
     val session = SessionManager()
     var stream: VerifiedMovieFile? = null
     try {
         check(saveDir.mkdirs()) { "Could not create the streaming cache." }
         session.start()
+        onBufferProgress(MoviePrebufferStatus(percent = 5, speedKbps = 0, peers = 0))
         val handle = addMoviesTorrent(session, magnet, saveDir)
         val info = withTimeout(30_000L) { awaitMovieTorrentMetadata(handle) }
         val fileIndex = chooseMovieFile(info, source, episode)
         val files = info.files()
         val file = torrentVideoFile(saveDir, files.filePath(fileIndex))
-        check(info.pieceLength() > 0 && info.numPieces() > 0) { "The torrent has no valid pieces." }
+        check(info.pieceLength() > 0 && info.numPieces() > 0) { "The video stream has no valid pieces." }
         selectMovieTorrentFile(handle, info.numFiles(), fileIndex)
 
         val movie = VerifiedMovieFile(
@@ -87,10 +94,20 @@ internal suspend fun withMoviesTorrent(
         stream = movie
         movie.requestPieces(0L)
         handle.unsetFlags(TorrentFlags.UPLOAD_MODE)
-        onBuffer()
         val firstBytes = movie.bytesInPiece(0L, movie.size)
-        awaitVerifiedRange(timeoutMillis = 45_000L, isCurrent = { true }) {
-            movie.verify(0L, firstBytes) && file.isFile && file.length() >= firstBytes
+        withTimeout(45_000L) {
+            while (true) {
+                val status = handle.status()
+                check(!status.errorCode().isError) { "Video stream error." }
+                if (movie.verify(0L, firstBytes) && file.isFile && file.length() >= firstBytes) break
+                val speedKbps = (status.downloadPayloadRate() / 1024).coerceAtLeast(0)
+                val peers = status.numPeers()
+                val pct = ((status.totalWantedDone().toDouble() / firstBytes.coerceAtLeast(1L)) * 100)
+                    .toInt()
+                    .coerceIn(5, 99)
+                onBufferProgress(MoviePrebufferStatus(percent = pct, speedKbps = speedKbps, peers = peers))
+                delay(90)
+            }
         }
         val uri = Uri.Builder().scheme("nanami-torrent").authority("playback").appendPath("video.${file.extension}").build()
         play(uri, DataSource.Factory { VerifiedMovieDataSource(movie) })

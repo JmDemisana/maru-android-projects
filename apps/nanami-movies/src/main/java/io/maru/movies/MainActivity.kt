@@ -106,11 +106,23 @@ internal fun openCinemaCustomTab(context: Context, url: String) {
 }
 
 class MainActivity : ComponentActivity() {
-    internal val incomingAuthUri = MutableStateFlow<Uri?>(null)
+    internal val incomingAuthCallbacks = Channel<Uri>(Channel.BUFFERED)
+    private var lastDispatchedAuthUri: String? = null
+
+    private fun dispatchIncomingAuth(uri: Uri?) {
+        if (uri == null) return
+        val raw = uri.toString()
+        if (raw == lastDispatchedAuthUri) return
+        lastDispatchedAuthUri = raw
+        incomingAuthCallbacks.trySend(uri)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        incomingAuthUri.value = intent?.data
+        dispatchIncomingAuth(intent?.data)
+        addOnNewIntentListener { newIntent ->
+            dispatchIncomingAuth(newIntent?.data)
+        }
         if (!isInMultiWindowMode && resources.configuration.smallestScreenWidthDp in 1..599) {
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
@@ -132,9 +144,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.data != null) {
-            incomingAuthUri.value = intent.data
-        }
+        dispatchIncomingAuth(intent.data)
     }
 }
 
@@ -158,7 +168,6 @@ private fun MoviesApp(
     val routeStateHolder = rememberSaveableStateHolder()
     val vault = MoviesDownloadVault
     val downloads by vault.items.collectAsState()
-    val authCallbackUri by activity.incomingAuthUri.collectAsState()
 
     var selectedTab by rememberSaveable { mutableStateOf(MoviesNavTab.HOME) }
     var detailStack by remember { mutableStateOf<List<MoviesRoute.Detail>>(emptyList()) }
@@ -233,33 +242,34 @@ private fun MoviesApp(
     }
 
     fun openSimklWebAuth(@Suppress("UNUSED_PARAMETER") clearCookies: Boolean = false) {
-        showSimklAuthDialog = true
         scope.launch {
             runCatching {
                 val session = simkl.createPkceSession(forAppDeepLink = true)
                 openCinemaCustomTab(activity, session.authorizeUrl)
+            }.onFailure {
+                showSimklAuthDialog = true
             }
         }
     }
 
-    // Intercept returning `nanamimovies://simkl-auth?code=...&state=...` callback automatically!
-    LaunchedEffect(authCallbackUri) {
-        val uri = authCallbackUri ?: return@LaunchedEffect
-        if (!simkl.isAppAuthCallback(uri)) return@LaunchedEffect
-        activity.incomingAuthUri.value = null
-        completingSimklCallback = true
-        try {
-            val account = simkl.completeAppCallback(uri)
-            refreshAccountModels()
-            showSimklAuthDialog = false
-            syncSignal.trySend(Unit)
-            Toast.makeText(activity, "Connected to SIMKL as ${account.label}", Toast.LENGTH_SHORT).show()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Toast.makeText(activity, e.message ?: "Couldn't complete SIMKL sign-in.", Toast.LENGTH_LONG).show()
-        } finally {
-            completingSimklCallback = false
+    // Intercept returning `nanamimovies://simkl-auth?code=...&state=...` callback without self-cancellation!
+    LaunchedEffect(Unit) {
+        for (uri in activity.incomingAuthCallbacks) {
+            if (!simkl.isAppAuthCallback(uri)) continue
+            completingSimklCallback = true
+            try {
+                val account = simkl.completeAppCallback(uri)
+                refreshAccountModels()
+                showSimklAuthDialog = false
+                syncSignal.trySend(Unit)
+                Toast.makeText(activity, "Connected to SIMKL as ${account.label}", Toast.LENGTH_SHORT).show()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Toast.makeText(activity, e.message ?: "Couldn't complete SIMKL sign-in.", Toast.LENGTH_LONG).show()
+            } finally {
+                completingSimklCallback = false
+            }
         }
     }
 
@@ -421,12 +431,38 @@ private fun MoviesApp(
         }
     }
 
-    fun track(title: MovieTitle, status: MovieWatchStatus) {
+    fun track(title: MovieTitle, status: MovieWatchStatus?) {
         if (doNotTrackMature && title.isMature) return
         val key = accountKey
         val ref = title.ref
+        if (status == null) {
+            library.track(ref, null, key)
+            tracking = tracking - ref
+            saved = saved - ref
+            library.save(saved)
+            savedOrder = library.savedOrder()
+            if (title.kind == MovieKind.MOVIE) {
+                markWatched(title, null, false)
+            }
+            if (key != null) {
+                remote = remote - ref
+                library.queueList(key, ref, false)
+                pendingSyncCount = computePendingCount(key)
+                syncSignal.trySend(Unit)
+            }
+            return
+        }
+        val wasCompleted = tracking[ref] == MovieWatchStatus.COMPLETED ||
+            (title.kind == MovieKind.MOVIE && combinedHistoryValue(history, remoteHistory, ref))
         library.track(ref, status, key)
         tracking = tracking + (ref to status)
+        if (title.kind == MovieKind.MOVIE) {
+            if (status == MovieWatchStatus.COMPLETED) {
+                markWatched(title, null, true)
+            } else if (wasCompleted) {
+                markWatched(title, null, false)
+            }
+        }
         if (key == null) {
             saved = if (status == MovieWatchStatus.PLAN) saved + ref else saved - ref
             library.save(saved)
@@ -519,12 +555,6 @@ private fun MoviesApp(
                             }
                         },
                         actions = {
-                            if (selectedTab == MoviesNavTab.HOME) {
-                                IconButton(onClick = { selectedTab = MoviesNavTab.SEARCH }) {
-                                    Icon(Icons.Default.Search, contentDescription = "Search", tint = Color.White)
-                                }
-                            }
-
                             if (savedSimklAccounts.isNotEmpty()) {
                                 Box {
                                     Surface(
@@ -1051,4 +1081,12 @@ private fun SimklConnectDialog(
             }
         }
     }
+}
+
+private fun combinedHistoryValue(
+    history: List<WatchProgress>,
+    remoteHistory: List<WatchProgress>,
+    ref: TitleRef,
+): Boolean = (history + remoteHistory).any {
+    it.title == ref && it.season == null && it.episode == null && it.completed
 }

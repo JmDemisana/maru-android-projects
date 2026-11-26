@@ -197,7 +197,7 @@ class Simkl(context: Context) {
             .putString("pending_pkce_state", state)
             .putString("pending_pkce_verifier", verifier)
             .putString("pending_pkce_client", resolvedClient)
-            .apply()
+            .commit()
         return SimklPkceSession(
             authorizeUrl = authorizeUrl,
             clientId = resolvedClient,
@@ -359,7 +359,29 @@ class Simkl(context: Context) {
     suspend fun disconnect() = mutex.withLock { disconnectLocked() }
 
     private suspend fun exchangePkceCode(session: SimklPkceSession, code: String): Token = withContext(Dispatchers.IO) {
-        // 1. Try site bridge (/api/simkl-token) first, matching Nanami Anime's /api/anilist-token flow
+        // 1. Direct Simkl AUTH V2 PKCE exchange first (single-hop, preserves one-time authorization code)
+        val directReply = runCatching {
+            oauth(
+                "token",
+                session.clientId,
+                "grant_type" to "authorization_code",
+                "code" to code,
+                "redirect_uri" to session.redirectUri,
+                "code_verifier" to session.codeVerifier,
+            )
+        }.getOrNull()
+
+        if (directReply != null) {
+            if (directReply.isSuccessful && directReply.error == null) {
+                return@withContext parseToken(directReply.body)
+            }
+            // If Simkl explicitly rejected the grant/client, surface the exact reason immediately
+            if (directReply.code in 400..499) {
+                return@withContext parseToken(directReply.requireSuccess())
+            }
+        }
+
+        // 2. Site bridge (/api/simkl-token) fallback when direct API is unreachable
         val bridgeBody = JSONObject()
             .put("code", code)
             .put("clientId", session.clientId)
@@ -386,16 +408,7 @@ class Simkl(context: Context) {
             if (token != null) return@withContext token
         }
 
-        // 2. Direct Simkl AUTH V2 PKCE exchange fallback (no client_secret required)
-        val reply = oauth(
-            "token",
-            session.clientId,
-            "grant_type" to "authorization_code",
-            "code" to code,
-            "redirect_uri" to session.redirectUri,
-            "code_verifier" to session.codeVerifier,
-        )
-        parseToken(reply.requireSuccess())
+        throw IOException("Couldn't reach SIMKL to finish sign-in. Check your connection and try again.")
     }
 
     private suspend fun fetchViewerProfile(accessToken: String, activeClientId: String): SimklViewerProfile? =

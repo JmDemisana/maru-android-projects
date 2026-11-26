@@ -3,6 +3,7 @@ package io.maru.movies
 import androidx.compose.animation.*
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -62,6 +63,7 @@ internal fun MoviePlayerChrome(
     showOpeningAdvisory: Boolean,
     segments: List<MovieSegment>,
     loading: String?,
+    loadingProgressPercent: Int = 0,
     problem: String?,
     controls: Boolean,
     locked: Boolean,
@@ -76,7 +78,6 @@ internal fun MoviePlayerChrome(
     onToggleControls: () -> Unit,
     onBack: () -> Unit,
     onSettings: () -> Unit,
-    onTracks: () -> Unit,
     onSources: () -> Unit,
     onLock: () -> Unit,
     onPip: (() -> Unit)?,
@@ -119,34 +120,16 @@ internal fun MoviePlayerChrome(
         doubleTapDeltaSec = 0
     }
 
-    val showButtons = !hideChrome && !locked && (controls || loading != null || problem != null || nextCountdown != null)
+    val isStatusOverlay = !hideChrome && (loading != null || problem != null)
+    val showButtons = !hideChrome && !locked && !isStatusOverlay && (controls || nextCountdown != null)
+    val subtitleLine = remember(episode, title) {
+        if (episode != null) "Episode ${episode.episode}" + (episode.title.takeIf { it.isNotBlank() && !it.equals("Episode ${episode.episode}", true) }?.let { " • $it" } ?: "")
+        else title.year?.takeIf(String::isNotBlank) ?: "Movie"
+    }
 
     Box(Modifier.fillMaxSize()) {
-        // Blurred / darkened backdrop before first video frame
-        if (!hideChrome && !sawVideo && (loading != null || problem != null)) {
-            val backdrop = episode?.thumbnail ?: title.backdrop ?: title.poster
-            if (backdrop != null) {
-                AsyncImage(
-                    model = backdrop,
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop,
-                    alpha = 0.34f,
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color(0xB309090D), Color(0xEB000000)),
-                        ),
-                    ),
-            )
-        }
-
-        // Touch & Vertical Gesture Surface
-        if (!hideChrome && !locked) {
+        // Touch & Vertical Gesture Surface (active during playback)
+        if (!hideChrome && !locked && !isStatusOverlay) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -199,170 +182,234 @@ internal fun MoviePlayerChrome(
             )
         }
 
-        // Top Player Header
-        Row(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (showButtons) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+        // Clean Pitch-Black Loading / Problem Layout (Exact Parity with Nanami Anime!)
+        if (isStatusOverlay) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFA050507))
+                    .windowInsetsPadding(WindowInsets.safeDrawing),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                    }
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = title.title,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = subtitleLine,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFD0D3DC),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    IconButton(onClick = onSettings) {
+                        Icon(Icons.Default.Settings, contentDescription = "Playback settings", tint = Color.White)
+                    }
                 }
-                Column(
+
+                Box(
                     modifier = Modifier
                         .weight(1f)
-                        .padding(horizontal = 6.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        text = title.title,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (episode != null) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        if (loading != null) {
+                            CircularProgressIndicator(
+                                color = NetflixRed,
+                                strokeWidth = 3.dp,
+                                modifier = Modifier.size(36.dp),
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = loading,
+                                color = Color.White,
+                                style = MaterialTheme.typography.titleSmall,
+                                textAlign = TextAlign.Center,
+                            )
+                            if (loadingProgressPercent > 0) {
+                                val animProgress by animateFloatAsState(
+                                    targetValue = (loadingProgressPercent / 100f).coerceIn(0f, 1f),
+                                    animationSpec = tween(220),
+                                    label = "movie_prebuffer_progress",
+                                )
+                                LinearProgressIndicator(
+                                    progress = { animProgress },
+                                    modifier = Modifier
+                                        .widthIn(max = 220.dp)
+                                        .fillMaxWidth()
+                                        .height(4.dp),
+                                    color = NetflixRed,
+                                    trackColor = NetflixBorder,
+                                )
+                            }
+                        } else {
+                            Icon(
+                                Icons.Default.ErrorOutline,
+                                contentDescription = null,
+                                tint = NetflixRed,
+                                modifier = Modifier.size(36.dp),
+                            )
+                            Text(
+                                text = problem.orEmpty(),
+                                color = Color.White,
+                                textAlign = TextAlign.Center,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Button(
+                                onClick = onRetry,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = NetflixRed,
+                                    contentColor = Color.White,
+                                ),
+                                shape = RoundedCornerShape(6.dp),
+                            ) {
+                                Text("Try Again", fontWeight = FontWeight.ExtraBold)
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Top Player Header (when video is ready)
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (showButtons) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                    }
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 6.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
                         Text(
-                            text = "S${episode.season}:E${episode.episode} • ${episode.title}",
+                            text = title.title,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = subtitleLine,
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFFD2D5DF),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
-                }
-            } else {
-                Spacer(Modifier.weight(1f))
-            }
-
-            tools(showButtons && ui.ready)
-
-            if (showButtons) {
-                if (onPip != null) {
-                    IconButton(onClick = onPip) {
-                        Icon(Icons.Default.PictureInPictureAlt, contentDescription = "Picture in picture", tint = Color.White)
-                    }
-                }
-                IconButton(onClick = onLock) {
-                    Icon(Icons.Default.LockOpen, contentDescription = "Lock controls", tint = Color.White)
-                }
-                IconButton(onClick = onSettings) {
-                    Icon(Icons.Default.Settings, contentDescription = "Playback settings", tint = Color.White)
-                }
-            }
-        }
-
-        // Netflix 4-Second Opening Content Advisory Banner (Top-Left)
-        MovieOpeningAdvisory(
-            advisory = advisory,
-            visible = !hideChrome && showOpeningAdvisory && loading == null && problem == null,
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Start))
-                .padding(top = if (showButtons) 60.dp else 18.dp, start = 16.dp),
-        )
-
-        // Screen Lock Shield Button
-        if (!hideChrome && locked) {
-            Surface(
-                onClick = onLock,
-                shape = CircleShape,
-                color = Color(0xBF0A0A0D),
-                border = BorderStroke(1.dp, NetflixBorder),
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End))
-                    .padding(14.dp),
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Icon(Icons.Default.Lock, contentDescription = "Unlock", tint = NetflixRed, modifier = Modifier.size(18.dp))
-                    Text("Locked", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-
-        // Center Status (Loading / Problem with Instant Source Switcher!) OR Transport Controls
-        if (!hideChrome && (loading != null || problem != null)) {
-            Column(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .padding(horizontal = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                if (loading != null) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(38.dp),
-                        color = NetflixRed,
-                        strokeWidth = 3.dp,
-                    )
                 } else {
-                    Icon(Icons.Default.ErrorOutline, contentDescription = null, tint = NetflixRed, modifier = Modifier.size(38.dp))
+                    Spacer(Modifier.weight(1f))
                 }
-                Text(
-                    text = problem ?: loading.orEmpty(),
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleSmall,
-                    textAlign = TextAlign.Center,
-                )
-                if (!locked) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (problem != null) {
-                            Button(
-                                onClick = onRetry,
-                                colors = ButtonDefaults.buttonColors(containerColor = NetflixRed, contentColor = Color.White),
-                                shape = RoundedCornerShape(6.dp),
-                            ) {
-                                Text("Try Again", fontWeight = FontWeight.ExtraBold)
-                            }
+
+                tools(showButtons && ui.ready)
+
+                if (showButtons) {
+                    if (onPip != null) {
+                        IconButton(onClick = onPip) {
+                            Icon(Icons.Default.PictureInPictureAlt, contentDescription = "Picture in picture", tint = Color.White)
                         }
-                        OutlinedButton(
-                            onClick = onSources,
-                            shape = RoundedCornerShape(6.dp),
-                            border = BorderStroke(1.dp, Color(0x77FFFFFF)),
-                            colors = ButtonDefaults.outlinedButtonColors(containerColor = Color(0x8814141A), contentColor = Color.White),
-                        ) {
-                            Icon(Icons.Default.VideoLibrary, contentDescription = null, modifier = Modifier.size(17.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Switch Source", fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
-                        }
+                    }
+                    IconButton(onClick = onLock) {
+                        Icon(Icons.Default.LockOpen, contentDescription = "Lock controls", tint = Color.White)
+                    }
+                    IconButton(onClick = onSettings) {
+                        Icon(Icons.Default.Settings, contentDescription = "Playback settings", tint = Color.White)
                     }
                 }
             }
-        } else if (showButtons && nextCountdown == null) {
-            Row(
-                modifier = Modifier.align(Alignment.Center),
-                horizontalArrangement = Arrangement.spacedBy(28.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (onPreviousEpisode != null) {
-                    MovieTransportButton(Icons.Default.SkipPrevious, "Previous episode", onPreviousEpisode)
+
+            // Netflix 4-Second Opening Content Advisory Banner (Top-Left)
+            MovieOpeningAdvisory(
+                advisory = advisory,
+                visible = !hideChrome && showOpeningAdvisory,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Start))
+                    .padding(top = if (showButtons) 60.dp else 18.dp, start = 16.dp),
+            )
+
+            // Screen Lock Shield Button
+            if (!hideChrome && locked) {
+                Surface(
+                    onClick = onLock,
+                    shape = CircleShape,
+                    color = Color(0xE014151A),
+                    border = BorderStroke(1.dp, NetflixRed),
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End))
+                        .padding(16.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(Icons.Default.Lock, contentDescription = "Unlock", tint = NetflixRed, modifier = Modifier.size(18.dp))
+                        Text("Tap to Unlock", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
-                MovieTransportButton(Icons.Default.Replay10, "Back 10 seconds", { onSeek(ui.position - 10_000L) }, enabled = ui.seekable)
-                MovieTransportButton(
-                    icon = if (ui.playing) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    label = if (ui.playing) "Pause" else "Play",
-                    onClick = onTogglePlayback,
-                    primary = true,
-                )
-                MovieTransportButton(Icons.Default.Forward10, "Forward 10 seconds", { onSeek(ui.position + 10_000L) }, enabled = ui.seekable)
-                if (onNextEpisode != null) {
-                    MovieTransportButton(Icons.Default.SkipNext, "Next episode", onNextEpisode)
+            }
+
+            if (showButtons && nextCountdown == null) {
+                Row(
+                    modifier = Modifier.align(Alignment.Center),
+                    horizontalArrangement = Arrangement.spacedBy(28.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (onPreviousEpisode != null) {
+                        MovieTransportButton(Icons.Default.SkipPrevious, "Previous episode", onPreviousEpisode)
+                    }
+                    MovieTransportButton(Icons.Default.Replay10, "Back 10 seconds", { onSeek(ui.position - 10_000L) }, enabled = ui.seekable)
+                    MovieTransportButton(
+                        icon = if (ui.playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        label = if (ui.playing) "Pause" else "Play",
+                        onClick = onTogglePlayback,
+                        primary = true,
+                    )
+                    MovieTransportButton(Icons.Default.Forward10, "Forward 10 seconds", { onSeek(ui.position + 10_000L) }, enabled = ui.seekable)
+                    if (onNextEpisode != null) {
+                        MovieTransportButton(Icons.Default.SkipNext, "Next episode", onNextEpisode)
+                    }
                 }
             }
         }
 
         // Custom 60fps Canvas Seekbar & Bottom Bar (identical engine to Nanami Anime!)
-        if (showButtons && ui.duration > 0L && ui.ready) {
+        if (!isStatusOverlay && showButtons && ui.duration > 0L && ui.ready) {
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -380,10 +427,9 @@ internal fun MoviePlayerChrome(
                     onScrub = onScrubChange,
                     onSeek = onSeek,
                     onOpenSources = onSources,
-                    onOpenTracks = onTracks,
                 )
             }
-        } else if (!hideChrome && persistentProgress && ui.duration > 0L) {
+        } else if (!isStatusOverlay && !hideChrome && persistentProgress && ui.duration > 0L) {
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -524,7 +570,6 @@ private fun MoviePlayerTimeline(
     onScrub: (Boolean) -> Unit,
     onSeek: (Long) -> Unit,
     onOpenSources: () -> Unit,
-    onOpenTracks: () -> Unit,
 ) {
     var scrubFraction by remember { mutableFloatStateOf(-1f) }
     var settledTargetMs by remember { mutableLongStateOf(-1L) }
@@ -764,43 +809,14 @@ private fun MoviePlayerTimeline(
                 color = Color(0x8816161C),
                 border = BorderStroke(1.dp, NetflixBorder),
             ) {
-                Row(
+                Text(
+                    text = sourceLabel,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp,
+                    maxLines = 1,
                     modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                ) {
-                    Icon(Icons.Default.VideoLibrary, contentDescription = null, tint = NetflixMatchGreen, modifier = Modifier.size(14.dp))
-                    Text(
-                        text = sourceLabel,
-                        color = NetflixMatchGreen,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                    )
-                }
-            }
-
-            Spacer(Modifier.width(6.dp))
-
-            Surface(
-                onClick = onOpenTracks,
-                shape = RoundedCornerShape(4.dp),
-                color = Color(0x8816161C),
-                border = BorderStroke(1.dp, NetflixBorder),
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                ) {
-                    Icon(Icons.Default.Subtitles, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
-                    Text(
-                        text = "Audio & Subtitles",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp,
-                    )
-                }
+                )
             }
         }
     }

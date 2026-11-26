@@ -181,7 +181,7 @@ class MoviesCatalog(private val client: OkHttpClient = OkHttpClient()) {
             title = title,
             poster = item.art("poster")?.upgradePosterResolution(),
             backdrop = item.art("background")?.upgradeBackdropResolution(),
-            year = item.text("releaseInfo") ?: item.text("year"),
+            year = (item.text("releaseInfo") ?: item.text("year"))?.cleanReleaseInfo(),
             runtime = item.text("runtime"),
             overview = item.text("description"),
             genres = genres,
@@ -281,9 +281,45 @@ private fun String?.isJapan(): Boolean =
     this.equals("Japan", ignoreCase = true) || this.equals("JP", ignoreCase = true)
 
 private fun JSONObject.text(key: String): String? =
-    (opt(key) as? String)?.trim()?.takeUnless { it.isEmpty() || it.equals("N/A", ignoreCase = true) }
+    (opt(key) as? String)?.decodeHtmlEntities()?.trim()?.takeUnless { it.isEmpty() || it.equals("N/A", ignoreCase = true) }
 
-private fun JSONObject.art(key: String): String? = text(key)?.takeIf { it.startsWith("https://") }
+private fun JSONObject.art(key: String): String? =
+    (opt(key) as? String)?.trim()?.takeIf { it.startsWith("https://") }
+
+internal fun String.cleanReleaseInfo(): String =
+    trim().trimEnd('–', '—', '-', ' ').ifEmpty { trim() }
+
+private val numericEntityRegex = Regex("&#(x?[0-9a-fA-F]+);")
+
+internal fun String.decodeHtmlEntities(): String {
+    if (!contains('&')) return this
+    val namedDecoded = replace("&apos;", "'")
+        .replace("&rsquo;", "’")
+        .replace("&lsquo;", "‘")
+        .replace("&quot;", "\"")
+        .replace("&ldquo;", "“")
+        .replace("&rdquo;", "”")
+        .replace("&ndash;", "–")
+        .replace("&mdash;", "—")
+        .replace("&hellip;", "…")
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+    val numericDecoded = numericEntityRegex.replace(namedDecoded) { match ->
+        val raw = match.groupValues[1]
+        val codePoint = if (raw.startsWith("x", ignoreCase = true)) {
+            raw.drop(1).toIntOrNull(16)
+        } else {
+            raw.toIntOrNull(10)
+        }
+        if (codePoint != null && Character.isValidCodePoint(codePoint)) {
+            String(Character.toChars(codePoint))
+        } else {
+            match.value
+        }
+    }
+    return numericDecoded.replace("&amp;", "&")
+}
 
 private fun String.upgradePosterResolution(): String =
     replace("images.metahub.space/poster/small/", "images.metahub.space/poster/medium/")
@@ -319,4 +355,4 @@ private fun JSONArray?.objects(): List<JSONObject> = if (this == null) emptyList
     (0 until length()).mapNotNull(::optJSONObject)
 
 private fun JSONArray?.strings(): List<String> = if (this == null) emptyList() else
-    (0 until length()).mapNotNull { (opt(it) as? String)?.trim()?.takeIf(String::isNotEmpty) }
+    (0 until length()).mapNotNull { (opt(it) as? String)?.decodeHtmlEntities()?.trim()?.takeIf(String::isNotEmpty) }

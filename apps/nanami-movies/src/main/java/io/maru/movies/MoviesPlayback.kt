@@ -194,6 +194,7 @@ private fun MoviePlaybackSession(
     var activeMedia by remember(streamId) { mutableStateOf<PlayerMedia?>(null) }
     var resumePosition by remember(streamId) { mutableStateOf(startPosition.coerceAtLeast(0)) }
     var status by remember(streamId) { mutableStateOf("Finding fastest video source…") }
+    var prebufferPercent by remember(streamId) { mutableIntStateOf(0) }
     var failure by remember(streamId) { mutableStateOf<String?>(null) }
     var ui by remember(streamId) { mutableStateOf(MoviePlaybackUi(position = startPosition.coerceAtLeast(0))) }
     var ended by remember(streamId) { mutableStateOf(false) }
@@ -202,7 +203,8 @@ private fun MoviePlaybackSession(
     var remotePlayback by remember { mutableStateOf(false) }
     var remoteTransport by remember { mutableStateOf<MovieRemoteTransport?>(null) }
     var wasPlayingBeforeClip by remember(streamId) { mutableStateOf(false) }
-    var settings by remember(streamId) { mutableStateOf<MoviePlayerPanel?>(null) }
+    var showSettingsSheet by remember(streamId) { mutableStateOf(false) }
+    var showVideoSourcesFirst by remember(streamId) { mutableStateOf(false) }
     var controls by remember(streamId) { mutableStateOf(true) }
     var isScrubbing by remember(streamId) { mutableStateOf(false) }
     var controlPulse by remember(streamId) { mutableIntStateOf(0) }
@@ -255,7 +257,7 @@ private fun MoviePlaybackSession(
         failure = null
         sourceAttempt++
         selected = source
-        settings = null
+        showSettingsSheet = false
         resetControls()
     }
 
@@ -313,7 +315,7 @@ private fun MoviePlaybackSession(
 
     BackHandler(!inPip) {
         when {
-            settings != null -> settings = null
+            showSettingsSheet -> showSettingsSheet = false
             locked -> {
                 locked = false
                 resetControls()
@@ -326,7 +328,7 @@ private fun MoviePlaybackSession(
     }
 
     val revealControls by rememberUpdatedState<() -> Unit>(::resetControls)
-    val dismissSettings by rememberUpdatedState<() -> Unit>({ settings = null })
+    val dismissSettings by rememberUpdatedState<() -> Unit>({ showSettingsSheet = false })
     DisposableEffect(activity) {
         val component = activity as? ComponentActivity
         val pipEvents = Consumer<PictureInPictureModeChangedInfo> { info ->
@@ -396,8 +398,8 @@ private fun MoviePlaybackSession(
         }
     }
 
-    LaunchedEffect(settings, streamId, useOffline) {
-        if (settings == MoviePlayerPanel.SUBTITLES && subtitleOptions == null) {
+    LaunchedEffect(showSettingsSheet, streamId, useOffline) {
+        if (showSettingsSheet && subtitleOptions == null) {
             subtitleOptions = if (useOffline) emptyList() else findMovieSubtitles(title, episode)
         }
     }
@@ -418,8 +420,10 @@ private fun MoviePlaybackSession(
         activeMedia = null
         failure = null
         ended = false
+        prebufferPercent = 0
         ui = MoviePlaybackUi(position = resumePosition)
         val source = selected
+        val unitLabel = if (episode != null) "Episode ${episode.episode}" else "Movie"
         if (useOffline && offlineFile != null) {
             status = "Opening saved download…"
             activeMedia = PlayerMedia(Uri.fromFile(offlineFile), DefaultDataSource.Factory(context))
@@ -428,17 +432,31 @@ private fun MoviePlaybackSession(
         if (source == null) return@LaunchedEffect
         val direct = source.httpUri()
         if (direct != null) {
-            status = "Connecting to stream…"
+            status = "Connecting to $unitLabel stream…"
             val factory = DefaultHttpDataSource.Factory().setDefaultRequestProperties(source.headers)
             activeMedia = PlayerMedia(direct, factory)
             return@LaunchedEffect
         }
-        status = "Loading video…"
+        status = "Connecting to $unitLabel stream…"
+        prebufferPercent = 5
         try {
-            withMoviesTorrent(context.cacheDir, source, episode, onBuffer = {
-                withContext(Dispatchers.Main) { status = "Buffering opening scene…" }
+            withMoviesTorrent(context.cacheDir, source, episode, onBufferProgress = { buf ->
+                val speedLabel = if (buf.speedKbps >= 1024) {
+                    String.format(Locale.US, "%.1f MB/s", buf.speedKbps / 1024.0)
+                } else {
+                    "${buf.speedKbps} KB/s"
+                }
+                withContext(Dispatchers.Main) {
+                    prebufferPercent = buf.percent
+                    status = if (buf.peers > 0 || buf.speedKbps > 0) {
+                        "Buffering $unitLabel (${buf.percent}% • $speedLabel)"
+                    } else {
+                        "Buffering $unitLabel (${buf.percent}% • 0 KB/s)"
+                    }
+                }
             }) { uri, factory ->
                 withContext(Dispatchers.Main) {
+                    prebufferPercent = 100
                     activeMedia = PlayerMedia(uri, factory, torrent = true)
                     awaitCancellation()
                 }
@@ -533,8 +551,8 @@ private fun MoviePlaybackSession(
         }
     }
 
-    LaunchedEffect(ui.playing, controlPulse, controls, settings, locked, isScrubbing) {
-        if (ui.playing && controls && settings == null && !locked && !isScrubbing) {
+    LaunchedEffect(ui.playing, controlPulse, controls, showSettingsSheet, locked, isScrubbing) {
+        if (ui.playing && controls && !showSettingsSheet && !locked && !isScrubbing) {
             delay(4_000)
             controls = false
         }
@@ -565,8 +583,8 @@ private fun MoviePlaybackSession(
         else -> null
     }
 
-    val sourceBadgeLabel = remember(useOffline, selected, sources) {
-        if (useOffline) {
+    val sourceBadgeLabel = remember(useOffline, selected, sources, options.speed) {
+        val base = if (useOffline) {
             "Downloaded"
         } else if (selected == null) {
             "Sources"
@@ -579,6 +597,11 @@ private fun MoviePlaybackSession(
                 qual != null -> qual
                 else -> "Sources"
             }
+        }
+        if (kotlin.math.abs(options.speed - 1f) >= 0.03f) {
+            "$base • ${options.speed.toString().removeSuffix(".0")}×"
+        } else {
+            base
         }
     }
 
@@ -612,17 +635,18 @@ private fun MoviePlaybackSession(
             ui = ui,
             sourceBadgeLabel = sourceBadgeLabel,
             advisory = advisory,
-            showOpeningAdvisory = showOpeningAdvisory,
+            showOpeningAdvisory = showOpeningAdvisory && !showSettingsSheet,
             segments = segmentOptions,
             loading = loading,
+            loadingProgressPercent = if (loading != null && !ui.ready) prebufferPercent else 0,
             problem = problem,
-            controls = controls && !inPip,
+            controls = controls && !inPip && !showSettingsSheet,
             locked = locked && !inPip,
             hideChrome = inPip,
-            persistentProgress = options.persistentProgress,
-            swipeGestures = options.swipeGestures,
-            skipSegment = activeSegment,
-            nextCountdown = nextCountdown,
+            persistentProgress = options.persistentProgress && !showSettingsSheet,
+            swipeGestures = options.swipeGestures && !showSettingsSheet,
+            skipSegment = activeSegment.takeUnless { showSettingsSheet },
+            nextCountdown = nextCountdown.takeUnless { showSettingsSheet },
             onScrubChange = { active ->
                 isScrubbing = active
                 if (active) resetControls()
@@ -631,13 +655,15 @@ private fun MoviePlaybackSession(
             onSkipSegment = { segment -> seekTo(segment.end) },
             onToggleControls = { if (controls) controls = false else resetControls() },
             onBack = { captureProgress(); onBack() },
-            // Open Video Sources FIRST when still loading or on error, matching Nanami Anime!
+            // Open half-screen Playback Settings (Video Sources FIRST when still loading or on error, matching Nanami Anime!)
             onSettings = {
-                settings = if (!ui.ready || loading != null || problem != null) MoviePlayerPanel.SOURCES else MoviePlayerPanel.GENERAL
-                resetControls()
+                showVideoSourcesFirst = !ui.ready || loading != null || problem != null
+                showSettingsSheet = true
             },
-            onTracks = { settings = MoviePlayerPanel.SUBTITLES; resetControls() },
-            onSources = { settings = MoviePlayerPanel.SOURCES; resetControls() },
+            onSources = {
+                showVideoSourcesFirst = true
+                showSettingsSheet = true
+            },
             onLock = { locked = !locked; resetControls() },
             onPip = if (supportsPip && ui.ready && activity != null && !remotePlayback) ({
                 runCatching {
@@ -734,35 +760,38 @@ private fun MoviePlaybackSession(
                 )
             },
         )
-    }
 
-    if (!inPip) {
-        settings?.let { panel ->
-            val addOnSubtitles = selected?.subtitles.orEmpty().filter { Uri.parse(it.url).scheme == "https" }
-            MoviePlaybackSettings(
-                initialPanel = panel,
-                options = options,
-                onOptions = ::setOptions,
-                sources = sources,
-                isOffline = useOffline,
-                offlineAvailable = offlineFile?.isFile == true,
-                selectedSource = selected,
-                onSelectSource = ::chooseSource,
-                onRetrySources = { lookupAttempt++ },
-                onUseOffline = { captureProgress(); useOffline = true; settings = null },
-                tracks = ui.tracks,
-                subtitleOptions = (addOnSubtitles + subtitleOptions.orEmpty()).distinctBy(SubtitleTrack::url),
-                subtitlesLoading = subtitleOptions == null && !useOffline,
-                selectedSubtitle = externalSubtitle,
-                onSelectExternal = ::selectExternal,
-                onSelectTrack = { type, track ->
-                    if (type == C.TRACK_TYPE_TEXT) ensureTextOverride = null
-                    selectTrack(type, track)
-                },
-                onPanel = { settings = it; resetControls() },
-                onDismiss = { settings = null; resetControls() },
-            )
-        }
+        val addOnSubtitles = selected?.subtitles.orEmpty().filter { Uri.parse(it.url).scheme == "https" }
+        MoviePlaybackSettingsSheet(
+            visible = showSettingsSheet && !inPip,
+            showVideoSourcesFirst = showVideoSourcesFirst,
+            options = options,
+            onOptions = ::setOptions,
+            sources = sources,
+            isOffline = useOffline,
+            offlineAvailable = offlineFile?.isFile == true,
+            selectedSource = selected,
+            onSelectSource = ::chooseSource,
+            onRetrySources = { lookupAttempt++ },
+            onUseOffline = {
+                captureProgress()
+                useOffline = true
+                showSettingsSheet = false
+            },
+            tracks = ui.tracks,
+            subtitleOptions = (addOnSubtitles + subtitleOptions.orEmpty()).distinctBy(SubtitleTrack::url),
+            subtitlesLoading = subtitleOptions == null && !useOffline,
+            selectedSubtitle = externalSubtitle,
+            onSelectExternal = ::selectExternal,
+            onSelectTrack = { type, track ->
+                if (type == C.TRACK_TYPE_TEXT) ensureTextOverride = null
+                selectTrack(type, track)
+            },
+            onDismiss = {
+                showSettingsSheet = false
+                resetControls()
+            },
+        )
     }
 }
 
