@@ -37,10 +37,14 @@ private fun httpsUri(url: String): Uri? = Uri.parse(url).takeIf {
     it.scheme.equals("https", ignoreCase = true) && !it.host.isNullOrBlank()
 }
 
+internal fun StremioStreamResult.reportedSeeds(): Int? =
+    reportedSeeders.find(title.orEmpty())?.groupValues?.get(1)?.replace(",", "")?.toIntOrNull()
+
 internal suspend fun findMovieSources(
     title: MovieTitle,
     episode: MovieEpisode?,
     context: Context? = null,
+    preferredQuality: String = context?.let { MoviesPreferences.preferredQuality(it) } ?: "1080p",
 ): List<StremioStreamResult> = coroutineScope {
     val addonUrls = (context?.let { MoviesPreferences.addons(it) }.orEmpty() + TorrentioUrl)
         .map { it.trim().trimEnd('/').removeSuffix("/manifest.json") }
@@ -58,24 +62,38 @@ internal suspend fun findMovieSources(
         }
     }.awaitAll()
     if (results.all { it == null }) throw IOException("Your video sources could not be reached.")
-    rankMovieSources(results.filterNotNull().flatten()
-        .filter { it.httpUri() != null || it.magnetUri() != null }
-        .distinctBy { Triple(it.url, it.infoHash, it.fileIdx) })
+    rankMovieSources(
+        sources = results.filterNotNull().flatten()
+            .filter { it.httpUri() != null || it.magnetUri() != null }
+            .distinctBy { Triple(it.url, it.infoHash, it.fileIdx) },
+        preferredQuality = preferredQuality,
+    )
 }
 
-internal fun rankMovieSources(sources: List<StremioStreamResult>): List<StremioStreamResult> = sources.map { stream ->
-    val seeds = reportedSeeders.find(stream.title.orEmpty())?.groupValues?.get(1)?.replace(",", "")?.toIntOrNull()
-    val direct = stream.url?.startsWith("https://", ignoreCase = true) == true
-    val balanced = stream.movieQuality() in setOf("1080p", "720p")
-    val group = when {
-        direct -> 0
-        seeds != null && seeds > 0 && balanced -> 1
-        seeds != null && seeds > 0 -> 2
-        seeds == null -> 3
-        else -> 4
-    }
-    Triple(stream, group, seeds ?: 0)
-}.sortedWith(compareBy<Triple<StremioStreamResult, Int, Int>> { it.second }.thenByDescending { it.third }).map { it.first }
+internal fun rankMovieSources(
+    sources: List<StremioStreamResult>,
+    preferredQuality: String = "1080p",
+): List<StremioStreamResult> {
+    val normalizedPref = if (preferredQuality.equals("2160p", true) || preferredQuality.equals("4K", true)) "4K" else preferredQuality.lowercase(Locale.ROOT)
+    return sources.map { stream ->
+        val seeds = stream.reportedSeeds()
+        val direct = stream.url?.startsWith("https://", ignoreCase = true) == true
+        val quality = stream.movieQuality()
+        val matchesPref = quality != null && quality.equals(normalizedPref, ignoreCase = true)
+        val balancedHd = quality in setOf("1080p", "720p")
+        val group = when {
+            direct && matchesPref -> 0
+            direct -> 1
+            seeds != null && seeds > 0 && matchesPref -> 2
+            seeds != null && seeds > 0 && balancedHd -> 3
+            seeds != null && seeds > 0 -> 4
+            seeds == null -> 5
+            else -> 6
+        }
+        Triple(stream, group, seeds ?: 0)
+    }.sortedWith(compareBy<Triple<StremioStreamResult, Int, Int>> { it.second }.thenByDescending { it.third })
+        .map { it.first }
+}
 
 internal suspend fun findMovieSubtitles(title: MovieTitle, episode: MovieEpisode?): List<SubtitleTrack> {
     for (addon in subtitleAddons) {
@@ -104,7 +122,7 @@ internal suspend fun findMovieSubtitles(title: MovieTitle, episode: MovieEpisode
 }
 
 internal enum class MovieSegmentType(val field: String, val action: String) {
-    INTRO("intro", "Skip intro"), RECAP("recap", "Skip recap"), CREDITS("outro", "Skip credits"),
+    INTRO("intro", "Skip Intro"), RECAP("recap", "Skip Recap"), CREDITS("outro", "Skip Credits"),
 }
 
 internal data class MovieSegment(val type: MovieSegmentType, val start: Long, val end: Long) {

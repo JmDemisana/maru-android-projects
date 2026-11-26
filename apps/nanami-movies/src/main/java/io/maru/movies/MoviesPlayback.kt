@@ -20,16 +20,7 @@ import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -121,12 +112,23 @@ internal fun MoviesPlayback(
     onProgress: (position: Long, duration: Long) -> Unit,
     onBack: () -> Unit,
     offlineFile: File? = null,
+    preferredQuality: String = "1080p",
     onNextEpisode: (() -> Unit)? = null,
     onPreviousEpisode: (() -> Unit)? = null,
 ) {
     val activity = LocalContext.current.findMoviesActivity()
     MovieLandscapeWindow(activity)
-    MoviePlaybackSession(title, episode, startPosition, onProgress, onBack, offlineFile, onNextEpisode, onPreviousEpisode)
+    MoviePlaybackSession(
+        title = title,
+        episode = episode,
+        startPosition = startPosition,
+        onProgress = onProgress,
+        onBack = onBack,
+        offlineFile = offlineFile,
+        preferredQuality = preferredQuality,
+        onNextEpisode = onNextEpisode,
+        onPreviousEpisode = onPreviousEpisode,
+    )
 }
 
 @OptIn(UnstableApi::class)
@@ -138,6 +140,7 @@ private fun MoviePlaybackSession(
     onProgress: (Long, Long) -> Unit,
     onBack: () -> Unit,
     offlineFile: File?,
+    preferredQuality: String,
     onNextEpisode: (() -> Unit)?,
     onPreviousEpisode: (() -> Unit)?,
 ) {
@@ -145,7 +148,8 @@ private fun MoviePlaybackSession(
     val activity = context.findMoviesActivity()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val streamId = movieStreamId(title, episode)
-    // A releasing player must flush its own episode after the next one enters composition.
+    val advisory = remember(title) { deriveMovieAdvisory(title) }
+
     val progressState = remember(streamId) { mutableStateOf(onProgress) }
     val progressCallback by progressState
     SideEffect { progressState.value = onProgress }
@@ -153,17 +157,23 @@ private fun MoviePlaybackSession(
     val preferences = remember(context) { context.getSharedPreferences("movies_player", Context.MODE_PRIVATE) }
     val sourceMemory = remember(context) { MovieSourceMemory(context) }
     val deviceAudio = remember(context) { context.getSystemService(AudioManager::class.java) }
-    var options by remember { mutableStateOf(MoviePlayerOptions(
-        speed = preferences.getFloat("speed", 1f).coerceIn(0.5f, 2f),
-        autoplay = preferences.getBoolean("autoplay", true),
-        persistentProgress = preferences.getBoolean("persistent_progress", false),
-        subtitleSize = preferences.getFloat("subtitle_size", 1f).coerceIn(0.75f, 1.5f),
-        subtitleBackground = preferences.getBoolean("subtitle_background", true),
-        fit = MovieVideoFit.entries.firstOrNull { it.name == preferences.getString("video_fit", null) }
-            ?: if (preferences.getBoolean("fill_screen", false)) MovieVideoFit.CROP else MovieVideoFit.FIT,
-        swipeGestures = preferences.getBoolean("swipe_gestures", true),
-        autoSkipIntro = preferences.getBoolean("auto_skip_intro", false),
-    )) }
+
+    var options by remember {
+        mutableStateOf(
+            MoviePlayerOptions(
+                speed = preferences.getFloat("speed", 1f).coerceIn(0.5f, 2f),
+                autoplay = preferences.getBoolean("autoplay", true),
+                persistentProgress = preferences.getBoolean("persistent_progress", false),
+                subtitleSize = preferences.getFloat("subtitle_size", 1f).coerceIn(0.75f, 1.5f),
+                subtitleBackground = preferences.getBoolean("subtitle_background", true),
+                fit = MovieVideoFit.entries.firstOrNull { it.name == preferences.getString("video_fit", null) }
+                    ?: if (preferences.getBoolean("fill_screen", false)) MovieVideoFit.CROP else MovieVideoFit.FIT,
+                swipeGestures = preferences.getBoolean("swipe_gestures", true),
+                autoSkipIntro = preferences.getBoolean("auto_skip_intro", false),
+            )
+        )
+    }
+
     val player = remember(streamId) {
         ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true)).build().apply {
             setAudioAttributes(AudioAttributes.DEFAULT, true)
@@ -183,7 +193,7 @@ private fun MoviePlaybackSession(
     var useOffline by remember(streamId, offlineFile) { mutableStateOf(offlineFile?.isFile == true) }
     var activeMedia by remember(streamId) { mutableStateOf<PlayerMedia?>(null) }
     var resumePosition by remember(streamId) { mutableStateOf(startPosition.coerceAtLeast(0)) }
-    var status by remember(streamId) { mutableStateOf("Finding video sources…") }
+    var status by remember(streamId) { mutableStateOf("Finding fastest video source…") }
     var failure by remember(streamId) { mutableStateOf<String?>(null) }
     var ui by remember(streamId) { mutableStateOf(MoviePlaybackUi(position = startPosition.coerceAtLeast(0))) }
     var ended by remember(streamId) { mutableStateOf(false) }
@@ -194,6 +204,7 @@ private fun MoviePlaybackSession(
     var wasPlayingBeforeClip by remember(streamId) { mutableStateOf(false) }
     var settings by remember(streamId) { mutableStateOf<MoviePlayerPanel?>(null) }
     var controls by remember(streamId) { mutableStateOf(true) }
+    var isScrubbing by remember(streamId) { mutableStateOf(false) }
     var controlPulse by remember(streamId) { mutableIntStateOf(0) }
     var locked by remember(streamId) { mutableStateOf(false) }
     var inPip by remember { mutableStateOf(activity?.isInPictureInPictureMode == true) }
@@ -203,6 +214,8 @@ private fun MoviePlaybackSession(
     var autoSkipped by remember(streamId) { mutableStateOf(false) }
     var externalSubtitle by remember(streamId) { mutableStateOf<SubtitleTrack?>(null) }
     var ensureTextOverride by remember(streamId) { mutableStateOf<String?>(null) }
+    var showOpeningAdvisory by remember(streamId) { mutableStateOf(false) }
+    var advisoryShownForStream by remember(streamId) { mutableStateOf(false) }
 
     fun resetControls() {
         controls = true
@@ -211,11 +224,16 @@ private fun MoviePlaybackSession(
 
     fun setOptions(value: MoviePlayerOptions) {
         options = value
-        preferences.edit().putFloat("speed", value.speed).putBoolean("autoplay", value.autoplay)
+        preferences.edit()
+            .putFloat("speed", value.speed)
+            .putBoolean("autoplay", value.autoplay)
             .putBoolean("persistent_progress", value.persistentProgress)
-            .putFloat("subtitle_size", value.subtitleSize).putBoolean("subtitle_background", value.subtitleBackground)
-            .putString("video_fit", value.fit.name).putBoolean("swipe_gestures", value.swipeGestures)
-            .putBoolean("auto_skip_intro", value.autoSkipIntro).apply()
+            .putFloat("subtitle_size", value.subtitleSize)
+            .putBoolean("subtitle_background", value.subtitleBackground)
+            .putString("video_fit", value.fit.name)
+            .putBoolean("swipe_gestures", value.swipeGestures)
+            .putBoolean("auto_skip_intro", value.autoSkipIntro)
+            .apply()
         player.setPlaybackSpeed(value.speed)
     }
 
@@ -280,6 +298,16 @@ private fun MoviePlaybackSession(
                 .firstOrNull { it.group.getTrackFormat(it.index).id == track.url }
             selectTrack(C.TRACK_TYPE_TEXT, candidate)
             ensureTextOverride = null
+        }
+    }
+
+    // 4-Second Opening Content Advisory when video becomes ready (identical to Nanami Anime!)
+    LaunchedEffect(ui.ready) {
+        if (ui.ready && !advisoryShownForStream) {
+            advisoryShownForStream = true
+            showOpeningAdvisory = true
+            delay(4_200L)
+            showOpeningAdvisory = false
         }
     }
 
@@ -352,12 +380,12 @@ private fun MoviePlaybackSession(
         }
     }
 
-    LaunchedEffect(streamId, lookupAttempt, useOffline) {
+    LaunchedEffect(streamId, lookupAttempt, useOffline, preferredQuality) {
         if ((useOffline && lookupAttempt == 0) || completedLookup == lookupAttempt) return@LaunchedEffect
         lookupError = false
         sources = null
         try {
-            val results = findMovieSources(title, episode, context)
+            val results = findMovieSources(title, episode, context, preferredQuality)
             sources = results
             completedLookup = lookupAttempt
             if (selected == null && !useOffline) chooseInitial(results)
@@ -393,22 +421,22 @@ private fun MoviePlaybackSession(
         ui = MoviePlaybackUi(position = resumePosition)
         val source = selected
         if (useOffline && offlineFile != null) {
-            status = "Opening download…"
+            status = "Opening saved download…"
             activeMedia = PlayerMedia(Uri.fromFile(offlineFile), DefaultDataSource.Factory(context))
             return@LaunchedEffect
         }
         if (source == null) return@LaunchedEffect
         val direct = source.httpUri()
         if (direct != null) {
-            status = "Connecting to source…"
+            status = "Connecting to stream…"
             val factory = DefaultHttpDataSource.Factory().setDefaultRequestProperties(source.headers)
             activeMedia = PlayerMedia(direct, factory)
             return@LaunchedEffect
         }
-        status = "Finding peers…"
+        status = "Connecting to peers…"
         try {
             withMoviesTorrent(context.cacheDir, source, episode, onBuffer = {
-                withContext(Dispatchers.Main) { status = "Buffering video…" }
+                withContext(Dispatchers.Main) { status = "Buffering opening scene…" }
             }) { uri, factory ->
                 withContext(Dispatchers.Main) {
                     activeMedia = PlayerMedia(uri, factory, torrent = true)
@@ -417,13 +445,13 @@ private fun MoviePlaybackSession(
             }
         } catch (_: TimeoutCancellationException) {
             currentCoroutineContext().ensureActive()
-            failure = "This torrent timed out while connecting."
+            failure = "This source timed out while connecting."
         } catch (error: CancellationException) {
             throw error
         } catch (_: LinkageError) {
             failure = "The torrent engine could not start on this device."
         } catch (_: Exception) {
-            failure = "This torrent could not be opened."
+            failure = "This source could not be opened."
         }
     }
 
@@ -431,8 +459,11 @@ private fun MoviePlaybackSession(
         player.stop()
         player.clearMediaItems()
         val media = activeMedia ?: return@LaunchedEffect
-        val item = MediaItem.Builder().setUri(media.uri).setMediaId(streamId)
-            .setMediaMetadata(MediaMetadata.Builder().setTitle(episode?.title ?: title.title).build()).build()
+        val item = MediaItem.Builder()
+            .setUri(media.uri)
+            .setMediaId(streamId)
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(episode?.title ?: title.title).build())
+            .build()
         val video = if (media.torrent) ProgressiveMediaSource.Factory(media.factory).createMediaSource(item)
         else DefaultMediaSourceFactory(context).setDataSourceFactory(media.factory).createMediaSource(item)
         val subtitle = externalSubtitle?.let { track ->
@@ -442,13 +473,19 @@ private fun MoviePlaybackSession(
                 else -> MimeTypes.APPLICATION_SUBRIP
             }
             val spec = MediaItem.SubtitleConfiguration.Builder(Uri.parse(track.url))
-                .setId(track.url).setLabel(languageName(track.language)).setLanguage(track.language).setMimeType(mime).build()
+                .setId(track.url)
+                .setLabel(languageName(track.language))
+                .setLanguage(track.language)
+                .setMimeType(mime)
+                .build()
             SingleSampleMediaSource.Factory(DefaultDataSource.Factory(context)).createMediaSource(spec, C.TIME_UNSET)
         }
         player.setMediaSource(if (subtitle == null) video else MergingMediaSource(video, subtitle), resumePosition)
         if (subtitle != null) {
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .clearOverridesOfType(C.TRACK_TYPE_TEXT).setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).build()
+                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                .build()
         }
         player.playWhenReady = playIntent && !remotePlayback && (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) || inPip)
         player.prepare()
@@ -459,7 +496,7 @@ private fun MoviePlaybackSession(
         if (useOffline || attempted.size >= AutoSourceLimit) return@LaunchedEffect
         val next = sources?.firstOrNull { it !in attempted } ?: return@LaunchedEffect
         captureProgress()
-        status = "$error Trying another source…"
+        status = "$error Trying next source…"
         delay(650)
         attempted.add(next)
         selected = next
@@ -492,12 +529,12 @@ private fun MoviePlaybackSession(
                 )
                 if (++ticks % 8 == 0 && player.isPlaying) captureProgress()
             }
-            delay(250)
+            delay(200)
         }
     }
 
-    LaunchedEffect(ui.playing, controlPulse, controls, settings, locked) {
-        if (ui.playing && controls && settings == null && !locked) {
+    LaunchedEffect(ui.playing, controlPulse, controls, settings, locked, isScrubbing) {
+        if (ui.playing && controls && settings == null && !locked && !isScrubbing) {
             delay(4_000)
             controls = false
         }
@@ -516,16 +553,25 @@ private fun MoviePlaybackSession(
     val canAutoFallback = !useOffline && attempted.size < AutoSourceLimit && sources.orEmpty().any { it !in attempted }
     val problem = when {
         lookupError && selected == null && !useOffline -> "Video sources could not be reached."
-        !useOffline && selected == null && sources?.isEmpty() == true -> "There are no playable sources for this title."
+        !useOffline && selected == null && sources?.isEmpty() == true -> "No playable sources found for this title."
         !canAutoFallback -> failure
         else -> null
     }
     val loading = when {
         problem != null -> null
         failure != null && canAutoFallback -> "Trying another source…"
-        !useOffline && sources == null && selected == null -> "Finding video sources…"
+        !useOffline && sources == null && selected == null -> "Finding fastest video source…"
         !ui.ready -> status
         else -> null
+    }
+
+    val sourceBadgeLabel = remember(useOffline, selected) {
+        if (useOffline) "Offline Vault"
+        else {
+            val qual = selected?.movieQuality()
+            val name = selected?.movieSourceName() ?: "Sources"
+            if (qual != null) "$qual • $name" else name
+        }
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -538,21 +584,28 @@ private fun MoviePlaybackSession(
                 view.subtitleView?.apply {
                     setApplyEmbeddedFontSizes(false)
                     setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * options.subtitleSize)
-                    setStyle(CaptionStyleCompat(
-                        android.graphics.Color.WHITE,
-                        if (options.subtitleBackground) 0xB0000000.toInt() else android.graphics.Color.TRANSPARENT,
-                        android.graphics.Color.TRANSPARENT,
-                        CaptionStyleCompat.EDGE_TYPE_OUTLINE,
-                        android.graphics.Color.BLACK,
-                        null,
-                    ))
+                    setStyle(
+                        CaptionStyleCompat(
+                            android.graphics.Color.WHITE,
+                            if (options.subtitleBackground) 0xBE000000.toInt() else android.graphics.Color.TRANSPARENT,
+                            android.graphics.Color.TRANSPARENT,
+                            CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                            android.graphics.Color.BLACK,
+                            null,
+                        )
+                    )
                 }
             },
         )
+
         MoviePlayerChrome(
             title = title,
             episode = episode,
             ui = ui,
+            sourceBadgeLabel = sourceBadgeLabel,
+            advisory = advisory,
+            showOpeningAdvisory = showOpeningAdvisory,
+            segments = segmentOptions,
             loading = loading,
             problem = problem,
             controls = controls && !inPip,
@@ -562,16 +615,28 @@ private fun MoviePlaybackSession(
             swipeGestures = options.swipeGestures,
             skipSegment = activeSegment,
             nextCountdown = nextCountdown,
+            onScrubChange = { active ->
+                isScrubbing = active
+                if (active) resetControls()
+            },
             onCancelNext = { nextCountdown = null },
             onSkipSegment = { segment -> seekTo(segment.end) },
             onToggleControls = { if (controls) controls = false else resetControls() },
             onBack = { captureProgress(); onBack() },
-            onSettings = { settings = MoviePlayerPanel.GENERAL; resetControls() },
+            // Open Video Sources FIRST when still loading or on error, matching Nanami Anime!
+            onSettings = {
+                settings = if (!ui.ready || loading != null || problem != null) MoviePlayerPanel.SOURCES else MoviePlayerPanel.GENERAL
+                resetControls()
+            },
             onTracks = { settings = MoviePlayerPanel.SUBTITLES; resetControls() },
             onSources = { settings = MoviePlayerPanel.SOURCES; resetControls() },
             onLock = { locked = !locked; resetControls() },
             onPip = if (supportsPip && ui.ready && activity != null && !remotePlayback) ({
-                runCatching { activity.enterPictureInPictureMode(PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build()) }
+                runCatching {
+                    activity.enterPictureInPictureMode(
+                        PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build()
+                    )
+                }
             }) else null,
             onTogglePlayback = {
                 if (remotePlayback) {
@@ -587,15 +652,28 @@ private fun MoviePlaybackSession(
             onPreviousEpisode = onPreviousEpisode?.let { { captureProgress(); it() } },
             onNextEpisode = onNextEpisode?.let { { captureProgress(); it() } },
             readBrightness = { currentBrightness(activity) },
-            setBrightness = { value -> activity?.window?.let { window ->
-                window.attributes = window.attributes.apply { screenBrightness = value.coerceIn(0.03f, 1f) }
-            } },
-            readVolume = { deviceAudio?.let { it.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() /
-                it.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1) } ?: 0.5f },
-            setVolume = { value -> deviceAudio?.let {
-                runCatching { it.setStreamVolume(AudioManager.STREAM_MUSIC,
-                    (value * it.getStreamMaxVolume(AudioManager.STREAM_MUSIC)).roundToInt(), 0) }
-            } },
+            setBrightness = { value ->
+                activity?.window?.let { window ->
+                    window.attributes = window.attributes.apply { screenBrightness = value.coerceIn(0.03f, 1f) }
+                }
+            },
+            readVolume = {
+                deviceAudio?.let {
+                    it.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() /
+                        it.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                } ?: 0.5f
+            },
+            setVolume = { value ->
+                deviceAudio?.let {
+                    runCatching {
+                        it.setStreamVolume(
+                            AudioManager.STREAM_MUSIC,
+                            (value * it.getStreamMaxVolume(AudioManager.STREAM_MUSIC)).roundToInt(),
+                            0,
+                        )
+                    }
+                }
+            },
             onRetry = {
                 failure = null
                 if (useOffline) {
@@ -609,8 +687,15 @@ private fun MoviePlaybackSession(
                 } else lookupAttempt++
             },
             tools = { visible ->
-                MoviesPlayerTools(title, episode, selected.takeUnless { useOffline }, offlineFile.takeIf { useOffline },
-                    activeMedia?.uri, activeMedia?.factory, ui.position, ui.duration,
+                MoviesPlayerTools(
+                    title = title,
+                    episode = episode,
+                    activeSource = selected.takeUnless { useOffline },
+                    offlineFile = offlineFile.takeIf { useOffline },
+                    mediaUri = activeMedia?.uri,
+                    dataSource = activeMedia?.factory,
+                    position = ui.position,
+                    duration = ui.duration,
                     onRemotePlayback = { remotePlayback = true; player.pause() },
                     visible = visible,
                     onRemoteEnded = { position ->
@@ -627,13 +712,14 @@ private fun MoviePlaybackSession(
                         }
                     },
                     onRemoteTransport = { remoteTransport = it },
-                    onClipVisibilityChanged = { visible ->
-                        if (visible) {
+                    onClipVisibilityChanged = { clipOpen ->
+                        if (clipOpen) {
                             wasPlayingBeforeClip = player.playWhenReady
                             player.pause()
                         } else {
                             if (wasPlayingBeforeClip && playIntent && !remotePlayback && !ended &&
-                                lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) player.play()
+                                lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+                            ) player.play()
                             wasPlayingBeforeClip = false
                         }
                     },
@@ -641,31 +727,34 @@ private fun MoviePlaybackSession(
             },
         )
     }
-    if (!inPip) settings?.let { panel ->
-        val addOnSubtitles = selected?.subtitles.orEmpty().filter { Uri.parse(it.url).scheme == "https" }
-        MoviePlaybackSettings(
-            initialPanel = panel,
-            options = options,
-            onOptions = ::setOptions,
-            sources = sources,
-            isOffline = useOffline,
-            offlineAvailable = offlineFile?.isFile == true,
-            selectedSource = selected,
-            onSelectSource = ::chooseSource,
-            onRetrySources = { lookupAttempt++ },
-            onUseOffline = { captureProgress(); useOffline = true; settings = null },
-            tracks = ui.tracks,
-            subtitleOptions = (addOnSubtitles + subtitleOptions.orEmpty()).distinctBy(SubtitleTrack::url),
-            subtitlesLoading = subtitleOptions == null && !useOffline,
-            selectedSubtitle = externalSubtitle,
-            onSelectExternal = ::selectExternal,
-            onSelectTrack = { type, track ->
-                if (type == C.TRACK_TYPE_TEXT) ensureTextOverride = null
-                selectTrack(type, track)
-            },
-            onPanel = { settings = it; resetControls() },
-            onDismiss = { settings = null; resetControls() },
-        )
+
+    if (!inPip) {
+        settings?.let { panel ->
+            val addOnSubtitles = selected?.subtitles.orEmpty().filter { Uri.parse(it.url).scheme == "https" }
+            MoviePlaybackSettings(
+                initialPanel = panel,
+                options = options,
+                onOptions = ::setOptions,
+                sources = sources,
+                isOffline = useOffline,
+                offlineAvailable = offlineFile?.isFile == true,
+                selectedSource = selected,
+                onSelectSource = ::chooseSource,
+                onRetrySources = { lookupAttempt++ },
+                onUseOffline = { captureProgress(); useOffline = true; settings = null },
+                tracks = ui.tracks,
+                subtitleOptions = (addOnSubtitles + subtitleOptions.orEmpty()).distinctBy(SubtitleTrack::url),
+                subtitlesLoading = subtitleOptions == null && !useOffline,
+                selectedSubtitle = externalSubtitle,
+                onSelectExternal = ::selectExternal,
+                onSelectTrack = { type, track ->
+                    if (type == C.TRACK_TYPE_TEXT) ensureTextOverride = null
+                    selectTrack(type, track)
+                },
+                onPanel = { settings = it; resetControls() },
+                onDismiss = { settings = null; resetControls() },
+            )
+        }
     }
 }
 

@@ -13,7 +13,8 @@
 
     <application
         android:allowBackup="false"
-        android:icon="@drawable/ic_movies"
+        android:icon="@mipmap/ic_launcher_movies"
+        android:roundIcon="@mipmap/ic_launcher_movies_round"
         android:label="Nanami Movies"
         android:networkSecurityConfig="@xml/movies_network_security"
         android:supportsRtl="true"

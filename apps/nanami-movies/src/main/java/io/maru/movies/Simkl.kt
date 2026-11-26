@@ -2,6 +2,7 @@ package io.maru.movies
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.net.Uri
 import android.os.SystemClock
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -9,6 +10,8 @@ import android.util.Base64
 import java.io.IOException
 import java.security.GeneralSecurityException
 import java.security.KeyStore
+import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
@@ -42,32 +45,68 @@ class SimklSignIn internal constructor(
     internal val label: String,
 )
 
+internal class SimklPkceSession(
+    val authorizeUrl: String,
+    val clientId: String,
+    val state: String,
+    val codeVerifier: String,
+    val redirectUri: String = Simkl.REDIRECT_URI,
+)
+
 data class SimklWatchlistEntry(
     val imdbId: String,
     val isSeries: Boolean,
     val simklUrl: String?,
 )
 
-internal data class SimklAccount(val id: String, val label: String)
+internal data class SimklAccount(
+    val id: String,
+    val label: String,
+    val username: String? = null,
+    val avatarUrl: String? = null,
+)
+
+internal data class SimklViewerProfile(
+    val username: String,
+    val avatarUrl: String?,
+    val simklAccountId: String?,
+)
+
 internal class SimklTitleUnavailable : IOException("SIMKL couldn't match this title or episode.")
+
 internal data class SimklLibrarySnapshot(
-    val planned: Set<TitleRef>, val ratings: Map<TitleRef, Int>, val completed: List<WatchProgress>,
+    val planned: Set<TitleRef>,
+    val ratings: Map<TitleRef, Int>,
+    val completed: List<WatchProgress>,
     val statuses: Map<TitleRef, MovieWatchStatus>,
 )
+
+internal fun generatePkceVerifier(random: SecureRandom = SecureRandom()): String {
+    val bytes = ByteArray(48)
+    random.nextBytes(bytes)
+    return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+}
+
+internal fun computePkceChallengeS256(verifier: String): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray(Charsets.US_ASCII))
+    return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
+}
 
 class Simkl(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("simkl", Context.MODE_PRIVATE)
     private val vault = SimklTokenVault()
     private val mutex = Mutex()
     private val http = OkHttpClient.Builder()
-        .callTimeout(12, TimeUnit.SECONDS)
+        .callTimeout(14, TimeUnit.SECONDS)
         .followRedirects(false)
         .followSslRedirects(false)
         .build()
     private var activeSignIn: SimklSignIn? = null
 
     val clientId: String
-        get() = prefs.getString("client_id", null) ?: BuildConfig.SIMKL_CLIENT_ID.trim()
+        get() = prefs.getString("client_id", null)?.trim()?.takeIf(String::isNotEmpty)
+            ?: prefs.getString("discovered_client_id", null)?.trim()?.takeIf(String::isNotEmpty)
+            ?: BuildConfig.SIMKL_CLIENT_ID.trim()
 
     val isConnected: Boolean
         get() = storedToken() != null
@@ -75,12 +114,113 @@ class Simkl(context: Context) {
     internal val connectionKey: String?
         get() = prefs.getString("connection_key", null)
 
+    internal fun activeAccount(): SimklAccount? {
+        val key = connectionKey ?: return null
+        if (!isConnected) return null
+        val username = prefs.getString("username/$key", null)
+        val label = username?.let { "@$it" } ?: prefs.getString("label/$key", null) ?: "SIMKL Account"
+        return SimklAccount(
+            id = key,
+            label = label,
+            username = username,
+            avatarUrl = prefs.getString("avatar/$key", null),
+        )
+    }
+
     internal fun accounts(): List<SimklAccount> {
         val ids = prefs.getStringSet("accounts", emptySet()).orEmpty() + listOfNotNull(connectionKey)
-        return ids.mapNotNull { id ->
+        return ids.distinct().mapNotNull { id ->
             if (id != connectionKey && !prefs.contains("token/$id")) return@mapNotNull null
-            SimklAccount(id, prefs.getString("label/$id", null) ?: "SIMKL account")
+            val username = prefs.getString("username/$id", null)
+            val label = username?.let { "@$it" } ?: prefs.getString("label/$id", null) ?: "SIMKL Account"
+            SimklAccount(
+                id = id,
+                label = label,
+                username = username,
+                avatarUrl = prefs.getString("avatar/$id", null),
+            )
         }.sortedBy { it.label.lowercase() }
+    }
+
+    internal fun setCustomClientId(value: String) {
+        val cleaned = value.trim()
+        val edit = prefs.edit()
+        if (cleaned.isEmpty()) edit.remove("client_id") else edit.putString("client_id", cleaned)
+        edit.apply()
+    }
+
+    internal suspend fun resolveEffectiveClientId(explicit: String = ""): String = withContext(Dispatchers.IO) {
+        explicit.trim().takeIf(String::isNotEmpty)?.let { return@withContext it }
+        clientId.takeIf(String::isNotEmpty)?.let { return@withContext it }
+        for (endpoint in TOKEN_ENDPOINTS) {
+            val discovered = runCatching {
+                val req = Request.Builder()
+                    .url(endpoint)
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "NanamiMovies/${BuildConfig.VERSION_NAME}")
+                    .build()
+                http.newCall(req).execute().use { res ->
+                    if (!res.isSuccessful) return@use null
+                    val body = JSONObject(res.body?.string().orEmpty())
+                    body.text("client_id")?.takeIf { CLIENT_ID_PATTERN.matches(it) }
+                }
+            }.getOrNull()
+            if (!discovered.isNullOrBlank()) {
+                prefs.edit().putString("discovered_client_id", discovered).apply()
+                return@withContext discovered
+            }
+        }
+        ""
+    }
+
+    internal suspend fun createPkceSession(explicitClientId: String = ""): SimklPkceSession {
+        val resolvedClient = resolveEffectiveClientId(explicitClientId)
+        require(resolvedClient.isNotBlank()) {
+            "Set up your SIMKL AUTH V2 Client ID first to connect your account."
+        }
+        val verifier = generatePkceVerifier()
+        val challenge = computePkceChallengeS256(verifier)
+        val state = UUID.randomUUID().toString()
+        val authorizeUrl = Uri.parse("https://simkl.com/oauth2/authorize").buildUpon()
+            .appendQueryParameter("client_id", resolvedClient)
+            .appendQueryParameter("redirect_uri", REDIRECT_URI)
+            .appendQueryParameter("response_type", "code")
+            .appendQueryParameter("scope", "media:read media:write")
+            .appendQueryParameter("state", state)
+            .appendQueryParameter("code_challenge", challenge)
+            .appendQueryParameter("code_challenge_method", "S256")
+            .build()
+            .toString()
+        return SimklPkceSession(
+            authorizeUrl = authorizeUrl,
+            clientId = resolvedClient,
+            state = state,
+            codeVerifier = verifier,
+            redirectUri = REDIRECT_URI,
+        )
+    }
+
+    internal suspend fun completePkceSignIn(
+        session: SimklPkceSession,
+        code: String,
+        labelHint: String = "",
+    ): SimklAccount = mutex.withLock {
+        val token = exchangePkceCode(session, code.trim())
+        val viewer = runCatching { fetchViewerProfile(token.access, session.clientId) }.getOrNull()
+        storeAuthenticatedAccount(token, session.clientId, viewer, labelHint)
+    }
+
+    internal suspend fun refreshViewerProfile(): SimklAccount? = mutex.withLock {
+        val key = connectionKey ?: return@withLock null
+        val token = storedToken() ?: return@withLock null
+        val activeClient = clientId.takeIf(String::isNotBlank) ?: return@withLock activeAccount()
+        val viewer = runCatching { fetchViewerProfile(token.access, activeClient) }.getOrNull() ?: return@withLock activeAccount()
+        prefs.edit()
+            .putString("username/$key", viewer.username)
+            .putString("label/$key", "@${viewer.username}")
+            .putString("avatar/$key", viewer.avatarUrl)
+            .apply()
+        activeAccount()
     }
 
     internal suspend fun selectAccount(id: String?) = mutex.withLock {
@@ -90,12 +230,33 @@ class Simkl(context: Context) {
         saveCurrent(edit)
         edit.putString("token", token).putString("connection_key", id)
             .putString("library", id?.let { prefs.getString("library/$it", null) })
-        if (id != null) edit.putString("client_id", prefs.getString("client/$id", null))
+        if (id != null) {
+            prefs.getString("client/$id", null)?.takeIf(String::isNotBlank)?.let {
+                edit.putString("client_id", it)
+            }
+        }
         edit.apply()
     }
 
+    internal suspend fun removeAccount(id: String) = mutex.withLock {
+        if (id == connectionKey) {
+            disconnectLocked()
+            return@withLock
+        }
+        prefs.edit()
+            .remove("token/$id")
+            .remove("client/$id")
+            .remove("library/$id")
+            .remove("label/$id")
+            .remove("username/$id")
+            .remove("avatar/$id")
+            .remove("simkl_uid/$id")
+            .putStringSet("accounts", prefs.getStringSet("accounts", emptySet()).orEmpty() - id)
+            .apply()
+    }
+
     suspend fun beginSignIn(client: String = clientId, label: String = ""): SimklSignIn = mutex.withLock {
-        val currentClient = client.trim()
+        val currentClient = resolveEffectiveClientId(client)
         require(currentClient.isNotBlank()) { "Enter a Simkl AUTH V2 client ID first." }
         val payload = oauth("device", currentClient, "scope" to "media:read media:write").requireSuccess()
         val verificationUrl = payload.text("verification_uri_complete") ?: payload.getString("verification_uri")
@@ -110,7 +271,7 @@ class Simkl(context: Context) {
             deviceCode = payload.getString("device_code"),
             deadline = SystemClock.elapsedRealtime() + payload.getLong("expires_in") * 1_000L,
             intervalSeconds = payload.optLong("interval", 5L).coerceAtLeast(5),
-            label = label.trim().take(40).ifBlank { "SIMKL account ${accounts().size + 1}" },
+            label = label.trim().take(40),
         ).also { activeSignIn = it }
     }
 
@@ -129,12 +290,8 @@ class Simkl(context: Context) {
                 if (response.isSuccessful) {
                     val token = parseToken(response.requireSuccess())
                     require("media:write" in token.scope.split(' ')) { "Simkl did not grant permission to sync your list." }
-                    val encrypted = withContext(Dispatchers.IO) { vault.encrypt(token.toJson().toString()) }
-                    val id = UUID.randomUUID().toString()
-                    val edit = prefs.edit()
-                    saveCurrent(edit, id)
-                    edit.remove("library").putString("token", encrypted).putString("label/$id", signIn.label)
-                        .putString("client_id", signIn.clientId).putString("connection_key", id).apply()
+                    val viewer = runCatching { fetchViewerProfile(token.access, signIn.clientId) }.getOrNull()
+                    storeAuthenticatedAccount(token, signIn.clientId, viewer, signIn.label)
                     activeSignIn = null
                 }
                 response
@@ -151,6 +308,111 @@ class Simkl(context: Context) {
     }
 
     suspend fun disconnect() = mutex.withLock { disconnectLocked() }
+
+    private suspend fun exchangePkceCode(session: SimklPkceSession, code: String): Token = withContext(Dispatchers.IO) {
+        // 1. Try site bridge (/api/simkl-token) first, matching Nanami Anime's /api/anilist-token flow
+        val bridgeBody = JSONObject()
+            .put("code", code)
+            .put("clientId", session.clientId)
+            .put("redirectUri", session.redirectUri)
+            .put("codeVerifier", session.codeVerifier)
+            .toString()
+            .toRequestBody(JSON_TYPE)
+
+        for (endpoint in TOKEN_ENDPOINTS) {
+            val token = runCatching {
+                val req = Request.Builder()
+                    .url(endpoint)
+                    .post(bridgeBody)
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "NanamiMovies/${BuildConfig.VERSION_NAME}")
+                    .build()
+                http.newCall(req).execute().use { res ->
+                    if (!res.isSuccessful) return@use null
+                    val body = JSONObject(res.body?.string().orEmpty())
+                    if (body.text("access_token") == null) return@use null
+                    parseToken(body)
+                }
+            }.getOrNull()
+            if (token != null) return@withContext token
+        }
+
+        // 2. Direct Simkl AUTH V2 PKCE exchange fallback (no client_secret required)
+        val reply = oauth(
+            "token",
+            session.clientId,
+            "grant_type" to "authorization_code",
+            "code" to code,
+            "redirect_uri" to session.redirectUri,
+            "code_verifier" to session.codeVerifier,
+        )
+        parseToken(reply.requireSuccess())
+    }
+
+    private suspend fun fetchViewerProfile(accessToken: String, activeClientId: String): SimklViewerProfile? =
+        withContext(Dispatchers.IO) {
+            val reply = request(
+                path = "users/settings",
+                id = activeClientId,
+                body = "".toRequestBody(JSON_TYPE),
+                access = accessToken,
+            )
+            if (!reply.isSuccessful) return@withContext null
+            val userObj = reply.body.optJSONObject("user")
+            val accountObj = reply.body.optJSONObject("account")
+            val username = userObj?.text("name") ?: return@withContext null
+            val rawAvatar = userObj.text("avatar")
+            val avatarUrl = when {
+                rawAvatar == null -> null
+                rawAvatar.startsWith("https://") -> rawAvatar
+                rawAvatar.startsWith("//") -> "https:$rawAvatar"
+                else -> "https://simkl.in/avatars/${rawAvatar.trimStart('/')}_m.jpg"
+            }
+            SimklViewerProfile(
+                username = username,
+                avatarUrl = avatarUrl,
+                simklAccountId = accountObj?.opt("id")?.toString()?.takeIf(String::isNotBlank),
+            )
+        }
+
+    private suspend fun storeAuthenticatedAccount(
+        token: Token,
+        usedClientId: String,
+        viewer: SimklViewerProfile?,
+        labelHint: String,
+    ): SimklAccount {
+        val encrypted = withContext(Dispatchers.IO) { vault.encrypt(token.toJson().toString()) }
+        val existingIds = prefs.getStringSet("accounts", emptySet()).orEmpty() + listOfNotNull(connectionKey)
+        val matchedId = existingIds.firstOrNull { id ->
+            val savedUid = prefs.getString("simkl_uid/$id", null)
+            val savedUser = prefs.getString("username/$id", null)
+            (viewer?.simklAccountId != null && savedUid == viewer.simklAccountId) ||
+                (viewer?.username != null && savedUser?.equals(viewer.username, ignoreCase = true) == true)
+        }
+        val id = matchedId ?: UUID.randomUUID().toString()
+        val username = viewer?.username
+        val displayLabel = when {
+            !username.isNullOrBlank() -> "@$username"
+            labelHint.isNotBlank() -> labelHint.trim().take(40)
+            else -> "SIMKL Account ${accounts().size + 1}"
+        }
+        val edit = prefs.edit()
+        saveCurrent(edit, id)
+        if (matchedId == null || matchedId != connectionKey) {
+            edit.putString("library", prefs.getString("library/$id", null))
+        }
+        edit.putString("token", encrypted)
+            .putString("token/$id", encrypted)
+            .putString("label/$id", displayLabel)
+            .putString("client/$id", usedClientId)
+            .putString("client_id", usedClientId)
+            .putString("connection_key", id)
+        if (!username.isNullOrBlank()) edit.putString("username/$id", username)
+        if (!viewer?.avatarUrl.isNullOrBlank()) edit.putString("avatar/$id", viewer?.avatarUrl)
+        if (!viewer?.simklAccountId.isNullOrBlank()) edit.putString("simkl_uid/$id", viewer?.simklAccountId)
+        edit.apply()
+        return SimklAccount(id = id, label = displayLabel, username = username, avatarUrl = viewer?.avatarUrl)
+    }
 
     internal suspend fun librarySnapshot(): SimklLibrarySnapshot = mutex.withLock {
         val library = syncLibrary()
@@ -196,7 +458,6 @@ class Simkl(context: Context) {
         val type = if (isSeries) "shows" else "movies"
         val entry = syncLibrary().firstOrNull { it.media.imdbId == imdbId && it.media.isSeries == isSeries }
         if (listed) {
-            // An existing Watchlist state belongs to the user. Adding again could move watched titles back to planned.
             if (entry != null) return@withLock entry.status == "plantowatch"
             item.put("to", "plantowatch")
             val result = authorized("sync/add-to-list", JSONObject().put(type, JSONArray().put(item)))
@@ -208,7 +469,6 @@ class Simkl(context: Context) {
                 added.optJSONObject("ids")?.text("simkl"), status, false))
             status == "plantowatch"
         } else {
-            // Simkl's removal endpoint deletes the whole entry, including any watch history it holds.
             if (entry?.status != "plantowatch") return@withLock false
             if (entry.hasPreservedActivity) return@withLock true
             checkFound(authorized("sync/history/remove", JSONObject().put(type, JSONArray().put(item))))
@@ -234,13 +494,13 @@ class Simkl(context: Context) {
 
     private suspend fun disconnectLocked() {
         val previous = storedToken()
+        val activeClient = clientId
         activeSignIn = null
         forgetCurrent()
-        if (previous != null) {
+        if (previous != null && previous.refresh.isNotBlank() && activeClient.isNotBlank()) {
             try {
-                oauth("revoke", clientId, "token" to previous.refresh, "token_type_hint" to "refresh_token")
+                oauth("revoke", activeClient, "token" to previous.refresh, "token_type_hint" to "refresh_token")
             } catch (_: IOException) {
-                // Local sign-out still works offline.
             }
         }
     }
@@ -249,7 +509,8 @@ class Simkl(context: Context) {
         val ids = prefs.getStringSet("accounts", emptySet()).orEmpty().toMutableSet()
         connectionKey?.let { id ->
             ids.add(id)
-            edit.putString("token/$id", prefs.getString("token", null)).putString("client/$id", clientId)
+            edit.putString("token/$id", prefs.getString("token", null))
+                .putString("client/$id", clientId)
                 .putString("library/$id", prefs.getString("library", null))
         }
         if (newId != null) ids.add(newId)
@@ -259,7 +520,13 @@ class Simkl(context: Context) {
     private fun forgetCurrent() {
         val edit = prefs.edit().remove("token").remove("library").remove("connection_key")
         connectionKey?.let { id ->
-            edit.remove("token/$id").remove("client/$id").remove("library/$id").remove("label/$id")
+            edit.remove("token/$id")
+                .remove("client/$id")
+                .remove("library/$id")
+                .remove("label/$id")
+                .remove("username/$id")
+                .remove("avatar/$id")
+                .remove("simkl_uid/$id")
                 .putStringSet("accounts", prefs.getStringSet("accounts", emptySet()).orEmpty() - id)
         }
         edit.apply()
@@ -374,7 +641,7 @@ class Simkl(context: Context) {
         val encrypted = prefs.getString("token", null) ?: return null
         return try {
             val data = JSONObject(vault.decrypt(encrypted))
-            Token(data.getString("access"), data.getString("refresh"), data.getLong("expiresAt"), data.getString("scope"))
+            Token(data.getString("access"), data.optString("refresh", ""), data.optLong("expiresAt", Long.MAX_VALUE), data.optString("scope", "media:read media:write"))
         } catch (_: GeneralSecurityException) {
             null
         } catch (_: IllegalArgumentException) {
@@ -386,30 +653,41 @@ class Simkl(context: Context) {
         }
     }
 
-    private fun parseToken(body: JSONObject) = Token(
-        access = body.getString("access_token"),
-        refresh = body.getString("refresh_token"),
-        expiresAt = System.currentTimeMillis() + body.getLong("expires_in") * 1_000L,
-        scope = body.getString("scope"),
-    )
+    private fun parseToken(body: JSONObject): Token {
+        val expiresIn = body.optLong("expires_in", 0L)
+        val expiresAt = if (expiresIn > 0L) System.currentTimeMillis() + expiresIn * 1_000L else Long.MAX_VALUE
+        return Token(
+            access = body.getString("access_token"),
+            refresh = body.optString("refresh_token", ""),
+            expiresAt = expiresAt,
+            scope = body.optString("scope", "media:read media:write"),
+        )
+    }
 
     private suspend fun refresh(token: Token): Token = withContext(Dispatchers.IO + NonCancellable) {
+        if (token.refresh.isBlank()) {
+            forgetCurrent()
+            throw IOException("Your Simkl connection expired. Connect your account again.")
+        }
         val response = oauth("token", clientId, "grant_type" to "refresh_token", "refresh_token" to token.refresh)
         if (response.error in setOf("invalid_grant", "invalid_client")) {
             forgetCurrent()
             throw IOException("Your Simkl connection expired. Connect your account again.")
         }
         val updated = parseToken(response.requireSuccess())
-        prefs.edit().putString("token", vault.encrypt(updated.toJson().toString())).apply()
+        val encrypted = vault.encrypt(updated.toJson().toString())
+        val edit = prefs.edit().putString("token", encrypted)
+        connectionKey?.let { edit.putString("token/$it", encrypted) }
+        edit.apply()
         updated
     }
 
     private suspend fun authorized(path: String, body: JSONObject? = null, query: Map<String, String> = emptyMap()): JSONObject {
         val token = storedToken() ?: throw IOException("Connect your Simkl account first.")
-        val ready = if (token.expiresAt <= System.currentTimeMillis() + 60_000L) refresh(token) else token
+        val ready = if (token.refresh.isNotBlank() && token.expiresAt <= System.currentTimeMillis() + 60_000L) refresh(token) else token
         val requestBody = body?.toString()?.toRequestBody(JSON_TYPE)
         val response = request(path, clientId, requestBody, ready.access, query)
-        if (response.code == 401 && ready === token) {
+        if (response.code == 401 && ready === token && ready.refresh.isNotBlank()) {
             return request(path, clientId, requestBody, refresh(ready).access, query).requireSuccess()
         }
         return response.requireSuccess()
@@ -431,6 +709,7 @@ class Simkl(context: Context) {
         query.forEach { (key, value) -> url.addQueryParameter(key, value) }
         val builder = Request.Builder().url(url.build())
             .header("User-Agent", "NanamiMovies/${BuildConfig.VERSION_NAME}")
+            .header("simkl-api-key", id)
             .header("Accept", "application/json")
         if (access != null) builder.header("Authorization", "Bearer $access")
         if (body != null) builder.post(body)
@@ -466,19 +745,26 @@ class Simkl(context: Context) {
         fun requireSuccess(): JSONObject {
             if (isSuccessful && error == null) return body
             val message = when {
-                error == "invalid_client" -> "Simkl needs a valid AUTH V2 client ID. Check your developer settings."
+                error == "invalid_client" || error == "client_id_failed" || code == 412 ->
+                    "Simkl needs a valid AUTH V2 Client ID. Check your developer settings."
                 code == 401 -> "Simkl could not verify your account. Try reconnecting."
                 code == 403 -> "Simkl did not allow this action. Check your account permissions."
                 code == 429 -> "Simkl's rate limit was reached. Try again later."
-                else -> "Simkl request failed (HTTP $code)."
+                else -> body.text("error_description") ?: body.text("message") ?: "Simkl request failed (HTTP $code)."
             }
             throw IOException(message)
         }
     }
 
-    private companion object {
-        val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
-        val IMDB_ID = Regex("tt[0-9]+")
+    companion object {
+        const val REDIRECT_URI = "https://maruchan.pages.dev/simkl-integration"
+        private val TOKEN_ENDPOINTS = listOf(
+            "https://maruchan.pages.dev/api/simkl-token",
+            "https://maru-api-wine.vercel.app/api/simkl-token",
+        )
+        private val CLIENT_ID_PATTERN = Regex("[A-Za-z0-9_-]{8,128}")
+        private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
+        private val IMDB_ID = Regex("tt[0-9]+")
     }
 }
 

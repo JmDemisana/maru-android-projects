@@ -24,8 +24,26 @@ class MoviesUpdateFileProvider : FileProvider()
 internal data class MoviesUpdate(val name: String, val code: Long, val bytes: Long, val sha256: String)
 
 internal object MoviesUpdater {
-    const val releasePage = "https://github.com/JmDemisana/maru-android-projects/releases/tag/nanami-movies-rotator"
-    private const val assets = "https://github.com/JmDemisana/maru-android-projects/releases/download/nanami-movies-rotator"
+    private val isRotatorChannel: Boolean
+        get() = BuildConfig.VERSION_NAME.contains("-rotator.") || BuildConfig.VERSION_CODE <= 1
+
+    val releasePage: String
+        get() = if (isRotatorChannel) {
+            "https://github.com/JmDemisana/maru-android-projects/releases/tag/nanami-movies-rotator"
+        } else {
+            "https://github.com/JmDemisana/maru-android-projects/releases/tag/nanami-movies-latest"
+        }
+
+    private val assets: String
+        get() = if (isRotatorChannel) {
+            "https://github.com/JmDemisana/maru-android-projects/releases/download/nanami-movies-rotator"
+        } else {
+            "https://github.com/JmDemisana/maru-android-projects/releases/download/nanami-movies-latest"
+        }
+
+    private val apkFileName: String
+        get() = if (isRotatorChannel) "nanami-movies-rotator.apk" else "nanami-movies-latest.apk"
+
     private val client = OkHttpClient.Builder().callTimeout(15, TimeUnit.SECONDS).build()
     private val downloadClient = client.newBuilder().callTimeout(3, TimeUnit.MINUTES).build()
 
@@ -38,7 +56,8 @@ internal object MoviesUpdater {
         } ?: return null
         val update = MoviesUpdate(value.getString("versionName"), value.getLong("versionCode"),
             value.getLong("apkSize"), value.getString("sha256").lowercase())
-        require(update.name.matches(Regex("[0-9.]+-rotator\\.[0-9]+")) && update.code > 0 &&
+        val validVersion = update.name.matches(Regex("[0-9.]+(?:-rotator\\.[0-9]+)?"))
+        require(validVersion && update.code > 0 &&
             update.bytes in 1..160 * 1024 * 1024L && update.sha256.matches(Regex("[a-f0-9]{64}"))) {
             "The release manifest is invalid."
         }
@@ -50,7 +69,7 @@ internal object MoviesUpdater {
         check(directory.isDirectory || directory.mkdirs()) { "Couldn't prepare update storage." }
         val temporary = File.createTempFile("part-", ".apk", directory)
         try {
-            val request = Request.Builder().url("$assets/nanami-movies-rotator.apk").build()
+            val request = Request.Builder().url("$assets/$apkFileName").build()
             downloadClient.newCall(request).readResponse { response ->
                 if (!response.isSuccessful) throw IOException("The download returned HTTP ${response.code}.")
                 val digest = MessageDigest.getInstance("SHA-256")

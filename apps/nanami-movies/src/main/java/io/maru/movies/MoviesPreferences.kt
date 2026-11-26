@@ -22,6 +22,41 @@ internal object MoviesPreferences {
         general(context).edit().putBoolean("hide_mature", enabled).apply()
     }
 
+    fun doNotTrackMature(context: Context): Boolean = general(context).getBoolean("do_not_track_mature", false)
+
+    fun setDoNotTrackMature(context: Context, enabled: Boolean) {
+        general(context).edit().putBoolean("do_not_track_mature", enabled).apply()
+    }
+
+    fun reportProgress(context: Context): Boolean = general(context).getBoolean("report_progress", true)
+
+    fun setReportProgress(context: Context, enabled: Boolean) {
+        general(context).edit().putBoolean("report_progress", enabled).apply()
+    }
+
+    fun rememberPosition(context: Context): Boolean = general(context).getBoolean("remember_position", true)
+
+    fun setRememberPosition(context: Context, enabled: Boolean) {
+        general(context).edit().putBoolean("remember_position", enabled).apply()
+    }
+
+    fun preferredQuality(context: Context): String =
+        general(context).getString("preferred_quality", "1080p")
+            ?.takeIf { it in setOf("4K", "1080p", "720p") }
+            ?: "1080p"
+
+    fun setPreferredQuality(context: Context, quality: String) {
+        val normalized = if (quality in setOf("4K", "1080p", "720p")) quality else "1080p"
+        general(context).edit().putString("preferred_quality", normalized).apply()
+    }
+
+    fun myListsSortOption(context: Context): String =
+        general(context).getString("my_lists_sort_option", "RECENTLY_ADDED") ?: "RECENTLY_ADDED"
+
+    fun setMyListsSortOption(context: Context, option: String) {
+        general(context).edit().putString("my_lists_sort_option", option).apply()
+    }
+
     fun addons(context: Context): List<String> = runCatching {
         val array = JSONArray(general(context).getString("addons", "[]"))
         List(array.length()) { array.getString(it) }

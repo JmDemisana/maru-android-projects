@@ -8,47 +8,31 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.CastConnected
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.RangeSlider
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
@@ -167,15 +151,22 @@ internal fun MoviesPlayerTools(
             val mime = relay?.mime ?: MoviesMediaRelay.mediaMime(mediaUri.lastPathSegment.orEmpty().substringAfterLast('.'))
             val info = MediaInfo.Builder(url).setStreamType(MediaInfo.STREAM_TYPE_BUFFERED).setContentType(mime).setMetadata(metadata).build()
             val result = CompletableDeferred<Boolean>()
-            client.load(MediaLoadRequestData.Builder().setMediaInfo(info).setAutoplay(true)
-                .setCurrentTime(startPosition.coerceAtLeast(0)).build()).setResultCallback { result.complete(it.status.isSuccess) }
+            client.load(
+                MediaLoadRequestData.Builder()
+                    .setMediaInfo(info)
+                    .setAutoplay(true)
+                    .setCurrentTime(startPosition.coerceAtLeast(0))
+                    .build()
+            ).setResultCallback { result.complete(it.status.isSuccess) }
             check(withTimeoutOrNull(25_000) { result.await() } == true) { "The receiver couldn't play this source. Try another source." }
             sent = true
             castMessage = null
-            transport?.invoke(MovieRemoteTransport(
-                seek = { client.seek(it.coerceAtLeast(0)) },
-                toggle = { if (client.isPlaying) client.pause() else client.play() },
-            ))
+            transport?.invoke(
+                MovieRemoteTransport(
+                    seek = { client.seek(it.coerceAtLeast(0)) },
+                    toggle = { if (client.isPlaying) client.pause() else client.play() },
+                )
+            )
             opened()
             while (true) {
                 remotePosition = client.approximateStreamPosition.coerceAtLeast(0)
@@ -197,44 +188,99 @@ internal fun MoviesPlayerTools(
         }
     }
 
-    if (visible) Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = { showCast = true }) {
-            Icon(if (sent) Icons.Default.CastConnected else Icons.Default.Cast, "Cast", tint = Color.White)
-        }
-        IconButton(enabled = mediaUri != null && dataSource != null && duration > 0 && !sent, onClick = { showClip = true }) {
-            Icon(Icons.Default.ContentCut, "Clip Studio", tint = Color.White.copy(alpha = if (duration > 0) 1f else 0.4f))
+    if (visible) {
+        Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+            IconButton(
+                enabled = mediaUri != null && dataSource != null && duration > 0 && !sent,
+                onClick = { showClip = true },
+            ) {
+                Icon(
+                    Icons.Default.ContentCut,
+                    contentDescription = "Clip Studio",
+                    tint = Color.White.copy(alpha = if (duration > 0) 1f else 0.4f),
+                )
+            }
+            IconButton(onClick = { showCast = true }) {
+                Icon(
+                    imageVector = if (sent) Icons.Default.CastConnected else Icons.Default.Cast,
+                    contentDescription = "Cast",
+                    tint = if (sent) NetflixRed else Color.White,
+                )
+            }
         }
     }
-    if (showCast) AlertDialog(
-        onDismissRequest = { showCast = false }, title = { Text("Cast to a TV") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                val connected = device.session?.remoteMediaClient
-                if (connected != null) {
-                    Text(device.session?.castDevice?.friendlyName ?: "Connected")
-                    castMessage?.let { Text(it) }
-                    if (sent) Row {
-                        TextButton(onClick = { connected.seek((remotePosition - 10_000).coerceAtLeast(0)) }) { Text("−10s") }
-                        TextButton(onClick = { if (connected.isPlaying) connected.pause() else connected.play() }) { Text("Play / Pause") }
-                        TextButton(onClick = { connected.seek(remotePosition + 10_000) }) { Text("+10s") }
-                    } else TextButton(onClick = { requested = true; castAttempt++ }) { Text("Cast this title") }
-                    TextButton(onClick = { requested = false; device.disconnect() }) { Text("Disconnect") }
-                } else if (device.routes.isEmpty()) {
-                    Text("Connect your phone and TV to the same Wi-Fi.")
-                } else LazyColumn(Modifier.heightIn(max = 180.dp)) {
-                    items(device.routes, key = { it.id }) { route ->
-                        TextButton(onClick = { requested = true; castMessage = null; route.select() }) { Text(route.name) }
+
+    if (showCast) {
+        AlertDialog(
+            onDismissRequest = { showCast = false },
+            containerColor = NetflixSurface,
+            title = { Text("Cast to a TV", color = Color.White, fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val connected = device.session?.remoteMediaClient
+                    if (connected != null) {
+                        Text(device.session?.castDevice?.friendlyName ?: "Connected TV", color = NetflixMatchGreen, fontWeight = FontWeight.Bold)
+                        castMessage?.let { Text(it, color = NetflixTextMuted, fontSize = 12.5.sp) }
+                        if (sent) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                NetflixChip("-10s", false) { connected.seek((remotePosition - 10_000).coerceAtLeast(0)) }
+                                NetflixChip("Play / Pause", true) { if (connected.isPlaying) connected.pause() else connected.play() }
+                                NetflixChip("+10s", false) { connected.seek(remotePosition + 10_000) }
+                            }
+                        } else {
+                            Button(
+                                onClick = { requested = true; castAttempt++ },
+                                colors = ButtonDefaults.buttonColors(containerColor = NetflixRed, contentColor = Color.White),
+                            ) { Text("Cast This Title", fontWeight = FontWeight.Bold) }
+                        }
+                        TextButton(onClick = { requested = false; device.disconnect() }) {
+                            Text("Disconnect", color = NetflixRed)
+                        }
+                    } else if (device.routes.isEmpty()) {
+                        Text("Searching for Chromecast & Google Cast receivers on your Wi-Fi…", color = NetflixTextMuted, fontSize = 13.sp)
+                    } else {
+                        LazyColumn(Modifier.heightIn(max = 190.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(device.routes, key = { it.id }) { route ->
+                                Surface(
+                                    onClick = { requested = true; castMessage = null; route.select() },
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = NetflixCardBg,
+                                    border = BorderStroke(1.dp, NetflixBorder),
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(
+                                        text = route.name,
+                                        color = Color.White,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
-            }
-        }, confirmButton = { TextButton(onClick = { showCast = false }) { Text("Done") } },
-    )
+            },
+            confirmButton = {
+                TextButton(onClick = { showCast = false }) { Text("Done", color = Color.White, fontWeight = FontWeight.Bold) }
+            },
+        )
+    }
+
     if (showClip && mediaUri != null && dataSource != null && duration > 0) {
         DisposableEffect(Unit) {
             clipVisibility?.invoke(true)
             onDispose { clipVisibility?.invoke(false) }
         }
-        MoviesClipEditor(title, episode, activeSource, mediaUri, dataSource, position, duration, onClose = { showClip = false })
+        MoviesClipStudioOverlay(
+            title = title,
+            episode = episode,
+            source = activeSource,
+            uri = mediaUri,
+            factory = dataSource,
+            position = position,
+            duration = duration,
+            onClose = { showClip = false },
+        )
     }
 }
 
@@ -292,11 +338,17 @@ private class MoviesCastDevice(context: Context) {
 }
 
 @OptIn(UnstableApi::class)
-@kotlin.OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@kotlin.OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-private fun MoviesClipEditor(
-    title: MovieTitle, episode: MovieEpisode?, source: StremioStreamResult?, uri: Uri, factory: DataSource.Factory,
-    position: Long, duration: Long, onClose: () -> Unit,
+private fun MoviesClipStudioOverlay(
+    title: MovieTitle,
+    episode: MovieEpisode?,
+    source: StremioStreamResult?,
+    uri: Uri,
+    factory: DataSource.Factory,
+    position: Long,
+    duration: Long,
+    onClose: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -316,14 +368,22 @@ private fun MoviesClipEditor(
         job = scope.launch {
             var relay: MoviesMediaRelay? = null
             try {
-                result = SnippetExportState.Exporting(null, "Preparing clip…")
+                result = SnippetExportState.Exporting(null, "Preparing MP4 clip…")
                 val exportUri = if (uri.scheme == "nanami-torrent") {
                     MoviesMediaRelay.start(context, factory, uri, lan = false).also { relay = it }.let { Uri.parse(it.url) }
                 } else uri
                 val name = if (episode == null) title.title else "${title.title} S${episode.season}"
-                result = exporter.exportToGallery(exportUri, null, source?.headers.orEmpty(), name, episode?.episode ?: 0,
-                    selectedRange, burnSubtitles = includeSubtitles, externalSubtitleUrl = subtitle?.url,
-                    onProgress = { result = it })
+                result = exporter.exportToGallery(
+                    videoUri = exportUri,
+                    subtitleUri = null,
+                    headers = source?.headers.orEmpty(),
+                    animeTitle = name,
+                    episodeNum = episode?.episode ?: 0,
+                    range = selectedRange,
+                    burnSubtitles = includeSubtitles,
+                    externalSubtitleUrl = subtitle?.url,
+                    onProgress = { result = it },
+                )
             } catch (error: CancellationException) {
                 result = SnippetExportState.Idle
                 throw error
@@ -339,56 +399,163 @@ private fun MoviesClipEditor(
         if (granted) save() else result = SnippetExportState.Error("Allow storage access to save the clip to Gallery.")
     }
     val busy = result is SnippetExportState.Exporting
-    AlertDialog(
-        onDismissRequest = { if (!busy) onClose() }, title = { Text("Clip Studio") },
-        text = {
-            Column(Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                Text("${clipTime(range.startMs)} – ${clipTime(range.endMs)} · ${clipTime(range.durationMs)}")
-                if (duration > 1_000L) RangeSlider(
-                    value = range.startMs.toFloat()..range.endMs.toFloat(),
-                    onValueChange = { range = normalizeSnippetRange(it.start.toLong(), it.endInclusive.toLong(), duration, maxDurationMs = 60_000L) },
-                    valueRange = 0f..duration.toFloat(), enabled = !busy,
-                )
-                FlowRow {
-                    listOf(5L, 10L, 15L, 30L, 60L).forEach { seconds ->
-                        TextButton(enabled = !busy, onClick = { range = applyDurationPreset(range, seconds * 1_000, duration) }) {
-                            Text("${seconds}s")
+
+    Dialog(
+        onDismissRequest = { if (!busy) onClose() },
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(16.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Surface(
+                modifier = Modifier
+                    .widthIn(max = 680.dp)
+                    .fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                color = NetflixSurface,
+                contentColor = Color.White,
+                border = BorderStroke(1.dp, NetflixBorder),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .verticalScroll(rememberScrollState())
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column {
+                            Text("Clip Studio", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                            Text(
+                                text = "${clipTime(range.startMs)} to ${clipTime(range.endMs)} • ${(range.durationMs / 1000.0)}s",
+                                fontSize = 12.sp,
+                                color = NetflixMatchGreen,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                        IconButton(enabled = !busy, onClick = onClose) {
+                            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                        }
+                    }
+
+                    if (duration > 1_000L) {
+                        RangeSlider(
+                            value = range.startMs.toFloat()..range.endMs.toFloat(),
+                            onValueChange = {
+                                range = normalizeSnippetRange(it.start.toLong(), it.endInclusive.toLong(), duration, maxDurationMs = 60_000L)
+                            },
+                            valueRange = 0f..duration.toFloat(),
+                            enabled = !busy,
+                            colors = SliderDefaults.colors(
+                                thumbColor = NetflixRed,
+                                activeTrackColor = NetflixRed,
+                                inactiveTrackColor = NetflixBorder,
+                            ),
+                        )
+                    }
+
+                    // Duration Presets + Fine Nudge Controls (matching Nanami Anime's Clip Studio!)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        listOf(5L, 10L, 15L, 30L, 60L).forEach { seconds ->
+                            val selected = kotlin.math.abs(range.durationMs - seconds * 1_000L) < 400L
+                            NetflixChip(
+                                label = "${seconds}s",
+                                selected = selected,
+                                onClick = { if (!busy) range = applyDurationPreset(range, seconds * 1_000L, duration) },
+                            )
+                        }
+                        NetflixChip("-0.5s Start", false) {
+                            if (!busy) range = normalizeSnippetRange(range.startMs - 500L, range.endMs, duration, maxDurationMs = 60_000L)
+                        }
+                        NetflixChip("+0.5s End", false) {
+                            if (!busy) range = normalizeSnippetRange(range.startMs, range.endMs + 500L, duration, maxDurationMs = 60_000L)
+                        }
+                    }
+
+                    if (subtitle != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = burn,
+                                onCheckedChange = { burn = it },
+                                enabled = !busy,
+                                colors = CheckboxDefaults.colors(checkedColor = NetflixRed),
+                            )
+                            Text("Burn source subtitles into MP4", fontSize = 13.sp, color = Color.White)
+                        }
+                    }
+
+                    preview?.let { MoviesClipPreview(uri, factory, it) }
+
+                    when (val current = result) {
+                        is SnippetExportState.Exporting -> {
+                            Text(current.statusLabel, color = NetflixRed, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                            if (current.progressPercent == null) {
+                                LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = NetflixRed, trackColor = NetflixBorder)
+                            } else {
+                                LinearProgressIndicator(
+                                    progress = { current.progressPercent / 100f },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    color = NetflixRed,
+                                    trackColor = NetflixBorder,
+                                )
+                            }
+                        }
+                        is SnippetExportState.Saved -> Text("Saved ${current.displayName} to Gallery!", color = NetflixMatchGreen, fontWeight = FontWeight.Bold)
+                        is SnippetExportState.Error -> Text(current.message, color = MaterialTheme.colorScheme.error, fontSize = 12.5.sp)
+                        SnippetExportState.Idle -> Unit
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedButton(
+                            enabled = !busy,
+                            onClick = { preview = if (preview == null) range else null },
+                            shape = RoundedCornerShape(6.dp),
+                            border = BorderStroke(1.dp, NetflixBorder),
+                        ) {
+                            Text(if (preview == null) "Preview Clip" else "Hide Preview", color = Color.White)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        if (busy) {
+                            OutlinedButton(
+                                onClick = { job?.cancel() },
+                                shape = RoundedCornerShape(6.dp),
+                                border = BorderStroke(1.dp, NetflixRed),
+                            ) {
+                                Text("Cancel Export", color = NetflixRed, fontWeight = FontWeight.Bold)
+                            }
+                        } else {
+                            Button(
+                                onClick = {
+                                    if (Build.VERSION.SDK_INT <= 28 && ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                        != PackageManager.PERMISSION_GRANTED
+                                    ) permission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                    else save()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = NetflixRed, contentColor = Color.White),
+                                shape = RoundedCornerShape(6.dp),
+                            ) {
+                                Text("Export MP4", fontWeight = FontWeight.ExtraBold)
+                            }
                         }
                     }
                 }
-                if (subtitle != null) Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = burn, onCheckedChange = { burn = it }, enabled = !busy)
-                    Text("Include source subtitles")
-                }
-                preview?.let { MoviesClipPreview(uri, factory, it) }
-                when (val current = result) {
-                    is SnippetExportState.Exporting -> {
-                        Text(current.statusLabel)
-                        if (current.progressPercent == null) LinearProgressIndicator(Modifier.fillMaxWidth())
-                        else LinearProgressIndicator(progress = { current.progressPercent / 100f }, modifier = Modifier.fillMaxWidth())
-                    }
-                    is SnippetExportState.Saved -> Text("Saved ${current.displayName} to Gallery.")
-                    is SnippetExportState.Error -> Text(current.message)
-                    SnippetExportState.Idle -> Unit
-                }
             }
-        },
-        dismissButton = {
-            Row {
-                TextButton(enabled = !busy, onClick = { preview = if (preview == null) range else null }) {
-                    Text(if (preview == null) "Preview" else "Close preview")
-                }
-                TextButton(onClick = { if (busy) job?.cancel() else onClose() }) { Text(if (busy) "Cancel export" else "Close") }
-            }
-        },
-        confirmButton = {
-            TextButton(enabled = !busy, onClick = {
-                if (Build.VERSION.SDK_INT <= 28 && ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                    != PackageManager.PERMISSION_GRANTED
-                ) permission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE) else save()
-            }) { Text("Save MP4") }
-        },
-    )
+        }
+    }
 }
 
 @OptIn(UnstableApi::class)
@@ -401,16 +568,22 @@ private fun MoviesClipPreview(uri: Uri, factory: DataSource.Factory, range: Snip
         ).build()
         ExoPlayer.Builder(context).setMediaSourceFactory(DefaultMediaSourceFactory(factory)).build().apply {
             setMediaItem(media)
+            playWhenReady = true
             prepare()
         }
     }
     DisposableEffect(player) { onDispose { player.release() } }
-    AndroidView(factory = { PlayerView(it).apply { this.player = player } },
-        modifier = Modifier.fillMaxWidth().height(140.dp))
+    AndroidView(
+        factory = { PlayerView(it).apply { this.player = player } },
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(170.dp)
+            .clip(RoundedCornerShape(6.dp)),
+    )
 }
 
 private fun clipTime(ms: Long): String {
     val seconds = ms / 1_000
     return if (seconds >= 3600) "%d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60)
-        else "%d:%02d".format(seconds / 60, seconds % 60)
+    else "%d:%02d".format(seconds / 60, seconds % 60)
 }

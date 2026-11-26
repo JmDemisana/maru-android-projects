@@ -1,0 +1,221 @@
+name: Nanami Movies Completer
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Stable release tag (e.g. nanami-movies-v0.2.0)"
+        required: true
+      rotator_run:
+        description: "Successful Rotator run ID to promote (leave blank for an existing stable tag)"
+        required: false
+  push:
+    tags:
+      - "nanami-movies-v*"
+      - "!*rotator*"
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: nanami-movies-stable-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.rotator_run == '' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+
+      - name: Resolve release source and version
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+          ROTATOR_RUN: ${{ inputs.rotator_run }}
+        run: |
+          set -euo pipefail
+          TAG="${REQUESTED_TAG:-$GITHUB_REF_NAME}"
+          if ! [[ "$TAG" =~ ^nanami-movies-v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$ ]]; then
+            echo "::error::Expected a stable tag in the form nanami-movies-vX.Y.Z"
+            exit 1
+          fi
+
+          if [ -n "$ROTATOR_RUN" ]; then
+            if ! [[ "$ROTATOR_RUN" =~ ^[0-9]+$ ]]; then
+              echo "::error::Enter the numeric run ID from the Rotator release notes."
+              exit 1
+            fi
+            if ! SOURCE=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ROTATOR_RUN" |
+              jq -er --arg repo "$GITHUB_REPOSITORY" '
+                select(.path == ".github/workflows/nanami-movies-rotator.yml" and
+                  .head_branch == "main" and .head_repository.full_name == $repo and
+                  .status == "completed" and .conclusion == "success") |
+                .head_sha | select(test("^[0-9a-f]{40}$"))'); then
+              echo "::error::That run must be a successful Nanami Movies Rotator build from main."
+              exit 1
+            fi
+            git checkout --detach "$SOURCE"
+          fi
+
+          SOURCE=$(git rev-parse HEAD)
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            if [ "$(git rev-parse "refs/tags/$TAG^{commit}")" != "$SOURCE" ]; then
+              echo "::error::$TAG already points to a different commit."
+              exit 1
+            fi
+          else
+            echo "create_tag=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha=$SOURCE" >> "$GITHUB_OUTPUT"
+          VERSION_NAME="${TAG#nanami-movies-v}"
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "NANAMI_MOVIES_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          VERSION_CODE=$((1001 + 2 * $(git rev-list --count HEAD)))
+          echo "NANAMI_MOVIES_VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "Building Nanami Movies $VERSION_NAME from $SOURCE (code $VERSION_CODE)"
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: gradle
+
+      - name: Prepare Android SDK
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$(command -v sdkmanager || find "$SDK" -name sdkmanager -type f | head -n 1)"
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --sdk_root="$SDK" "platforms;android-36" "build-tools;36.1.0" > /dev/null
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
+      - name: Prepare signing key
+        env:
+          MARU_STUDY_KEYSTORE_B64: ${{ secrets.MARU_STUDY_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MARU_STUDY_KEYSTORE_B64:-}" ]; then
+            echo "::error::Missing MARU_STUDY_KEYSTORE_B64 repository secret."
+            exit 1
+          fi
+          mkdir -p apps/nanami-movies/keystore
+          KEYSTORE=apps/nanami-movies/keystore/nanami-movies-release.jks
+          printf '%s' "$MARU_STUDY_KEYSTORE_B64" | base64 --decode > "$KEYSTORE"
+          cat > apps/nanami-movies/keystore.properties <<'EOF'
+          storeFile=keystore/nanami-movies-release.jks
+          storePassword=maru-study-release
+          keyAlias=maru-study
+          keyPassword=maru-study-release
+          EOF
+
+      - name: Test and build Nanami Movies release APK
+        env:
+          SIMKL_MOVIES_CLIENT_ID: ${{ vars.SIMKL_MOVIES_CLIENT_ID }}
+        run: |
+          chmod +x gradlew
+          ./gradlew :apps:nanami-movies:testDebugUnitTest :apps:nanami-movies:assembleRelease --console=plain
+
+      - name: Verify signature
+        run: |
+          APK=$(find apps/nanami-movies/build/outputs/apk/release -name "*.apk" | head -n 1)
+          test -f "$APK"
+          APKSIGNER=$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f | sort | tail -n 1)
+          "$APKSIGNER" verify --print-certs "$APK"
+          echo "BUILT_APK=$APK" >> "$GITHUB_ENV"
+
+      - name: Stage release assets
+        run: |
+          mkdir -p out
+          cp "$BUILT_APK" "out/nanami-movies-${NANAMI_MOVIES_VERSION_NAME}.apk"
+          (cd out && sha256sum "nanami-movies-${NANAMI_MOVIES_VERSION_NAME}.apk" > SHA256SUMS.txt)
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          version = os.environ["NANAMI_MOVIES_VERSION_NAME"]
+          apk = Path(f"out/nanami-movies-{version}.apk")
+          metadata = {
+              "versionName": version,
+              "versionCode": int(os.environ["NANAMI_MOVIES_VERSION_CODE"]),
+              "sha256": Path("out/SHA256SUMS.txt").read_text().split()[0],
+              "apkSize": apk.stat().st_size,
+          }
+          Path("out/update.json").write_text(json.dumps(metadata, indent=2) + "\n")
+          PY
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanami-movies-${{ env.NANAMI_MOVIES_VERSION_NAME }}
+          path: out/*
+
+      - name: Create the version tag for a promoted Rotator
+        if: steps.source.outputs.create_tag == 'true'
+        run: git push origin "HEAD:refs/tags/$RELEASE_TAG"
+
+      - name: Publish official GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ steps.source.outputs.sha }}
+          name: Nanami Movies ${{ env.NANAMI_MOVIES_VERSION_NAME }}
+          draft: false
+          prerelease: false
+          make_latest: "false"
+          fail_on_unmatched_files: true
+          files: |
+            out/nanami-movies-${{ env.NANAMI_MOVIES_VERSION_NAME }}.apk
+            out/SHA256SUMS.txt
+            out/update.json
+          body_path: apps/nanami-movies/README.md
+
+      - name: Prepare the stable download link
+        id: stable_link
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          LATEST_TAG=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' |
+            awk '/^nanami-movies-v[0-9]+\.[0-9]+\.[0-9]+$/' | sort -V | tail -n 1)
+          if [ "$LATEST_TAG" = "$RELEASE_TAG" ]; then
+            mkdir -p latest
+            APK="out/nanami-movies-${NANAMI_MOVIES_VERSION_NAME}.apk"
+            cp "$APK" latest/nanami-movies-latest.apk
+            cp out/update.json latest/update.json
+            (cd latest && sha256sum nanami-movies-latest.apk > SHA256SUMS.txt)
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update the latest stable release
+        if: steps.stable_link.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nanami-movies-latest
+          target_commitish: ${{ steps.source.outputs.sha }}
+          name: Nanami Movies Latest Stable (${{ env.NANAMI_MOVIES_VERSION_NAME }})
+          draft: false
+          prerelease: false
+          make_latest: "false"
+          fail_on_unmatched_files: true
+          files: |
+            latest/nanami-movies-latest.apk
+            latest/SHA256SUMS.txt
+            latest/update.json
+          body: |
+            Current stable release: **${{ env.NANAMI_MOVIES_VERSION_NAME }}**.
+            [Release notes](https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }})
+
+      - name: Point stable download tag at the published commit
+        if: steps.stable_link.outputs.publish == 'true'
+        run: git push origin "+HEAD:refs/tags/nanami-movies-latest"
