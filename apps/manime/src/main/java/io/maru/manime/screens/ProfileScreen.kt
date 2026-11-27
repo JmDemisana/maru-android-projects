@@ -59,7 +59,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private fun OfflineEpisodeEntry.toAnimeSummary() = AnimeMedia(
+internal fun OfflineEpisodeEntry.toAnimeSummary() = AnimeMedia(
     mediaId = mediaId,
     title = animeTitle,
     titleEnglish = animeTitle,

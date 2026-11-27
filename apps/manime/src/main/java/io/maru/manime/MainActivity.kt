@@ -381,16 +381,7 @@ fun AppNavigation(
                     scrobbledCastKeys += castMedia.key
                     val summary = latestVisibleLists.values.asSequence().flatten()
                         .firstOrNull { it.mediaId == entry.mediaId }
-                        ?: AnimeMedia(
-                            mediaId = entry.mediaId,
-                            title = entry.animeTitle,
-                            titleEnglish = entry.animeTitle,
-                            titleRomaji = entry.animeTitle,
-                            coverUrl = entry.coverUrl ?: entry.thumbnailUrl,
-                            bannerUrl = entry.thumbnailUrl,
-                            isAdult = entry.isAdultContent == true,
-                            hasKnownAdultRating = entry.isAdultContent != null
-                        )
+                        ?: entry.toAnimeSummary()
                     scope.launch(Dispatchers.IO) {
                         val accounts = prefs.trackingAccounts.first()
                         val recorded = LocalLibraryStore.recordEpisodeWatchedAt80Percent(
@@ -1048,11 +1039,11 @@ fun AppNavigation(
             }
         }
 
-        if (castController.showRemoteDialog) {
+        if (formFactor != NanamiDeviceFormFactor.TV) {
             DownloadedCastRemoteDialog(
                 controller = castController,
                 theme = castTheme,
-                onDismiss = { castController.dismissRemote() }
+                onDismiss = { castController.isRemoteSheetOpen = false }
             )
         }
 

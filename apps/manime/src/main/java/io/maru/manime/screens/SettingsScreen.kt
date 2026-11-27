@@ -1,6 +1,5 @@
 package io.maru.manime.screens
 
-import android.app.Activity
 import android.text.format.Formatter
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
@@ -642,9 +641,6 @@ fun SettingsScreen(
                                 defaultLabel = "Nanami Anime",
                                 disguiseLabel = "Crunchyroll"
                             )
-                            (context as? Activity)?.let { act ->
-                                AppDisguiseManager.syncTaskDescription(act, "Nanami Anime", "Crunchyroll")
-                            }
                             Toast.makeText(
                                 context,
                                 if (checked) "Launcher icon switching to Crunchyroll…" else "Restoring Nanami Anime icon…",
