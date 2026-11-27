@@ -255,6 +255,23 @@ class Simkl(context: Context) {
         storeAuthenticatedAccount(token, session.clientId, viewer, labelHint)
     }
 
+    internal suspend fun connectWithToken(
+        accessToken: String,
+        labelHint: String = "",
+    ): SimklAccount = mutex.withLock {
+        val cleaned = accessToken.trim()
+        require(cleaned.isNotEmpty()) { "Missing SIMKL access token." }
+        val activeClient = resolveEffectiveClientId().ifBlank { MASTER_CLIENT_ID }
+        val token = Token(
+            access = cleaned,
+            refresh = "",
+            expiresAt = Long.MAX_VALUE,
+            scope = "media:read media:write",
+        )
+        val viewer = runCatching { fetchViewerProfile(token.access, activeClient) }.getOrNull()
+        storeAuthenticatedAccount(token, activeClient, viewer, labelHint)
+    }
+
     internal suspend fun refreshViewerProfile(): SimklAccount? = mutex.withLock {
         val key = connectionKey ?: return@withLock null
         val token = storedToken() ?: return@withLock null

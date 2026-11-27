@@ -3,6 +3,7 @@ package io.maru.manime.torrent
 import android.content.Context
 import android.util.AtomicFile
 import android.util.Log
+import io.maru.manime.cast.NanamiCastSubtitleHelper
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
@@ -115,6 +116,7 @@ internal object OfflineVault {
         } ?: return@synchronized true
         val file = episodeFile(context, mediaId, episodeNumber)
         if (file.exists() && !file.delete()) return@synchronized false
+        NanamiCastSubtitleHelper.deleteSidecarForVideo(file)
 
         val next = current - entry
         entries.value = next

@@ -14,6 +14,7 @@ import android.os.SystemClock
 import android.text.format.Formatter
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import io.maru.manime.cast.NanamiCastSubtitleHelper
 import io.maru.manime.extensions.StremioAddonClient
 import io.maru.manime.extensions.StremioStreamResult
 import io.maru.manime.readResponse
@@ -271,6 +272,10 @@ private suspend fun fetchDownload(
                 torrent = null
             }
             val savedFile = MoviesDownloadVault.finish(context, item, file, preserveForSeed = seeding != null)
+            runCatching {
+                val tracks = candidate.subtitles.ifEmpty { findMovieSubtitles(item.title, item.episode) }
+                NanamiCastSubtitleHelper.saveDownloadedSubtitles(savedFile, tracks)
+            }
             if (seeding != null) {
                 // Record the handoff before leaving the non-cancellable context.
                 withContext(NonCancellable) { retainedForSeed = offerSeed(seeding, savedFile, staging) }

@@ -37,6 +37,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.maru.manime.*
+import io.maru.manime.tv.NanamiDeviceFormFactor
+import io.maru.manime.tv.nanamiFocusHighlight
+import io.maru.manime.tv.rememberDeviceFormFactor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -82,6 +85,8 @@ fun SearchScreen(
     onUserClick: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
+    val formFactor = rememberDeviceFormFactor()
+    val posterMinSize = if (formFactor == NanamiDeviceFormFactor.PHONE) 136.dp else 156.dp
     val knownDubIds by KnownDubRegistry.dubbedIds.collectAsState()
 
     var query by rememberSaveable { mutableStateOf("") }
@@ -260,7 +265,7 @@ fun SearchScreen(
                 if (showingBrowseHub) {
                     // ==================== EMBEDDED BROWSE HUB WHEN NOTHING IS SEARCHED ====================
                     LazyVerticalGrid(
-                        columns = GridCells.Adaptive(136.dp),
+                        columns = GridCells.Adaptive(posterMinSize),
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(top = 2.dp, bottom = 28.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -452,7 +457,7 @@ fun SearchScreen(
                             "Show all results"
                         ) { dubbedOnly = false }
                         else -> LazyVerticalGrid(
-                            columns = GridCells.Adaptive(136.dp),
+                            columns = GridCells.Adaptive(posterMinSize),
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(top = 6.dp, bottom = 28.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -483,7 +488,8 @@ private fun CrunchyChip(
         onClick = onClick,
         shape = RoundedCornerShape(6.dp),
         color = if (selected) accent else CrunchyCardBg,
-        border = BorderStroke(1.dp, if (selected) accent else CrunchyBorder)
+        border = BorderStroke(1.dp, if (selected) accent else CrunchyBorder),
+        modifier = Modifier.nanamiFocusHighlight(accent, cornerRadius = 6.dp)
     ) {
         Text(
             text = label,

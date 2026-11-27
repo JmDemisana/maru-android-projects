@@ -15,6 +15,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -40,6 +41,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.maru.manime.*
@@ -48,6 +50,9 @@ import io.maru.manime.player.PlayerScreen
 import io.maru.manime.torrent.OfflineEpisodeEntry
 import io.maru.manime.torrent.TorrentStreamService
 import io.maru.manime.torrent.selectDownloadCandidates
+import io.maru.manime.tv.NanamiDeviceFormFactor
+import io.maru.manime.tv.nanamiFocusHighlight
+import io.maru.manime.tv.rememberDeviceFormFactor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -135,17 +140,23 @@ fun ProfileScreen(
     onLoginClick: () -> Unit,
     onAnimeClick: (AnimeMedia) -> Unit,
     onMediaUpdated: (AnimeMedia) -> Unit = {},
-    onPlaybackVisibilityChange: (Boolean) -> Unit = {}
+    onPlaybackVisibilityChange: (Boolean) -> Unit = {},
+    onCastOffline: (OfflineEpisodeEntry) -> Unit = {},
+    activeCastKey: String? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val formFactor = rememberDeviceFormFactor()
+    val isTv = formFactor == NanamiDeviceFormFactor.TV
+    val posterMinSize = if (formFactor == NanamiDeviceFormFactor.PHONE) 140.dp else 156.dp
     val allOfflineEpisodes by TorrentStreamService.offlineEpisodes.collectAsState()
     val offlineEpisodes = remember(allOfflineEpisodes, hideNsfwContent) {
         if (hideNsfwContent) allOfflineEpisodes.filter { it.isAdultContent == false } else allOfflineEpisodes
     }
     var activeOfflinePlaying by remember { mutableStateOf<OfflineEpisodeEntry?>(null) }
     var selectedOfflineSeriesId by rememberSaveable { mutableStateOf<Int?>(null) }
-    var selectedCategory by rememberSaveable { mutableStateOf("Downloads") }
+    var selectedCategory by rememberSaveable(isTv) { mutableStateOf(if (isTv) "Watching" else "Downloads") }
+    var deleteCandidate by remember { mutableStateOf<OfflineEpisodeEntry?>(null) }
     var isVaultLoading by remember { mutableStateOf(true) }
     val retryingDownloads = remember { mutableStateMapOf<Pair<Int, Int>, Boolean>() }
 
@@ -241,13 +252,13 @@ fun ProfileScreen(
             if (ordered.isEmpty()) defaultAniListTabs else ordered.toList()
         }
     }
-    val availableCategories = remember(aniListTabNames) {
-        listOf("Downloads") + aniListTabNames
+    val availableCategories = remember(aniListTabNames, isTv) {
+        if (isTv) aniListTabNames else listOf("Downloads") + aniListTabNames
     }
 
-    LaunchedEffect(availableCategories) {
+    LaunchedEffect(availableCategories, isTv) {
         if (selectedCategory !in availableCategories) {
-            selectedCategory = "Downloads"
+            selectedCategory = if (isTv) (aniListTabNames.firstOrNull() ?: "Watching") else "Downloads"
         }
     }
 
@@ -477,20 +488,25 @@ fun ProfileScreen(
                         CircularProgressIndicator(color = CrunchyOrange)
                     }
                 } else if (offlineEpisodes.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.padding(28.dp)
-                        ) {
-                            Icon(Icons.Default.CloudDownload, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(44.dp))
-                            Text("No Downloads Yet", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                            Text(
-                                "Tap the download icon next to any episode to save it privately inside Nanami Anime for offline viewing.",
-                                color = MaruTextMuted,
-                                fontSize = 13.sp,
-                                textAlign = TextAlign.Center
-                            )
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        NanamiAnimeCastInfoNoticeCard(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                        )
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.padding(28.dp)
+                            ) {
+                                Icon(Icons.Default.CloudDownload, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(44.dp))
+                                Text("No Downloads Yet", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                Text(
+                                    "Tap the download icon next to any episode to save it privately inside Nanami Anime for offline viewing or TV casting.",
+                                    color = MaruTextMuted,
+                                    fontSize = 13.sp,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
                         }
                     }
                 } else if (activeSeriesId != null && seriesEps.isNotEmpty()) {
@@ -504,7 +520,10 @@ fun ProfileScreen(
                                 .padding(horizontal = 8.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            IconButton(onClick = { selectedOfflineSeriesId = null }) {
+                            IconButton(
+                                onClick = { selectedOfflineSeriesId = null },
+                                modifier = Modifier.nanamiFocusHighlight(CrunchyOrange, cornerRadius = 20.dp)
+                            ) {
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                             }
                             Text(
@@ -526,123 +545,20 @@ fun ProfileScreen(
                             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
+                            item(key = "dl_series_cast_notice") {
+                                NanamiAnimeCastInfoNoticeCard()
+                            }
                             items(seriesEps, key = { "${it.mediaId}_${it.episodeNumber}" }) { item ->
-                                val animPct by animateFloatAsState(
-                                    targetValue = (item.progressPercent / 100f).coerceIn(0f, 1f),
-                                    animationSpec = tween(250),
-                                    label = "dl_progress"
+                                OfflineEpisodeDownloadCard(
+                                    item = item,
+                                    showSeriesTitle = false,
+                                    canPlay = prefs != null,
+                                    isActiveCast = activeCastKey == "anime:${item.mediaId}:e${item.episodeNumber}",
+                                    onPlay = { activeOfflinePlaying = item },
+                                    onCast = { onCastOffline(item) },
+                                    onRetry = { retryFailedDownload(item) },
+                                    onDelete = { deleteCandidate = item }
                                 )
-                                GlassCard(modifier = Modifier.fillMaxWidth()) {
-                                    Column(modifier = Modifier.padding(10.dp)) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable(enabled = item.isCompleted && prefs != null) {
-                                                    activeOfflinePlaying = item
-                                                },
-                                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .width(128.dp)
-                                                    .aspectRatio(16f / 9f)
-                                                    .clip(RoundedCornerShape(4.dp))
-                                                    .background(CrunchyCardBg),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                CrossfadeImage(
-                                                    model = item.thumbnailUrl ?: item.coverUrl,
-                                                    contentDescription = item.episodeTitle,
-                                                    contentScale = ContentScale.Crop,
-                                                    modifier = Modifier.fillMaxSize()
-                                                )
-                                                if (item.isCompleted) {
-                                                    Surface(
-                                                        color = Color(0xCC000000),
-                                                        shape = CircleShape,
-                                                        modifier = Modifier.size(34.dp)
-                                                    ) {
-                                                        Box(contentAlignment = Alignment.Center) {
-                                                            Icon(Icons.Default.PlayArrow, contentDescription = "Play", tint = CrunchyOrange, modifier = Modifier.size(22.dp))
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            Column(
-                                                modifier = Modifier.weight(1f),
-                                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                                            ) {
-                                                Text(
-                                                    text = "E${item.episodeNumber} • ${item.episodeTitle}",
-                                                    fontSize = 13.5.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = Color.White,
-                                                    lineHeight = 18.sp
-                                                )
-                                                val sizeMb = (item.sizeBytes / (1024 * 1024)).coerceAtLeast(1)
-                                                val audioBadge = when (item.audioType) {
-                                                    "DUAL_AUDIO" -> "Dual Audio"
-                                                    "DUB" -> "Dub"
-                                                    else -> "Sub"
-                                                }
-                                                Text(
-                                                    text = when {
-                                                        item.isCompleted -> "${item.quality} • $audioBadge • ${sizeMb} MB"
-                                                        item.failure != null -> item.failure
-                                                        !item.statusText.isNullOrBlank() -> item.statusText
-                                                        item.progressPercent == 0 -> "Connecting to source…"
-                                                        else -> "Downloading ${item.progressPercent}%"
-                                                    },
-                                                    fontSize = 11.5.sp,
-                                                    color = when {
-                                                        item.isCompleted -> CrunchyTeal
-                                                        item.failure != null -> Color(0xFFFF8A80)
-                                                        else -> CrunchyOrange
-                                                    },
-                                                    lineHeight = 15.sp
-                                                )
-                                            }
-
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                if (item.failure != null) {
-                                                    IconButton(onClick = { retryFailedDownload(item) }) {
-                                                        Icon(Icons.Default.Refresh, contentDescription = "Retry download", tint = CrunchyOrange)
-                                                    }
-                                                }
-                                                IconButton(
-                                                    onClick = {
-                                                        scope.launch {
-                                                            val removed = TorrentStreamService.deleteOfflineEpisode(context, item.mediaId, item.episodeNumber)
-                                                            if (!removed) {
-                                                                Toast.makeText(context, "Could not remove this download.", Toast.LENGTH_SHORT).show()
-                                                            } else if (seriesEps.size == 1 && selectedOfflineSeriesId == item.mediaId) {
-                                                                selectedOfflineSeriesId = null
-                                                            }
-                                                        }
-                                                    }
-                                                ) {
-                                                    val label = if (item.isCompleted || item.failure != null) "Delete download" else "Cancel download"
-                                                    Icon(Icons.Default.DeleteOutline, contentDescription = label, tint = MaruTextMuted)
-                                                }
-                                            }
-                                        }
-
-                                        if (!item.isCompleted && item.failure == null) {
-                                            Spacer(Modifier.height(8.dp))
-                                            LinearProgressIndicator(
-                                                progress = { animPct },
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .height(4.dp)
-                                                    .clip(RoundedCornerShape(2.dp)),
-                                                color = CrunchyOrange,
-                                                trackColor = CrunchyBorder
-                                            )
-                                        }
-                                    }
-                                }
                             }
                         }
                     }
@@ -650,29 +566,69 @@ fun ProfileScreen(
                     val groupedSeries = remember(offlineEpisodes) {
                         offlineEpisodes.groupBy { it.mediaId }.values.toList()
                     }
+                    val multiSeries = remember(groupedSeries) { groupedSeries.filter { it.size > 1 } }
+                    val singleDownloads = remember(groupedSeries) { groupedSeries.filter { it.size == 1 }.flatten() }
+                    val totalDownloadedBytes = remember(offlineEpisodes) {
+                        offlineEpisodes.filter { it.isCompleted }.sumOf { it.sizeBytes }
+                    }
 
-                    LazyVerticalGrid(
-                        columns = GridCells.Adaptive(140.dp),
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 16.dp),
-                        contentPadding = PaddingValues(top = 14.dp, bottom = 28.dp),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(18.dp)
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        items(groupedSeries, key = { "dl_series_${it.first().mediaId}" }) { eps ->
-                            val seriesMedia = eps.first().toAnimeSummary()
-                            val completedCount = eps.count { it.isCompleted }
-                            val activeCount = eps.count { !it.isCompleted && it.failure == null }
-                            val epCountLabel = when {
-                                activeCount > 0 -> "$completedCount/${eps.size} Ready • Downloading…"
-                                eps.size == 1 -> "1 Episode Saved"
-                                else -> "${eps.size} Episodes Saved"
+                        item(key = "dl_cast_notice") {
+                            NanamiAnimeCastInfoNoticeCard()
+                        }
+                        if (totalDownloadedBytes > 0L) {
+                            item(key = "dl_storage_summary") {
+                                val doneCount = offlineEpisodes.count { it.isCompleted }
+                                Text(
+                                    text = "$doneCount downloaded · ${android.text.format.Formatter.formatFileSize(context, totalDownloadedBytes)}",
+                                    fontSize = 12.sp,
+                                    color = MaruTextMuted
+                                )
                             }
-                            PosterCard(
-                                media = seriesMedia,
-                                subtitleOverride = epCountLabel,
-                                onClick = { selectedOfflineSeriesId = seriesMedia.mediaId }
+                        }
+                        if (multiSeries.isNotEmpty()) {
+                            item(key = "dl_series_folders") {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text(
+                                        text = "Downloaded Series",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color.White
+                                    )
+                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                        items(multiSeries, key = { "dl_series_${it.first().mediaId}" }) { eps ->
+                                            val seriesMedia = eps.first().toAnimeSummary()
+                                            val completedCount = eps.count { it.isCompleted }
+                                            val activeCount = eps.count { !it.isCompleted && it.failure == null }
+                                            val epCountLabel = when {
+                                                activeCount > 0 -> "$completedCount/${eps.size} Ready • Downloading…"
+                                                else -> "${eps.size} Episodes Saved"
+                                            }
+                                            PosterCard(
+                                                media = seriesMedia,
+                                                subtitleOverride = epCountLabel,
+                                                onClick = { selectedOfflineSeriesId = seriesMedia.mediaId },
+                                                modifier = Modifier.width(136.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        items(singleDownloads, key = { "dl_solo_${it.mediaId}_${it.episodeNumber}" }) { item ->
+                            OfflineEpisodeDownloadCard(
+                                item = item,
+                                showSeriesTitle = true,
+                                canPlay = prefs != null,
+                                isActiveCast = activeCastKey == "anime:${item.mediaId}:e${item.episodeNumber}",
+                                onPlay = { activeOfflinePlaying = item },
+                                onCast = { onCastOffline(item) },
+                                onRetry = { retryFailedDownload(item) },
+                                onDelete = { deleteCandidate = item }
                             )
                         }
                     }
@@ -842,7 +798,7 @@ fun ProfileScreen(
                         }
 
                         LazyVerticalGrid(
-                            columns = GridCells.Adaptive(140.dp),
+                            columns = GridCells.Adaptive(posterMinSize),
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(horizontal = 16.dp),
@@ -859,6 +815,240 @@ fun ProfileScreen(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    deleteCandidate?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteCandidate = null },
+            containerColor = CrunchySurface,
+            title = {
+                Text(
+                    text = if (target.isCompleted || target.failure != null) "Delete Download?" else "Cancel Download?",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = "${target.animeTitle} · E${target.episodeNumber} · ${target.episodeTitle}",
+                    color = MaruTextMuted
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val removing = target
+                        deleteCandidate = null
+                        scope.launch {
+                            val removed = TorrentStreamService.deleteOfflineEpisode(
+                                context,
+                                removing.mediaId,
+                                removing.episodeNumber
+                            )
+                            if (!removed) {
+                                Toast.makeText(context, "Could not remove this download.", Toast.LENGTH_SHORT).show()
+                            } else if (
+                                selectedOfflineSeriesId == removing.mediaId &&
+                                offlineEpisodes.none { it.mediaId == removing.mediaId && it.episodeNumber != removing.episodeNumber }
+                            ) {
+                                selectedOfflineSeriesId = null
+                            }
+                        }
+                    }
+                ) {
+                    Text(
+                        text = if (target.isCompleted || target.failure != null) "Delete" else "Cancel Download",
+                        color = Color(0xFFFF8A80),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteCandidate = null }) {
+                    Text("Keep", color = Color.White)
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun NanamiAnimeCastInfoNoticeCard(modifier: Modifier = Modifier) {
+    GlassCard(
+        modifier = modifier.fillMaxWidth(),
+        border = CrunchyBorder,
+        background = CrunchySurface
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Tv,
+                contentDescription = null,
+                tint = CrunchyOrange,
+                modifier = Modifier.size(20.dp)
+            )
+            Text(
+                text = "Casting only works on Downloaded Content. To directly access content from the catalog, install this app on your Android TV.",
+                color = Color(0xFFD8DBE6),
+                fontSize = 12.sp,
+                lineHeight = 16.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun OfflineEpisodeDownloadCard(
+    item: OfflineEpisodeEntry,
+    showSeriesTitle: Boolean,
+    canPlay: Boolean,
+    isActiveCast: Boolean,
+    onPlay: () -> Unit,
+    onCast: () -> Unit,
+    onRetry: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val animPct by animateFloatAsState(
+        targetValue = (item.progressPercent / 100f).coerceIn(0f, 1f),
+        animationSpec = tween(250),
+        label = "dl_progress"
+    )
+    GlassCard(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .nanamiFocusHighlight(CrunchyOrange, cornerRadius = 6.dp)
+                    .clickable(enabled = item.isCompleted && canPlay, onClick = onPlay),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(120.dp)
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(CrunchyCardBg),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CrossfadeImage(
+                        model = item.thumbnailUrl ?: item.coverUrl,
+                        contentDescription = item.episodeTitle,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    if (item.isCompleted) {
+                        Surface(
+                            color = Color(0xCC000000),
+                            shape = CircleShape,
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    Icons.Default.PlayArrow,
+                                    contentDescription = "Play",
+                                    tint = CrunchyOrange,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    if (showSeriesTitle) {
+                        Text(
+                            text = item.animeTitle,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaruTextMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Text(
+                        text = "E${item.episodeNumber} • ${item.episodeTitle}",
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        lineHeight = 18.sp
+                    )
+                    val sizeMb = (item.sizeBytes / (1024 * 1024)).coerceAtLeast(1)
+                    val audioBadge = when (item.audioType) {
+                        "DUAL_AUDIO" -> "Dual Audio"
+                        "DUB" -> "Dub"
+                        else -> "Sub"
+                    }
+                    Text(
+                        text = when {
+                            item.isCompleted -> "${item.quality} • $audioBadge • ${sizeMb} MB"
+                            item.failure != null -> item.failure
+                            !item.statusText.isNullOrBlank() -> item.statusText
+                            item.progressPercent == 0 -> "Connecting to source…"
+                            else -> "Downloading ${item.progressPercent}%"
+                        },
+                        fontSize = 11.5.sp,
+                        color = when {
+                            item.isCompleted -> CrunchyTeal
+                            item.failure != null -> Color(0xFFFF8A80)
+                            else -> CrunchyOrange
+                        },
+                        lineHeight = 15.sp
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (item.isCompleted) {
+                        IconButton(
+                            onClick = onCast,
+                            modifier = Modifier.nanamiFocusHighlight(CrunchyOrange, cornerRadius = 18.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isActiveCast) Icons.Default.CastConnected else Icons.Default.Cast,
+                                contentDescription = "Cast to TV",
+                                tint = if (isActiveCast) CrunchyOrange else CrunchyTeal
+                            )
+                        }
+                    }
+                    if (item.failure != null) {
+                        IconButton(
+                            onClick = onRetry,
+                            modifier = Modifier.nanamiFocusHighlight(CrunchyOrange, cornerRadius = 18.dp)
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Retry download", tint = CrunchyOrange)
+                        }
+                    }
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier.nanamiFocusHighlight(CrunchyOrange, cornerRadius = 18.dp)
+                    ) {
+                        val label = if (item.isCompleted || item.failure != null) "Delete download" else "Cancel download"
+                        Icon(Icons.Default.DeleteOutline, contentDescription = label, tint = MaruTextMuted)
+                    }
+                }
+            }
+
+            if (!item.isCompleted && item.failure == null) {
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { animPct },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = CrunchyOrange,
+                    trackColor = CrunchyBorder
+                )
             }
         }
     }

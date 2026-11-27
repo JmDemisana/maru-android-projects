@@ -27,6 +27,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.maru.manime.disguise.AppDisguiseManager
+import io.maru.manime.tv.NanamiDeviceFormFactor
+import io.maru.manime.tv.rememberDeviceFormFactor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -42,6 +45,7 @@ internal fun MoviesSettings(
     syncMessage: String?,
     onAccountChanged: () -> Unit,
     onOpenWebAuth: (Boolean) -> Unit,
+    onOpenQrAuth: () -> Unit,
     onSync: () -> Unit,
     hideMature: Boolean,
     onHideMature: (Boolean) -> Unit,
@@ -56,6 +60,8 @@ internal fun MoviesSettings(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val formFactor = rememberDeviceFormFactor()
+    val isTv = formFactor == NanamiDeviceFormFactor.TV
     val scope = rememberCoroutineScope()
     val playerPrefs = remember(context) { MoviesPreferences.player(context) }
     val vault = MoviesDownloadVault
@@ -70,6 +76,8 @@ internal fun MoviesSettings(
     var subtitleBg by remember { mutableStateOf(playerPrefs.getBoolean("subtitle_background", true)) }
     var subtitleSize by remember { mutableFloatStateOf(playerPrefs.getFloat("subtitle_size", 1f).coerceIn(0.75f, 1.5f)) }
     var cellular by remember { mutableStateOf(vault.allowCellular(context)) }
+    var seedOnWifi by remember { mutableStateOf(vault.seedOnWifi(context)) }
+    var disguiseEnabled by remember { mutableStateOf(AppDisguiseManager.isDisguiseEnabled(context)) }
 
     val completedDownloads = remember(downloads) { downloads.filter { it.state == MovieDownloadState.COMPLETE } }
     val savedBytes = remember(completedDownloads) { completedDownloads.sumOf { it.progress?.total ?: 0L } }
@@ -279,21 +287,46 @@ internal fun MoviesSettings(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         Button(
-                            onClick = { onOpenWebAuth(savedAccounts.isNotEmpty()) },
+                            onClick = { if (isTv) onOpenQrAuth() else onOpenWebAuth(savedAccounts.isNotEmpty()) },
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = NetflixRed, contentColor = Color.White),
                             shape = RoundedCornerShape(4.dp),
                         ) {
-                            Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(
+                                if (isTv) Icons.Default.QrCode2 else Icons.Default.PersonAdd,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                text = if (savedAccounts.isNotEmpty()) "Add Account" else "Connect SIMKL",
+                                text = when {
+                                    isTv && savedAccounts.isNotEmpty() -> "Add Account (QR)"
+                                    isTv -> "Sign In with QR Code"
+                                    savedAccounts.isNotEmpty() -> "Add Account"
+                                    else -> "Connect SIMKL"
+                                },
                                 fontWeight = FontWeight.ExtraBold,
                                 fontSize = 12.5.sp,
                             )
                         }
 
-                        if (isLoggedIn) {
+                        if (!isTv) {
+                            OutlinedButton(
+                                onClick = onOpenQrAuth,
+                                modifier = Modifier.weight(1f),
+                                border = BorderStroke(1.dp, NetflixBorder),
+                                shape = RoundedCornerShape(4.dp),
+                            ) {
+                                Icon(Icons.Default.QrCode2, contentDescription = null, tint = NetflixRed, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "QR Sign In",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.5.sp,
+                                )
+                            }
+                        } else if (isLoggedIn) {
                             OutlinedButton(
                                 onClick = {
                                     scope.launch {
@@ -313,6 +346,23 @@ internal fun MoviesSettings(
                                     fontSize = 12.5.sp,
                                 )
                             }
+                        }
+                    }
+
+                    if (!isTv && isLoggedIn) {
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    runCatching { simkl.selectAccount(null) }
+                                    onAccountChanged()
+                                    Toast.makeText(context, "Switched to Local Guest Mode", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            border = BorderStroke(1.dp, NetflixBorder),
+                            shape = RoundedCornerShape(4.dp),
+                        ) {
+                            Text("Switch to Local Guest Mode", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
                         }
                     }
 
@@ -363,17 +413,19 @@ internal fun MoviesSettings(
                         }
                     }
 
-                    HorizontalDivider(color = NetflixBorder, thickness = 1.dp)
+                    if (!isTv) {
+                        HorizontalDivider(color = NetflixBorder, thickness = 1.dp)
 
-                    NetflixFeatureRow(
-                        label = "Swipe up/down for brightness & volume",
-                        subtitle = "Left side adjusts screen brightness, right side adjusts volume",
-                        checked = swipeGestures,
-                        onCheckedChange = {
-                            swipeGestures = it
-                            playerPrefs.edit().putBoolean("swipe_gestures", it).apply()
-                        },
-                    )
+                        NetflixFeatureRow(
+                            label = "Swipe up/down for brightness & volume",
+                            subtitle = "Left side adjusts screen brightness, right side adjusts volume",
+                            checked = swipeGestures,
+                            onCheckedChange = {
+                                swipeGestures = it
+                                playerPrefs.edit().putBoolean("swipe_gestures", it).apply()
+                            },
+                        )
+                    }
 
                     NetflixFeatureRow(
                         label = "Persistent bottom progress bar",
@@ -556,7 +608,51 @@ internal fun MoviesSettings(
             }
         }
 
-        // 4. Offline Downloads & About (Clean, zero technical jargon!)
+        // 4. App Name & Icon Tricking (Disguise Mode, off by default)
+        item(key = "app_disguise_card") {
+            NetflixCard(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    NetflixSectionHeader(
+                        title = "App Disguise",
+                        icon = Icons.Default.VisibilityOff,
+                        color = NetflixRed,
+                        modifier = Modifier,
+                    )
+                    NetflixFeatureRow(
+                        label = "App Name & Icon Tricking",
+                        subtitle = "Disguises app launcher name and icon as Netflix (Off keeps Nanami Movies)",
+                        checked = disguiseEnabled,
+                        onCheckedChange = { checked ->
+                            disguiseEnabled = checked
+                            AppDisguiseManager.applyDisguise(
+                                context = context,
+                                enabled = checked,
+                                defaultAliasClassName = "io.maru.movies.LauncherDefault",
+                                disguiseAliasClassName = "io.maru.movies.LauncherDisguise",
+                                defaultLabel = "Nanami Movies",
+                                disguiseLabel = "Netflix",
+                            )
+                            Toast.makeText(
+                                context,
+                                if (checked) "Launcher icon switching to Netflix…" else "Restoring Nanami Movies icon…",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        },
+                    )
+                    Text(
+                        text = "Your home screen or TV launcher may take a few seconds to refresh and briefly reload shortcuts.",
+                        fontSize = 11.5.sp,
+                        color = NetflixTextMuted,
+                        lineHeight = 16.sp,
+                    )
+                }
+            }
+        }
+
+        // 5. Offline Downloads & About (Downloads disabled on TV; clean jargon-free copy!)
         item(key = "downloads_about_card") {
             NetflixCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
@@ -564,40 +660,59 @@ internal fun MoviesSettings(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     NetflixSectionHeader(
-                        title = "Downloads & About",
+                        title = if (isTv) "TV Cache & About" else "Downloads & About",
                         icon = Icons.Default.DownloadDone,
                         color = NetflixMatchGreen,
                         modifier = Modifier,
                     )
 
-                    Text(
-                        text = if (completedDownloads.isNotEmpty()) {
-                            "${completedDownloads.size} downloaded ${if (completedDownloads.size == 1) "video" else "videos"} • ${Formatter.formatFileSize(context, savedBytes)} used"
-                        } else {
-                            "0 downloaded videos stored"
-                        },
-                        fontSize = 13.5.sp,
-                        color = NetflixMatchGreen,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Text(
-                        text = "Downloads stay safely inside Nanami Movies so they never clutter your phone's photo gallery.",
-                        fontSize = 12.sp,
-                        color = NetflixTextMuted,
-                        lineHeight = 17.sp,
-                    )
+                    if (isTv) {
+                        Text(
+                            text = "Offline downloads are disabled on Android TV. Streaming caches automatically stay capped to protect TV storage.",
+                            fontSize = 12.5.sp,
+                            color = NetflixTextMuted,
+                            lineHeight = 17.sp,
+                        )
+                    } else {
+                        Text(
+                            text = if (completedDownloads.isNotEmpty()) {
+                                "${completedDownloads.size} downloaded ${if (completedDownloads.size == 1) "video" else "videos"} • ${Formatter.formatFileSize(context, savedBytes)} used"
+                            } else {
+                                "0 downloaded videos stored"
+                            },
+                            fontSize = 13.5.sp,
+                            color = NetflixMatchGreen,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            text = "Downloads stay safely inside Nanami Movies so they never clutter your phone's photo gallery.",
+                            fontSize = 12.sp,
+                            color = NetflixTextMuted,
+                            lineHeight = 17.sp,
+                        )
 
-                    HorizontalDivider(color = NetflixBorder, thickness = 1.dp)
+                        HorizontalDivider(color = NetflixBorder, thickness = 1.dp)
 
-                    NetflixFeatureRow(
-                        label = "Allow Download with Cellular",
-                        subtitle = "Download movies and episodes over mobile data when Wi-Fi is unavailable",
-                        checked = cellular,
-                        onCheckedChange = {
-                            cellular = it
-                            vault.setAllowCellular(context, it)
-                        },
-                    )
+                        NetflixFeatureRow(
+                            label = "Allow Download with Cellular",
+                            subtitle = "Download movies and episodes over mobile data when Wi-Fi is unavailable",
+                            checked = cellular,
+                            onCheckedChange = {
+                                cellular = it
+                                vault.setAllowCellular(context, it)
+                            },
+                        )
+
+                        NetflixFeatureRow(
+                            label = "Seed Downloads on Wi-Fi",
+                            subtitle = "Shares completed download pieces over Wi-Fi (using zero extra storage or mobile data) to keep rare movies fast for everyone",
+                            checked = seedOnWifi,
+                            onCheckedChange = {
+                                seedOnWifi = it
+                                vault.setSeedOnWifi(context, it)
+                            },
+                        )
+                    }
 
                     HorizontalDivider(color = NetflixBorder, thickness = 1.dp)
 

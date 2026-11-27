@@ -60,6 +60,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.maru.manime.tv.NanamiDeviceFormFactor
+import io.maru.manime.tv.nanamiFocusHighlight
+import io.maru.manime.tv.rememberDeviceFormFactor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -736,15 +739,33 @@ internal fun MoviesMyListScreen(
     open: (MovieTitle) -> Unit,
     @Suppress("UNUSED_PARAMETER") resume: (MovieTitle, WatchProgress) -> Unit,
     playOffline: (MovieTitle, MovieEpisode?, File) -> Unit,
+    onCastOffline: (MovieDownload) -> Unit = {},
+    activeCastKey: String? = null,
 ) {
     val context = LocalContext.current
+    val formFactor = rememberDeviceFormFactor()
+    val isTv = formFactor == NanamiDeviceFormFactor.TV
+    val visibleCategories = remember(isTv) {
+        if (isTv) {
+            MoviesLibraryCategory.entries.filterNot { it == MoviesLibraryCategory.DOWNLOADS }
+        } else {
+            MoviesLibraryCategory.entries.toList()
+        }
+    }
     val vault = MoviesDownloadVault
     val allDownloads by vault.items.collectAsState()
     val visibleDownloads = remember(allDownloads, hideMature) {
         if (hideMature) allDownloads.filterNot { it.title.isMature } else allDownloads
     }
 
-    var selectedCategory by rememberSaveable { mutableStateOf(MoviesLibraryCategory.DOWNLOADS) }
+    var selectedCategory by rememberSaveable {
+        mutableStateOf(if (isTv) MoviesLibraryCategory.WATCHING else MoviesLibraryCategory.DOWNLOADS)
+    }
+    LaunchedEffect(isTv) {
+        if (isTv && selectedCategory == MoviesLibraryCategory.DOWNLOADS) {
+            selectedCategory = MoviesLibraryCategory.WATCHING
+        }
+    }
     var selectedOfflineSeriesImdb by rememberSaveable { mutableStateOf<String?>(null) }
     var kindFilter by rememberSaveable { mutableStateOf<MovieKind?>(null) }
     var sortOption by rememberSaveable {
@@ -813,7 +834,7 @@ internal fun MoviesMyListScreen(
                 .selectableGroup(),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            MoviesLibraryCategory.entries.forEach { cat ->
+            visibleCategories.forEach { cat ->
                 val isSelected = selectedCategory == cat
                 val count = countFor(cat)
                 val textColor by animateColorAsState(
@@ -897,13 +918,15 @@ internal fun MoviesMyListScreen(
             label = "movies_my_list_body",
             modifier = Modifier.fillMaxSize(),
         ) { (activeCat, drilldownImdb) ->
-            if (activeCat == MoviesLibraryCategory.DOWNLOADS) {
+            if (activeCat == MoviesLibraryCategory.DOWNLOADS && !isTv) {
                 MoviesDownloadsVaultTab(
                     downloads = visibleDownloads,
                     selectedSeriesImdb = drilldownImdb,
                     onSelectSeriesImdb = { selectedOfflineSeriesImdb = it },
                     onOpenTitle = open,
                     onPlayOffline = playOffline,
+                    onCastOffline = onCastOffline,
+                    activeCastKey = activeCastKey,
                 )
             } else {
                 val baseTitles = resolvedTitles.orEmpty().visible(hideMature)
@@ -1014,12 +1037,43 @@ internal fun MoviesMyListScreen(
 }
 
 @Composable
+private fun MoviesCastInfoNoticeCard(modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        color = Color(0xFF14151B),
+        border = BorderStroke(1.dp, NetflixRed.copy(alpha = 0.4f)),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Default.Tv,
+                contentDescription = null,
+                tint = NetflixRed,
+                modifier = Modifier.size(20.dp),
+            )
+            Text(
+                text = "Casting only works on Downloaded Content. To directly access content from the catalog, install this app on your Android TV.",
+                color = Color(0xFFD8DBE6),
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+            )
+        }
+    }
+}
+
+@Composable
 private fun MoviesDownloadsVaultTab(
     downloads: List<MovieDownload>,
     selectedSeriesImdb: String?,
     onSelectSeriesImdb: (String?) -> Unit,
     onOpenTitle: (MovieTitle) -> Unit,
     onPlayOffline: (MovieTitle, MovieEpisode?, File) -> Unit,
+    onCastOffline: (MovieDownload) -> Unit,
+    activeCastKey: String?,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1027,20 +1081,25 @@ private fun MoviesDownloadsVaultTab(
     var deleteCandidate by remember { mutableStateOf<MovieDownload?>(null) }
 
     if (downloads.isEmpty()) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.padding(28.dp),
-            ) {
-                Icon(Icons.Default.DownloadForOffline, contentDescription = null, tint = NetflixRed, modifier = Modifier.size(46.dp))
-                Text("No Downloads Yet", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                Text(
-                    "Tap Download on any movie or episode to watch offline anytime.",
-                    color = NetflixTextMuted,
-                    fontSize = 13.sp,
-                    textAlign = TextAlign.Center,
-                )
+        Column(modifier = Modifier.fillMaxSize()) {
+            MoviesCastInfoNoticeCard(
+                modifier = Modifier.padding(horizontal = PagePadding, vertical = 12.dp),
+            )
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(28.dp),
+                ) {
+                    Icon(Icons.Default.DownloadForOffline, contentDescription = null, tint = NetflixRed, modifier = Modifier.size(46.dp))
+                    Text("No Downloads Yet", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Tap Download on any movie or episode to watch offline or cast to your TV.",
+                        color = NetflixTextMuted,
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
         }
         return
@@ -1084,9 +1143,13 @@ private fun MoviesDownloadsVaultTab(
                 contentPadding = PaddingValues(horizontal = PagePadding, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                item(key = "dl_series_cast_notice") {
+                    MoviesCastInfoNoticeCard()
+                }
                 items(seriesDownloads, key = MovieDownload::key) { item ->
                     VaultDownloadCard(
                         item = item,
+                        isActiveCast = activeCastKey == item.key,
                         onPlay = {
                             val file = vault.completedFile(context, item)
                             if (file != null) {
@@ -1101,6 +1164,7 @@ private fun MoviesDownloadsVaultTab(
                                 }
                             }
                         },
+                        onCast = { onCastOffline(item) },
                         onCancel = { scope.launch { runCatching { vault.cancel(context, item.key) } } },
                         onRetry = { scope.launch { runCatching { vault.retry(context, item) } } },
                         onDelete = { deleteCandidate = item },
@@ -1110,45 +1174,74 @@ private fun MoviesDownloadsVaultTab(
         }
     } else {
         val grouped = remember(downloads) { downloads.groupBy { it.title.imdbId }.values.toList() }
+        val seriesFolders = remember(grouped) { grouped.filter { it.size > 1 || it.first().title.kind == MovieKind.SERIES } }
+        val singleMovies = remember(grouped) { grouped.filter { it.size == 1 && it.first().title.kind == MovieKind.MOVIE }.flatten() }
         val totalBytes = remember(downloads) {
             downloads.filter { it.state == MovieDownloadState.COMPLETE }.sumOf { it.progress?.total ?: 0L }
         }
 
-        Column(modifier = Modifier.fillMaxSize()) {
-            if (totalBytes > 0L) {
-                Text(
-                    text = "${downloads.count { it.state == MovieDownloadState.COMPLETE }} downloaded • ${Formatter.formatFileSize(context, totalBytes)}",
-                    fontSize = 12.sp,
-                    color = NetflixTextMuted,
-                    modifier = Modifier.padding(horizontal = PagePadding, vertical = 8.dp),
-                )
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = PagePadding, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            item(key = "dl_cast_notice") {
+                MoviesCastInfoNoticeCard()
             }
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(136.dp),
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = PagePadding, vertical = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                items(grouped, key = { "dl_grp_${it.first().title.imdbId}" }) { group ->
-                    val first = group.first()
-                    val readyCount = group.count { it.state == MovieDownloadState.COMPLETE }
-                    val activeCount = group.count { it.isActive }
-                    val subLabel = when {
-                        activeCount > 0 -> "$readyCount/${group.size} Ready • Downloading…"
-                        first.title.kind == MovieKind.MOVIE && readyCount > 0 -> {
-                            val bytes = first.progress?.total ?: 0L
-                            "Downloaded • ${Formatter.formatFileSize(context, bytes)}"
-                        }
-                        group.size == 1 -> "1 Episode Downloaded"
-                        else -> "${group.size} Episodes Downloaded"
-                    }
-                    NetflixPosterCard(
-                        title = first.title,
-                        subtitleOverride = subLabel,
-                        onClick = { onSelectSeriesImdb(first.title.imdbId) },
+            if (totalBytes > 0L) {
+                item(key = "dl_storage_summary") {
+                    Text(
+                        text = "${downloads.count { it.state == MovieDownloadState.COMPLETE }} downloaded • ${Formatter.formatFileSize(context, totalBytes)}",
+                        fontSize = 12.sp,
+                        color = NetflixTextMuted,
                     )
                 }
+            }
+            if (seriesFolders.isNotEmpty()) {
+                item(key = "dl_series_row") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Downloaded Series", fontSize = 14.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            items(seriesFolders, key = { "dl_grp_${it.first().title.imdbId}" }) { group ->
+                                val first = group.first()
+                                val readyCount = group.count { it.state == MovieDownloadState.COMPLETE }
+                                val activeCount = group.count { it.isActive }
+                                val subLabel = when {
+                                    activeCount > 0 -> "$readyCount/${group.size} Ready • Downloading…"
+                                    group.size == 1 -> "1 Episode Downloaded"
+                                    else -> "${group.size} Episodes Downloaded"
+                                }
+                                NetflixPosterCard(
+                                    title = first.title,
+                                    subtitleOverride = subLabel,
+                                    onClick = { onSelectSeriesImdb(first.title.imdbId) },
+                                    modifier = Modifier.width(136.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            items(singleMovies, key = MovieDownload::key) { item ->
+                VaultDownloadCard(
+                    item = item,
+                    isActiveCast = activeCastKey == item.key,
+                    onPlay = {
+                        val file = vault.completedFile(context, item)
+                        if (file != null) {
+                            onPlayOffline(item.title, null, file)
+                        } else {
+                            scope.launch {
+                                vault.markMissing(context, item)
+                                Toast.makeText(context, "Saved file missing; tap Retry to download again.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    onCast = { onCastOffline(item) },
+                    onCancel = { scope.launch { runCatching { vault.cancel(context, item.key) } } },
+                    onRetry = { scope.launch { runCatching { vault.retry(context, item) } } },
+                    onDelete = { deleteCandidate = item },
+                )
             }
         }
     }
@@ -1178,7 +1271,9 @@ private fun MoviesDownloadsVaultTab(
 @Composable
 private fun VaultDownloadCard(
     item: MovieDownload,
+    isActiveCast: Boolean = false,
     onPlay: () -> Unit,
+    onCast: () -> Unit,
     onCancel: () -> Unit,
     onRetry: () -> Unit,
     onDelete: () -> Unit,
@@ -1256,8 +1351,17 @@ private fun VaultDownloadCard(
                         item.isActive -> IconButton(onClick = onCancel) {
                             Icon(Icons.Default.Close, contentDescription = "Cancel", tint = Color.White)
                         }
-                        isComplete -> IconButton(onClick = onDelete) {
-                            Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = NetflixTextMuted)
+                        isComplete -> {
+                            IconButton(onClick = onCast) {
+                                Icon(
+                                    imageVector = if (isActiveCast) Icons.Default.CastConnected else Icons.Default.Cast,
+                                    contentDescription = "Cast to TV",
+                                    tint = if (isActiveCast) NetflixRed else Color.White,
+                                )
+                            }
+                            IconButton(onClick = onDelete) {
+                                Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = NetflixTextMuted)
+                            }
                         }
                         else -> {
                             IconButton(onClick = onRetry) {

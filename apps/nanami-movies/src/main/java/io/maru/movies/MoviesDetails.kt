@@ -42,6 +42,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.maru.manime.tv.NanamiDeviceFormFactor
+import io.maru.manime.tv.nanamiFocusHighlight
+import io.maru.manime.tv.rememberDeviceFormFactor
 import java.util.Locale
 
 private enum class DetailsTab(val label: String) {
@@ -71,6 +74,9 @@ internal fun MovieDetails(
     watchStatus: MovieWatchStatus? = null,
     onWatchStatus: ((MovieTitle, MovieWatchStatus?) -> Unit)? = null,
 ) {
+    val formFactor = rememberDeviceFormFactor()
+    val isTv = formFactor == NanamiDeviceFormFactor.TV
+    val relatedCols = if (formFactor == NanamiDeviceFormFactor.PHONE) 3 else 5
     var details by remember(preview.ref) { mutableStateOf<Result<MovieTitle?>?>(null) }
     var retry by remember(preview.ref) { mutableIntStateOf(0) }
     var chosenSeason by rememberSaveable(preview.ref.key) { mutableStateOf<Int?>(null) }
@@ -329,14 +335,15 @@ internal fun MovieDetails(
                     return@Column
                 }
 
-                // Signature Netflix Stacked Full-Width Play + Download Buttons
+                // Signature Netflix Stacked Full-Width Play + Download Buttons (Downloads hidden on TV)
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = { onPlay(title, firstEpisode) },
                         enabled = canPlay,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(46.dp),
+                            .height(46.dp)
+                            .nanamiFocusHighlight(NetflixRed, cornerRadius = 6.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = NetflixWhite,
                             contentColor = Color.Black,
@@ -362,7 +369,7 @@ internal fun MovieDetails(
                         )
                     }
 
-                    if (verified != null && onDownload != null) {
+                    if (!isTv && verified != null && onDownload != null) {
                         val movieDownloaded = title.kind == MovieKind.MOVIE && isDownloaded(title, null)
                         val dlEnabled = if (title.kind == MovieKind.MOVIE) canPlay && !movieDownloaded else downloadableEpisodes.isNotEmpty()
                         Button(
@@ -657,7 +664,7 @@ internal fun MovieDetails(
                         progress = progressFor(episode),
                         downloaded = isDownloaded(title, episode),
                         onPlay = { onPlay(title, episode) },
-                        onDownload = onDownload?.let { cb -> { cb(title, listOf(episode)) } },
+                        onDownload = if (isTv) null else onDownload?.let { cb -> { cb(title, listOf(episode)) } },
                         onWatched = onWatched?.let { cb -> { w -> cb(title, episode, w) } },
                     )
                 }
@@ -681,7 +688,7 @@ internal fun MovieDetails(
                     )
                 }
                 else -> {
-                    val rows = visibleRelated.take(18).chunked(3)
+                    val rows = visibleRelated.take(18).chunked(relatedCols)
                     items(rows.size, key = { idx -> "related_row_$idx" }) { idx ->
                         val rowItems = rows[idx]
                         Row(
@@ -698,7 +705,7 @@ internal fun MovieDetails(
                                     modifier = Modifier.weight(1f),
                                 )
                             }
-                            repeat(3 - rowItems.size) {
+                            repeat(relatedCols - rowItems.size) {
                                 Spacer(Modifier.weight(1f))
                             }
                         }

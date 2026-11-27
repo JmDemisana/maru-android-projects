@@ -1,5 +1,8 @@
 package io.maru.manime.screens
 
+import android.app.Activity
+import android.text.format.Formatter
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,6 +33,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.maru.manime.*
+import io.maru.manime.disguise.AppDisguiseManager
+import io.maru.manime.tv.NanamiDeviceFormFactor
+import io.maru.manime.tv.computeTvStreamCacheLimitBytes
+import io.maru.manime.tv.nanamiFocusHighlight
+import io.maru.manime.tv.rememberDeviceFormFactor
 
 @Composable
 fun SettingsScreen(
@@ -61,6 +69,8 @@ fun SettingsScreen(
     onSelectPlaybackSpeed: (Float) -> Unit = {},
     autoSkipIntro: Boolean = false,
     onToggleAutoSkipIntro: (Boolean) -> Unit = {},
+    autoplayNextEpisode: Boolean = true,
+    onToggleAutoplayNextEpisode: (Boolean) -> Unit = {},
     swipeGesturesEnabled: Boolean = true,
     onToggleSwipeGestures: (Boolean) -> Unit = {},
     persistentDurationLine: Boolean = false,
@@ -76,6 +86,7 @@ fun SettingsScreen(
     rememberPosition: Boolean,
     onToggleRememberPosition: (Boolean) -> Unit,
     onLoginClick: () -> Unit,
+    onOpenQrAuth: () -> Unit = {},
     onAddAccountClick: () -> Unit = onLoginClick,
     onSwitchAccount: (SavedAniListAccount) -> Unit = {},
     onRemoveAccount: (SavedAniListAccount) -> Unit = {},
@@ -83,6 +94,9 @@ fun SettingsScreen(
     onLogoutClick: () -> Unit
 ) {
     val context = LocalContext.current
+    val formFactor = rememberDeviceFormFactor()
+    val isTv = formFactor == NanamiDeviceFormFactor.TV
+    var disguiseEnabled by remember(context) { mutableStateOf(AppDisguiseManager.isDisguiseEnabled(context)) }
     val versionName = remember(context) {
         @Suppress("DEPRECATION")
         context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
@@ -286,24 +300,61 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Button(
-                            onClick = if (isLoggedIn || savedAccounts.isNotEmpty()) onAddAccountClick else onLoginClick,
-                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                when {
+                                    isTv -> onOpenQrAuth()
+                                    isLoggedIn || savedAccounts.isNotEmpty() -> onAddAccountClick()
+                                    else -> onLoginClick()
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .nanamiFocusHighlight(Color.White, cornerRadius = 4.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = CrunchyOrange, contentColor = Color.Black),
                             shape = RoundedCornerShape(4.dp)
                         ) {
-                            Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(
+                                imageVector = if (isTv) Icons.Default.QrCode2 else Icons.Default.PersonAdd,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                text = if (savedAccounts.isNotEmpty()) "Add Account" else "Connect AniList",
+                                text = when {
+                                    isTv && savedAccounts.isNotEmpty() -> "Add Account (QR)"
+                                    isTv -> "Sign In with QR Code"
+                                    savedAccounts.isNotEmpty() -> "Add Account"
+                                    else -> "Connect AniList"
+                                },
                                 fontWeight = FontWeight.ExtraBold,
                                 fontSize = 12.5.sp
                             )
                         }
 
-                        if (isLoggedIn) {
+                        if (!isTv) {
+                            OutlinedButton(
+                                onClick = onOpenQrAuth,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .nanamiFocusHighlight(CrunchyOrange, cornerRadius = 4.dp),
+                                border = BorderStroke(1.dp, CrunchyBorder),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Icon(Icons.Default.QrCode2, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "QR Sign In",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.5.sp
+                                )
+                            }
+                        } else if (isLoggedIn) {
                             OutlinedButton(
                                 onClick = onGuestModeClick,
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .nanamiFocusHighlight(CrunchyOrange, cornerRadius = 4.dp),
                                 border = BorderStroke(1.dp, CrunchyBorder),
                                 shape = RoundedCornerShape(4.dp)
                             ) {
@@ -314,6 +365,24 @@ fun SettingsScreen(
                                     fontSize = 12.5.sp
                                 )
                             }
+                        }
+                    }
+
+                    if (!isTv && isLoggedIn) {
+                        OutlinedButton(
+                            onClick = onGuestModeClick,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .nanamiFocusHighlight(CrunchyOrange, cornerRadius = 4.dp),
+                            border = BorderStroke(1.dp, CrunchyBorder),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "Switch to Local Guest Mode",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.5.sp
+                            )
                         }
                     }
 
@@ -405,11 +474,20 @@ fun SettingsScreen(
                         color = CrunchyOrange
                     )
 
+                    if (!isTv) {
+                        GlassFeatureRow(
+                            label = "Swipe up/down for brightness & volume",
+                            subtitle = "Left side adjusts screen brightness, right side adjusts volume",
+                            checked = swipeGesturesEnabled,
+                            onCheckedChange = onToggleSwipeGestures
+                        )
+                    }
+
                     GlassFeatureRow(
-                        label = "Swipe up/down for brightness & volume",
-                        subtitle = "Left side adjusts screen brightness, right side adjusts volume",
-                        checked = swipeGesturesEnabled,
-                        onCheckedChange = onToggleSwipeGestures
+                        label = "Autoplay next episode",
+                        subtitle = "Starts the next episode automatically after finishing",
+                        checked = autoplayNextEpisode,
+                        onCheckedChange = onToggleAutoplayNextEpisode
                     )
 
                     GlassFeatureRow(
@@ -538,7 +616,47 @@ fun SettingsScreen(
             }
         }
 
-        // 4. Private Offline Vault & App Information
+        // 4. App Disguise Mode (Off by default)
+        item(key = "app_disguise") {
+            GlassCard(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    GlassSectionHeader(
+                        title = "App Disguise",
+                        icon = Icons.Default.VisibilityOff,
+                        color = CrunchyOrange
+                    )
+                    GlassFeatureRow(
+                        label = "App Name & Icon Tricking",
+                        subtitle = "Disguises app launcher name and icon as Crunchyroll (Off keeps Nanami Anime)",
+                        checked = disguiseEnabled,
+                        onCheckedChange = { checked ->
+                            disguiseEnabled = checked
+                            AppDisguiseManager.applyDisguise(
+                                context = context,
+                                enabled = checked,
+                                defaultAliasClassName = "io.maru.manime.LauncherDefault",
+                                disguiseAliasClassName = "io.maru.manime.LauncherDisguise",
+                                defaultLabel = "Nanami Anime",
+                                disguiseLabel = "Crunchyroll"
+                            )
+                            (context as? Activity)?.let { act ->
+                                AppDisguiseManager.syncTaskDescription(act, "Nanami Anime", "Crunchyroll")
+                            }
+                            Toast.makeText(
+                                context,
+                                if (checked) "Launcher icon switching to Crunchyroll…" else "Restoring Nanami Anime icon…",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    )
+                }
+            }
+        }
+
+        // 5. Private Offline Vault / TV Streaming Cache & App Information
         item(key = "app_info") {
             GlassCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
@@ -546,39 +664,55 @@ fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     GlassSectionHeader(
-                        title = "Private Offline Vault & About",
-                        icon = Icons.Default.Lock,
+                        title = if (isTv) "TV Streaming Cache & About" else "Private Offline Vault & About",
+                        icon = if (isTv) Icons.Default.Tv else Icons.Default.Lock,
                         color = CrunchyTeal
                     )
-                    Text(
-                        text = if (offlineCount > 0) {
-                            "$offlineCount downloaded episode${if (offlineCount == 1) "" else "s"} • $offlineTotalMb MB used"
-                        } else {
-                            "0 downloaded episodes stored"
-                        },
-                        fontSize = 13.5.sp,
-                        color = CrunchyTeal,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "Downloads are sealed inside Nanami Anime's private internal vault (.nanami + .nomedia) so they never clutter your phone's gallery or external video players.",
-                        fontSize = 12.sp,
-                        color = MaruTextMuted,
-                        lineHeight = 17.sp
-                    )
-                    HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
-                    GlassFeatureRow(
-                        label = "Allow Download with Cellular",
-                        subtitle = "Allow offline episode downloads over mobile data when Wi-Fi is unavailable",
-                        checked = allowCellularDownload,
-                        onCheckedChange = onToggleAllowCellularDownload
-                    )
-                    GlassFeatureRow(
-                        label = "Seed My Download on WiFi",
-                        subtitle = "Shares completed torrent pieces over Wi-Fi (using zero extra storage or mobile data) to keep rare and older anime alive and fast for everyone",
-                        checked = seedDownloadOnWifi,
-                        onCheckedChange = onToggleSeedDownloadOnWifi
-                    )
+                    if (isTv) {
+                        val tvLimitBytes = remember(context) { computeTvStreamCacheLimitBytes(context.cacheDir) }
+                        Text(
+                            text = "Streaming cache limit: ${Formatter.formatFileSize(context, tvLimitBytes)}",
+                            fontSize = 13.5.sp,
+                            color = CrunchyTeal,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Offline downloads are disabled on Android TV. Live torrents stream inside the capped temporary cache for low-storage TV devices.",
+                            fontSize = 12.sp,
+                            color = MaruTextMuted,
+                            lineHeight = 17.sp
+                        )
+                    } else {
+                        Text(
+                            text = if (offlineCount > 0) {
+                                "$offlineCount downloaded episode${if (offlineCount == 1) "" else "s"} • $offlineTotalMb MB used"
+                            } else {
+                                "0 downloaded episodes stored"
+                            },
+                            fontSize = 13.5.sp,
+                            color = CrunchyTeal,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Downloads are sealed inside Nanami Anime's private internal vault (.nanami + .nomedia) so they never clutter your phone's gallery or external video players.",
+                            fontSize = 12.sp,
+                            color = MaruTextMuted,
+                            lineHeight = 17.sp
+                        )
+                        HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
+                        GlassFeatureRow(
+                            label = "Allow Download with Cellular",
+                            subtitle = "Allow offline episode downloads over mobile data when Wi-Fi is unavailable",
+                            checked = allowCellularDownload,
+                            onCheckedChange = onToggleAllowCellularDownload
+                        )
+                        GlassFeatureRow(
+                            label = "Seed My Download on WiFi",
+                            subtitle = "Shares completed torrent pieces over Wi-Fi (using zero extra storage or mobile data) to keep rare and older anime alive and fast for everyone",
+                            checked = seedDownloadOnWifi,
+                            onCheckedChange = onToggleSeedDownloadOnWifi
+                        )
+                    }
                     HorizontalDivider(color = CrunchyBorder, thickness = 1.dp)
                     Text(
                         text = "Nanami Anime $versionName".trimEnd(),

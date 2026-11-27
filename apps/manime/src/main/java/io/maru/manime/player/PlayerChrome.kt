@@ -47,6 +47,7 @@ import io.maru.manime.MaruTextMuted
 import io.maru.manime.extensions.AniSkipInterval
 import io.maru.manime.pressableClick
 import io.maru.manime.torrent.ActiveStreamStatus
+import io.maru.manime.tv.nanamiFocusHighlight
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -55,9 +56,6 @@ internal fun PlayerHeader(
     title: String,
     episode: String,
     onBack: () -> Unit,
-    isCasting: Boolean = false,
-    hasCastRoutes: Boolean = false,
-    onCastClick: (() -> Unit)? = null,
     onClipClick: (() -> Unit)? = null,
     onLockClick: (() -> Unit)? = null,
     onPipClick: (() -> Unit)? = null,
@@ -69,7 +67,10 @@ internal fun PlayerHeader(
             .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        IconButton(onClick = onBack) {
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier.nanamiFocusHighlight(CrunchyOrange, cornerRadius = 20.dp)
+        ) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
         }
         Column(
@@ -91,7 +92,10 @@ internal fun PlayerHeader(
             )
         }
         if (onClipClick != null) {
-            IconButton(onClick = onClipClick) {
+            IconButton(
+                onClick = onClipClick,
+                modifier = Modifier.nanamiFocusHighlight(CrunchyOrange, cornerRadius = 20.dp)
+            ) {
                 Icon(
                     imageVector = Icons.Default.ContentCut,
                     contentDescription = "Save snippet to gallery",
@@ -99,21 +103,11 @@ internal fun PlayerHeader(
                 )
             }
         }
-        if (onCastClick != null) {
-            IconButton(onClick = onCastClick) {
-                Icon(
-                    imageVector = if (isCasting) Icons.Default.CastConnected else Icons.Default.Cast,
-                    contentDescription = "Cast",
-                    tint = when {
-                        isCasting -> CrunchyOrange
-                        hasCastRoutes -> Color.White
-                        else -> Color(0xCCFFFFFF)
-                    }
-                )
-            }
-        }
         if (onPipClick != null) {
-            IconButton(onClick = onPipClick) {
+            IconButton(
+                onClick = onPipClick,
+                modifier = Modifier.nanamiFocusHighlight(CrunchyOrange, cornerRadius = 20.dp)
+            ) {
                 Icon(
                     Icons.Default.PictureInPictureAlt,
                     contentDescription = "Picture in picture",
@@ -122,7 +116,10 @@ internal fun PlayerHeader(
             }
         }
         if (onLockClick != null) {
-            IconButton(onClick = onLockClick) {
+            IconButton(
+                onClick = onLockClick,
+                modifier = Modifier.nanamiFocusHighlight(CrunchyOrange, cornerRadius = 20.dp)
+            ) {
                 Icon(
                     Icons.Default.LockOpen,
                     contentDescription = "Lock controls",
@@ -131,7 +128,10 @@ internal fun PlayerHeader(
             }
         }
         if (onSettings != null) {
-            IconButton(onClick = onSettings) {
+            IconButton(
+                onClick = onSettings,
+                modifier = Modifier.nanamiFocusHighlight(CrunchyOrange, cornerRadius = 20.dp)
+            ) {
                 Icon(Icons.Default.Settings, contentDescription = "Playback settings", tint = Color.White)
             }
         }

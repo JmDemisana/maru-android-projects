@@ -1,5 +1,6 @@
 ﻿package io.maru.manime
 
+import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Bundle
 import android.webkit.CookieManager
@@ -10,6 +11,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -40,15 +42,30 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.maru.manime.auth.NanamiQrAuthDialog
+import io.maru.manime.cast.DownloadedCastMedia
+import io.maru.manime.cast.DownloadedCastRemoteDialog
+import io.maru.manime.cast.DownloadedNowCastingBar
+import io.maru.manime.cast.NanamiCastUiTheme
+import io.maru.manime.cast.rememberNanamiDownloadedCastController
+import io.maru.manime.disguise.AppDisguiseManager
 import io.maru.manime.screens.*
+import io.maru.manime.torrent.OfflineEpisodeEntry
 import io.maru.manime.torrent.TorrentStreamService
+import io.maru.manime.tv.NanamiDeviceFormFactor
+import io.maru.manime.tv.isAndroidTv
+import io.maru.manime.tv.nanamiFocusHighlight
+import io.maru.manime.tv.rememberDeviceFormFactor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import kotlin.math.abs
 
 enum class NavigationScreen(
     val title: String,
@@ -62,16 +79,45 @@ enum class NavigationScreen(
 }
 
 class MainActivity : ComponentActivity() {
+    private val authRedirects = Channel<Uri>(Channel.BUFFERED)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppDisguiseManager.syncTaskDescription(
+            activity = this,
+            defaultLabel = "Nanami Anime",
+            disguiseLabel = "Crunchyroll",
+        )
+        dispatchIncomingAuth(intent?.data)
+        addOnNewIntentListener { newIntent ->
+            dispatchIncomingAuth(newIntent.data)
+        }
+        if (!isAndroidTv(this) && !isInMultiWindowMode && resources.configuration.smallestScreenWidthDp in 1..599) {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
         enableEdgeToEdge()
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
         setContent {
             val prefs = remember { MAnimePrefs(applicationContext) }
             MaterialTheme(colorScheme = NanamiColors) {
-                AppNavigation(prefs)
+                AppNavigation(prefs = prefs, authRedirects = authRedirects)
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        AppDisguiseManager.syncTaskDescription(
+            activity = this,
+            defaultLabel = "Nanami Anime",
+            disguiseLabel = "Crunchyroll",
+        )
+    }
+
+    private fun dispatchIncomingAuth(uri: Uri?) {
+        if (uri != null && uri.scheme == "nanamianime" && uri.host == "anilist-auth") {
+            authRedirects.trySend(uri)
         }
     }
 }
@@ -120,9 +166,14 @@ private suspend fun <T> loadAniList(request: suspend () -> T): Result<T> {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppNavigation(prefs: MAnimePrefs) {
+fun AppNavigation(
+    prefs: MAnimePrefs,
+    authRedirects: Channel<Uri> = remember { Channel(Channel.BUFFERED) }
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val formFactor = rememberDeviceFormFactor()
+    val useSideRail = formFactor != NanamiDeviceFormFactor.PHONE
 
     val session by prefs.anilistSession.collectAsStateWithLifecycle(initialValue = null)
     val savedAccounts by prefs.savedAnilistAccounts.collectAsStateWithLifecycle(initialValue = emptyList())
@@ -139,6 +190,7 @@ fun AppNavigation(prefs: MAnimePrefs) {
     val preferredAudio by prefs.preferredAudio.collectAsStateWithLifecycle(initialValue = "SUB")
     val preferredQuality by prefs.preferredQuality.collectAsStateWithLifecycle(initialValue = "1080p")
     val autoSkipIntro by prefs.autoSkipIntro.collectAsStateWithLifecycle(initialValue = false)
+    val autoplayNextEpisode by prefs.autoplayNextEpisode.collectAsStateWithLifecycle(initialValue = true)
     val swipeGesturesEnabled by prefs.swipeGesturesEnabled.collectAsStateWithLifecycle(initialValue = true)
     val subtitleBlackFill by prefs.subtitleBlackFill.collectAsStateWithLifecycle(initialValue = true)
     val subtitleSize by prefs.subtitleSize.collectAsStateWithLifecycle(initialValue = "MEDIUM")
@@ -166,6 +218,8 @@ fun AppNavigation(prefs: MAnimePrefs) {
 
     var showAnilistAuthDialog by remember { mutableStateOf(false) }
     var authClearCookies by remember { mutableStateOf(false) }
+    var showQrAuthDialog by remember { mutableStateOf(false) }
+    var pendingOAuthState by remember { mutableStateOf<String?>(null) }
     var showTopAccountMenu by remember { mutableStateOf(false) }
     var isOfflinePlaybackVisible by remember { mutableStateOf(false) }
 
@@ -173,6 +227,23 @@ fun AppNavigation(prefs: MAnimePrefs) {
         !(currentRoute.screen == NavigationScreen.PROFILE && isOfflinePlaybackVisible)
 
     fun openAuthDialog(clearCookies: Boolean = false) {
+        if (!clearCookies) {
+            val stateToken = "app_${UUID.randomUUID()}"
+            pendingOAuthState = stateToken
+            val authUrl = Uri.parse("https://anilist.co/api/v2/oauth/authorize").buildUpon()
+                .appendQueryParameter("client_id", AniListClient.MASTER_CLIENT_ID)
+                .appendQueryParameter("redirect_uri", AniListClient.REDIRECT_URI)
+                .appendQueryParameter("response_type", "code")
+                .appendQueryParameter("state", stateToken)
+                .build()
+            val launchedCustomTab = runCatching {
+                CustomTabsIntent.Builder()
+                    .setShowTitle(true)
+                    .build()
+                    .launchUrl(context, authUrl)
+            }.isSuccess
+            if (launchedCustomTab) return
+        }
         authClearCookies = clearCookies
         showAnilistAuthDialog = true
     }
@@ -254,6 +325,100 @@ fun AppNavigation(prefs: MAnimePrefs) {
     }
     val visibleLists = remember(mergedLists, hideNsfwContent) {
         mergedLists.mapValues { (_, entries) -> entries.filterNsfw(hideNsfwContent) }
+    }
+    val castAnimeTargets = remember { mutableStateMapOf<String, OfflineEpisodeEntry>() }
+    val scrobbledCastKeys = remember { mutableSetOf<String>() }
+    val castLastSavedPosMs = remember { mutableMapOf<String, Long>() }
+    val latestReportProgress by rememberUpdatedState(reportProgress)
+    val latestTrackWatchedPercent by rememberUpdatedState(trackWatchedPercent)
+    val latestRememberPosition by rememberUpdatedState(rememberPosition)
+    val latestVisibleLists by rememberUpdatedState(visibleLists)
+
+    LaunchedEffect(authRedirects) {
+        for (uri in authRedirects) {
+            val returnedState = uri.getQueryParameter("state")
+            if (!returnedState.isNullOrBlank() && pendingOAuthState != null && returnedState != pendingOAuthState) {
+                continue
+            }
+            val authCode = uri.getQueryParameter("code")
+            val accessToken = uri.getQueryParameter("access_token")
+            pendingOAuthState = null
+            if (authCode.isNullOrBlank() && accessToken.isNullOrBlank()) {
+                Toast.makeText(context, "AniList sign-in was interrupted. Please try again.", Toast.LENGTH_SHORT).show()
+                continue
+            }
+            val result = loadAniList {
+                val token = if (!accessToken.isNullOrBlank()) accessToken else {
+                    AniListClient.exchangeAuthCode(authCode!!) ?: error("AniList did not return a token.")
+                }
+                val viewer = AniListClient.getViewer(token)
+                prefs.setAnilistSession(token, viewer)
+                viewer
+            }
+            val message = result.getOrNull()?.let {
+                profileRefresh++
+                "Connected as @${it.name}."
+            } ?: "Couldn't connect to AniList. Please try again."
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val castController = rememberNanamiDownloadedCastController(
+        context = context,
+        appTitle = "Nanami Anime",
+        onProgress = { castMedia, posMs, durMs ->
+            val entry = castAnimeTargets[castMedia.key] ?: return@rememberNanamiDownloadedCastController
+            val prevSaved = castLastSavedPosMs[castMedia.key] ?: 0L
+            if (latestRememberPosition && posMs > 5_000L && abs(posMs - prevSaved) >= 10_000L) {
+                castLastSavedPosMs[castMedia.key] = posMs
+                scope.launch {
+                    prefs.savePosition(entry.mediaId, entry.episodeNumber, posMs / 1000L)
+                }
+            }
+            if (durMs > 15_000L && castMedia.key !in scrobbledCastKeys) {
+                val threshold = latestTrackWatchedPercent.coerceIn(10, 100) / 100.0
+                if ((posMs.toDouble() / durMs.toDouble()) >= threshold) {
+                    scrobbledCastKeys += castMedia.key
+                    val summary = latestVisibleLists.values.asSequence().flatten()
+                        .firstOrNull { it.mediaId == entry.mediaId }
+                        ?: AnimeMedia(
+                            mediaId = entry.mediaId,
+                            title = entry.animeTitle,
+                            titleEnglish = entry.animeTitle,
+                            titleRomaji = entry.animeTitle,
+                            coverUrl = entry.coverUrl ?: entry.thumbnailUrl,
+                            bannerUrl = entry.thumbnailUrl,
+                            isAdult = entry.isAdultContent == true,
+                            hasKnownAdultRating = entry.isAdultContent != null
+                        )
+                    scope.launch(Dispatchers.IO) {
+                        val accounts = prefs.trackingAccounts.first()
+                        val recorded = LocalLibraryStore.recordEpisodeWatchedAt80Percent(
+                            context = context.applicationContext,
+                            media = summary,
+                            episodeNum = entry.episodeNumber,
+                            reportProgress = latestReportProgress && (summary.hasKnownAdultRating || accounts.nsfw == null),
+                            accounts = accounts
+                        )
+                        if (recorded) {
+                            withContext(Dispatchers.Main) { profileRefresh++ }
+                        }
+                    }
+                }
+            }
+        }
+    )
+    val castTheme = remember {
+        NanamiCastUiTheme(
+            appTitle = "Nanami Anime",
+            accentColor = CrunchyOrange,
+            accentOnColor = Color.Black,
+            surfaceColor = CrunchySurface,
+            cardColor = CrunchyCardBg,
+            borderColor = CrunchyBorder,
+            textMutedColor = MaruTextMuted,
+            activeStatusColor = CrunchyTeal
+        )
     }
     val legacyAdultRatingIds = remember(localEntries, offlineEpisodes) {
         (localEntries.values.filterNot { it.hasKnownAdultRating }.map { it.mediaId } +
@@ -402,9 +567,61 @@ fun AppNavigation(prefs: MAnimePrefs) {
         modifier = Modifier.fillMaxSize(),
         color = CrunchyBgBlack
     ) {
-        Scaffold(
-            containerColor = CrunchyBgBlack,
-            contentWindowInsets = if (showNavigationBars) ScaffoldDefaults.contentWindowInsets else WindowInsets(0, 0, 0, 0),
+        Row(modifier = Modifier.fillMaxSize()) {
+            if (useSideRail && showNavigationBars) {
+                NavigationRail(
+                    containerColor = Color(0xFF0D0E12),
+                    contentColor = Color.White,
+                    header = {
+                        Image(
+                            painter = painterResource(id = R.drawable.ic_nanami_anime_logo),
+                            contentDescription = "Nanami Anime",
+                            modifier = Modifier
+                                .padding(top = 12.dp, bottom = 8.dp)
+                                .size(38.dp)
+                        )
+                    }
+                ) {
+                    Spacer(Modifier.height(8.dp))
+                    NavigationScreen.entries.forEach { screen ->
+                        val isSelected = selectedScreen == screen
+                        NavigationRailItem(
+                            selected = isSelected,
+                            onClick = { selectedScreen = screen },
+                            modifier = Modifier.nanamiFocusHighlight(CrunchyOrange, cornerRadius = 10.dp),
+                            icon = {
+                                Icon(
+                                    imageVector = screen.icon,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(23.dp)
+                                )
+                            },
+                            label = {
+                                Text(
+                                    text = screen.title,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                                )
+                            },
+                            colors = NavigationRailItemDefaults.colors(
+                                selectedIconColor = CrunchyOrange,
+                                selectedTextColor = CrunchyOrange,
+                                indicatorColor = CrunchyOrange.copy(alpha = 0.14f),
+                                unselectedIconColor = Color(0xFFD5D7DF),
+                                unselectedTextColor = Color(0xFFD5D7DF)
+                            )
+                        )
+                    }
+                }
+                VerticalDivider(color = Color(0xFF1A1B20), thickness = 1.dp)
+            }
+
+            Scaffold(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight(),
+                containerColor = CrunchyBgBlack,
+                contentWindowInsets = if (showNavigationBars) ScaffoldDefaults.contentWindowInsets else WindowInsets(0, 0, 0, 0),
             topBar = {
                 if (showNavigationBars) {
                     TopAppBar(
@@ -553,41 +770,47 @@ fun AppNavigation(prefs: MAnimePrefs) {
             bottomBar = {
                 if (showNavigationBars) {
                     Column {
-                        HorizontalDivider(color = Color(0xFF1A1B20), thickness = 1.dp)
-                        NavigationBar(
-                            containerColor = Color(0xFF0D0E12),
-                            contentColor = Color.White,
-                            tonalElevation = 0.dp
-                        ) {
-                            NavigationScreen.values().forEach { screen ->
-                                val isSelected = selectedScreen == screen
-                                NavigationBarItem(
-                                    selected = isSelected,
-                                    onClick = {
-                                        selectedScreen = screen
-                                    },
-                                    icon = {
-                                        Icon(
-                                            imageVector = screen.icon,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(23.dp)
+                        DownloadedNowCastingBar(
+                            controller = castController,
+                            theme = castTheme
+                        )
+                        if (!useSideRail) {
+                            HorizontalDivider(color = Color(0xFF1A1B20), thickness = 1.dp)
+                            NavigationBar(
+                                containerColor = Color(0xFF0D0E12),
+                                contentColor = Color.White,
+                                tonalElevation = 0.dp
+                            ) {
+                                NavigationScreen.entries.forEach { screen ->
+                                    val isSelected = selectedScreen == screen
+                                    NavigationBarItem(
+                                        selected = isSelected,
+                                        onClick = {
+                                            selectedScreen = screen
+                                        },
+                                        icon = {
+                                            Icon(
+                                                imageVector = screen.icon,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(23.dp)
+                                            )
+                                        },
+                                        label = {
+                                            Text(
+                                                text = screen.title,
+                                                fontSize = 11.sp,
+                                                fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                                            )
+                                        },
+                                        colors = NavigationBarItemDefaults.colors(
+                                            selectedIconColor = CrunchyOrange,
+                                            selectedTextColor = CrunchyOrange,
+                                            indicatorColor = CrunchyOrange.copy(alpha = 0.14f),
+                                            unselectedIconColor = Color(0xFFD5D7DF),
+                                            unselectedTextColor = Color(0xFFD5D7DF)
                                         )
-                                    },
-                                    label = {
-                                        Text(
-                                            text = screen.title,
-                                            fontSize = 11.sp,
-                                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
-                                        )
-                                    },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = CrunchyOrange,
-                                        selectedTextColor = CrunchyOrange,
-                                        indicatorColor = CrunchyOrange.copy(alpha = 0.14f),
-                                        unselectedIconColor = Color(0xFFD5D7DF),
-                                        unselectedTextColor = Color(0xFFD5D7DF)
                                     )
-                                )
+                                }
                             }
                         }
                     }
@@ -689,7 +912,41 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     onLoginClick = { openAuthDialog(clearCookies = false) },
                                     onAnimeClick = ::openAnime,
                                     onMediaUpdated = { profileRefresh++ },
-                                    onPlaybackVisibilityChange = { isOfflinePlaybackVisible = it }
+                                    onPlaybackVisibilityChange = { isOfflinePlaybackVisible = it },
+                                    onCastOffline = { entry ->
+                                        val videoFile = File(entry.vaultFilePath)
+                                        if (!videoFile.isFile) {
+                                            Toast.makeText(
+                                                context,
+                                                "Saved file missing; remove or re-download this episode.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        } else {
+                                            val castKey = "anime:${entry.mediaId}:e${entry.episodeNumber}"
+                                            castAnimeTargets[castKey] = entry
+                                            scope.launch {
+                                                val startMs = if (rememberPosition) {
+                                                    val savedSec = prefs.getPositionFlow(entry.mediaId, entry.episodeNumber).first()
+                                                    (savedSec * 1000L).takeIf { it >= 10_000L } ?: 0L
+                                                } else 0L
+                                                castController.requestCast(
+                                                    DownloadedCastMedia(
+                                                        key = castKey,
+                                                        title = "E${entry.episodeNumber} · ${entry.episodeTitle}",
+                                                        seriesTitle = entry.animeTitle,
+                                                        subtitle = "${entry.quality} · ${entry.audioType}",
+                                                        seasonNumber = null,
+                                                        episodeNumber = entry.episodeNumber,
+                                                        artworkUrl = entry.thumbnailUrl ?: entry.coverUrl,
+                                                        file = videoFile,
+                                                        startPositionMs = startMs,
+                                                        isMovie = false
+                                                    )
+                                                )
+                                            }
+                                        }
+                                    },
+                                    activeCastKey = castController.activeMedia?.key
                                 )
                                 NavigationScreen.SEARCH -> SearchScreen(
                                     anilistToken = anilistToken,
@@ -742,6 +999,8 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     onSelectPlaybackSpeed = { scope.launch { prefs.setPlaybackSpeed(it) } },
                                     autoSkipIntro = autoSkipIntro,
                                     onToggleAutoSkipIntro = { scope.launch { prefs.setAutoSkipIntro(it) } },
+                                    autoplayNextEpisode = autoplayNextEpisode,
+                                    onToggleAutoplayNextEpisode = { scope.launch { prefs.setAutoplayNextEpisode(it) } },
                                     swipeGesturesEnabled = swipeGesturesEnabled,
                                     onToggleSwipeGestures = { scope.launch { prefs.setSwipeGesturesEnabled(it) } },
                                     persistentDurationLine = persistentDurationLine,
@@ -757,6 +1016,7 @@ fun AppNavigation(prefs: MAnimePrefs) {
                                     rememberPosition = rememberPosition,
                                     onToggleRememberPosition = { scope.launch { prefs.setRememberPosition(it) } },
                                     onLoginClick = { openAuthDialog(clearCookies = false) },
+                                    onOpenQrAuth = { showQrAuthDialog = true },
                                     onAddAccountClick = { openAuthDialog(clearCookies = true) },
                                     onSwitchAccount = { acc ->
                                         scope.launch {
@@ -785,6 +1045,43 @@ fun AppNavigation(prefs: MAnimePrefs) {
                     }
                 }
             }
+            }
+        }
+
+        if (castController.showRemoteDialog) {
+            DownloadedCastRemoteDialog(
+                controller = castController,
+                theme = castTheme,
+                onDismiss = { castController.dismissRemote() }
+            )
+        }
+
+        if (showQrAuthDialog) {
+            NanamiQrAuthDialog(
+                providerId = "anilist",
+                providerLabel = "AniList",
+                accentColor = CrunchyOrange,
+                accentOnColor = Color.Black,
+                surfaceColor = CrunchySurface,
+                borderColor = CrunchyBorder,
+                mutedTextColor = MaruTextMuted,
+                onTokenReceived = { token ->
+                    showQrAuthDialog = false
+                    scope.launch {
+                        val result = loadAniList {
+                            val viewer = AniListClient.getViewer(token)
+                            prefs.setAnilistSession(token, viewer)
+                            viewer
+                        }
+                        val message = result.getOrNull()?.let {
+                            profileRefresh++
+                            "Connected as @${it.name}."
+                        } ?: "Couldn't verify AniList account. Please try again."
+                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                    }
+                },
+                onDismiss = { showQrAuthDialog = false }
+            )
         }
 
         if (showAnilistAuthDialog) {

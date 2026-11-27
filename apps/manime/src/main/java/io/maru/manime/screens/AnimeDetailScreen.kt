@@ -60,6 +60,9 @@ import io.maru.manime.player.PlayerScreen
 import io.maru.manime.torrent.OfflineEpisodeEntry
 import io.maru.manime.torrent.TorrentStreamService
 import io.maru.manime.torrent.selectDownloadCandidates
+import io.maru.manime.tv.NanamiDeviceFormFactor
+import io.maru.manime.tv.nanamiFocusHighlight
+import io.maru.manime.tv.rememberDeviceFormFactor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -84,6 +87,8 @@ fun AnimeDetailScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val formFactor = rememberDeviceFormFactor()
+    val isTv = formFactor == NanamiDeviceFormFactor.TV
 
     val localEntries by LocalLibraryStore.localEntries.collectAsState()
     val pendingQueue by LocalLibraryStore.pendingQueue.collectAsState()
@@ -878,11 +883,12 @@ fun AnimeDetailScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Button(
-                            onClick = { activePlayingEp = targetEpMeta },
+                            onClick = { if (activePlayingEp == null) activePlayingEp = targetEpMeta },
                             enabled = targetEpMeta != null,
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp),
+                                .height(48.dp)
+                                .nanamiFocusHighlight(Color.White, cornerRadius = 4.dp),
                             shape = RoundedCornerShape(4.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = CrunchyOrange,
@@ -910,8 +916,8 @@ fun AnimeDetailScreen(
                             )
                         }
 
-                        // Standalone 1-Tap Offline Download button
-                        if (isSingleStandalone && standaloneEp != null) {
+                        // Standalone 1-Tap Offline Download button (disabled on Android TV)
+                        if (!isTv && isSingleStandalone && standaloneEp != null) {
                             Surface(
                                 onClick = {
                                     if (!standalonePending) {
@@ -958,7 +964,9 @@ fun AnimeDetailScreen(
                             shape = RoundedCornerShape(4.dp),
                             color = if (currentMedia.listStatus != null) CrunchyOrange.copy(alpha = 0.16f) else CrunchyCardBg,
                             border = BorderStroke(1.dp, if (currentMedia.listStatus != null) CrunchyOrange else CrunchyBorder),
-                            modifier = Modifier.height(48.dp)
+                            modifier = Modifier
+                                .height(48.dp)
+                                .nanamiFocusHighlight(CrunchyOrange, cornerRadius = 4.dp)
                         ) {
                             Row(
                                 modifier = Modifier.padding(horizontal = 14.dp),
@@ -981,7 +989,7 @@ fun AnimeDetailScreen(
                         }
                     }
 
-                    if (isSingleStandalone && standaloneOfflineEntry != null && !standaloneOfflineEntry.isCompleted) {
+                    if (!isTv && isSingleStandalone && standaloneOfflineEntry != null && !standaloneOfflineEntry.isCompleted) {
                         val dlText = standaloneOfflineEntry.failure
                             ?: standaloneOfflineEntry.statusText
                             ?: "Downloading ${standaloneOfflineEntry.progressPercent}%"
@@ -993,8 +1001,8 @@ fun AnimeDetailScreen(
                         )
                     }
 
-                    // Flexible Download Series option visible across Episodes, Overview, and Cast tabs
-                    if (!isSingleStandalone && completeEpisodes.isNotEmpty()) {
+                    // Flexible Download Series option visible across Episodes, Overview, and Cast tabs (disabled on TV)
+                    if (!isTv && !isSingleStandalone && completeEpisodes.isNotEmpty()) {
                         val allUnwatched = completeEpisodes.filter { it.episodeNumber > currentMedia.progress }
                         val downloadableUnwatched = allUnwatched.filter { ep ->
                             val existing = offlineVaultList.firstOrNull {
@@ -1306,7 +1314,8 @@ fun AnimeDetailScreen(
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { activePlayingEp = streamEp }
+                                    .nanamiFocusHighlight(CrunchyOrange, cornerRadius = 4.dp)
+                                    .clickable { if (activePlayingEp == null) activePlayingEp = streamEp }
                             ) {
                                 Row(
                                     modifier = Modifier
@@ -1393,7 +1402,7 @@ fun AnimeDetailScreen(
                                             )
                                         }
 
-                                        if (downloadStatus != null) {
+                                        if (!isTv && downloadStatus != null) {
                                             Text(
                                                 text = downloadStatus,
                                                 fontSize = 10.5.sp,
@@ -1407,25 +1416,27 @@ fun AnimeDetailScreen(
                                         }
                                     }
 
-                                    IconButton(
-                                        enabled = !offlineActionPending,
-                                        onClick = {
-                                            onOfflineAction(streamEp, displayTitle, offlineEntry, if (hasAnyDub) selectedAudioMode else "SUB")
-                                        }
-                                    ) {
-                                        when {
-                                            offlineActionPending -> CircularProgressIndicator(
-                                                color = CrunchyOrange,
-                                                strokeWidth = 2.dp,
-                                                modifier = Modifier.size(20.dp)
-                                            )
-                                            offlineEntry?.isCompleted == true ->
-                                                Icon(Icons.Default.DownloadDone, contentDescription = "Remove download", tint = CrunchyTeal)
-                                            offlineEntry?.failure != null ->
-                                                Icon(Icons.Default.Refresh, contentDescription = "Retry download", tint = CrunchyOrange)
-                                            offlineEntry != null ->
-                                                Icon(Icons.Default.Close, contentDescription = "Cancel download", tint = CrunchyOrange)
-                                            else -> Icon(Icons.Default.Download, contentDescription = "Download", tint = MaruTextMuted)
+                                    if (!isTv) {
+                                        IconButton(
+                                            enabled = !offlineActionPending,
+                                            onClick = {
+                                                onOfflineAction(streamEp, displayTitle, offlineEntry, if (hasAnyDub) selectedAudioMode else "SUB")
+                                            }
+                                        ) {
+                                            when {
+                                                offlineActionPending -> CircularProgressIndicator(
+                                                    color = CrunchyOrange,
+                                                    strokeWidth = 2.dp,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                                offlineEntry?.isCompleted == true ->
+                                                    Icon(Icons.Default.DownloadDone, contentDescription = "Remove download", tint = CrunchyTeal)
+                                                offlineEntry?.failure != null ->
+                                                    Icon(Icons.Default.Refresh, contentDescription = "Retry download", tint = CrunchyOrange)
+                                                offlineEntry != null ->
+                                                    Icon(Icons.Default.Close, contentDescription = "Cancel download", tint = CrunchyOrange)
+                                                else -> Icon(Icons.Default.Download, contentDescription = "Download", tint = MaruTextMuted)
+                                            }
                                         }
                                     }
                                 }
@@ -2055,7 +2066,7 @@ fun AnimeDetailScreen(
                                     }
                                 }
                             } else LazyVerticalGrid(
-                                columns = GridCells.Adaptive(140.dp),
+                                columns = GridCells.Adaptive(if (formFactor == NanamiDeviceFormFactor.PHONE) 140.dp else 160.dp),
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .padding(horizontal = 16.dp),
@@ -2079,7 +2090,7 @@ fun AnimeDetailScreen(
             }
         }
 
-        if (showSeriesDownloadDialog) {
+        if (!isTv && showSeriesDownloadDialog) {
             val allUnwatched = completeEpisodes.filter { it.episodeNumber > currentMedia.progress }
             val downloadableUnwatched = allUnwatched.filter { ep ->
                 val existing = offlineVaultList.firstOrNull {

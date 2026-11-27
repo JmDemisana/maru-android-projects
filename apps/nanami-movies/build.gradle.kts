@@ -14,7 +14,13 @@ val syncStreamingSources by tasks.registering(Sync::class) {
             "io/maru/manime/extensions/StremioAddonClient.kt",
             "io/maru/manime/player/SnippetExporter.kt",
             "io/maru/manime/player/SubtitleBurnIn.kt",
-            "io/maru/manime/torrent/StreamSafety.kt"
+            "io/maru/manime/torrent/StreamSafety.kt",
+            "io/maru/manime/tv/AdaptiveDevice.kt",
+            "io/maru/manime/auth/NanamiTvQrAuth.kt",
+            "io/maru/manime/disguise/AppDisguiseManager.kt",
+            "io/maru/manime/cast/NanamiCastKeepaliveService.kt",
+            "io/maru/manime/cast/NanamiCastSubtitleHelper.kt",
+            "io/maru/manime/cast/NanamiDownloadedCastController.kt"
         )
     }
     into(streamingSourceDir)
@@ -83,6 +89,7 @@ dependencies {
     implementation("androidx.media3:media3-effect:1.4.1")
     implementation("androidx.mediarouter:mediarouter:1.7.0")
     implementation("com.google.android.gms:play-services-cast-framework:21.5.0")
+    implementation("com.google.zxing:core:3.5.3")
 
     val torrentVersion = "2.1.0-38"
     implementation("org.libtorrent4j:libtorrent4j:$torrentVersion")

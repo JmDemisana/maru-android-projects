@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import io.maru.manime.tv.nanamiFocusHighlight
 
 // Authentic Crunchyroll OLED Pitch Black & Vibrant Orange Palette
 val CrunchyOrange = Color(0xFFF47521)
@@ -88,6 +89,11 @@ fun Modifier.pressableClick(
         label = "press_scale"
     )
     this
+        .nanamiFocusHighlight(
+            accentColor = CrunchyOrange,
+            cornerRadius = 6.dp,
+            focusedScale = 1.03f
+        )
         .graphicsLayer {
             scaleX = scale
             scaleY = scale
@@ -232,6 +238,7 @@ fun GlassFeatureRow(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
+            .nanamiFocusHighlight(CrunchyOrange, cornerRadius = 6.dp, focusedScale = 1.015f)
             .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
             .padding(vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),

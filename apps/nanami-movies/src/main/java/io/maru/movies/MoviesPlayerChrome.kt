@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import io.maru.manime.tv.nanamiFocusHighlight
 import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.abs
@@ -81,7 +82,7 @@ internal fun MoviePlayerChrome(
     onBack: () -> Unit,
     onSettings: () -> Unit,
     onSources: () -> Unit,
-    onLock: () -> Unit,
+    onLock: (() -> Unit)?,
     onPip: (() -> Unit)?,
     onTogglePlayback: () -> Unit,
     onSeek: (Long) -> Unit,
@@ -345,14 +346,25 @@ internal fun MoviePlayerChrome(
 
                 if (showButtons) {
                     if (onPip != null) {
-                        IconButton(onClick = onPip) {
+                        IconButton(
+                            onClick = onPip,
+                            modifier = Modifier.nanamiFocusHighlight(NetflixRed, cornerRadius = 20.dp),
+                        ) {
                             Icon(Icons.Default.PictureInPictureAlt, contentDescription = "Picture in picture", tint = Color.White)
                         }
                     }
-                    IconButton(onClick = onLock) {
-                        Icon(Icons.Default.LockOpen, contentDescription = "Lock controls", tint = Color.White)
+                    if (onLock != null) {
+                        IconButton(
+                            onClick = onLock,
+                            modifier = Modifier.nanamiFocusHighlight(NetflixRed, cornerRadius = 20.dp),
+                        ) {
+                            Icon(Icons.Default.LockOpen, contentDescription = "Lock controls", tint = Color.White)
+                        }
                     }
-                    IconButton(onClick = onSettings) {
+                    IconButton(
+                        onClick = onSettings,
+                        modifier = Modifier.nanamiFocusHighlight(NetflixRed, cornerRadius = 20.dp),
+                    ) {
                         Icon(Icons.Default.Settings, contentDescription = "Playback settings", tint = Color.White)
                     }
                 }
@@ -370,7 +382,7 @@ internal fun MoviePlayerChrome(
 
             // Screen Lock Shield Button (auto-hides with controls so video stays unobstructed, tap anywhere to reveal!)
             AnimatedVisibility(
-                visible = !hideChrome && locked && controls,
+                visible = !hideChrome && locked && controls && onLock != null,
                 enter = fadeIn(tween(150)) + scaleIn(tween(150)),
                 exit = fadeOut(tween(150)),
                 modifier = Modifier
@@ -379,7 +391,7 @@ internal fun MoviePlayerChrome(
                     .padding(16.dp),
             ) {
                 Surface(
-                    onClick = onLock,
+                    onClick = { onLock?.invoke() },
                     shape = CircleShape,
                     color = Color(0xE014151A),
                     border = BorderStroke(1.dp, NetflixRed),
@@ -566,6 +578,7 @@ private fun MovieTransportButton(
         contentAlignment = Alignment.Center,
         modifier = Modifier
             .size(buttonSize)
+            .nanamiFocusHighlight(NetflixRed, cornerRadius = buttonSize / 2)
             .background(
                 color = if (primary) NetflixRed else Color(0x8A0D0E12),
                 shape = CircleShape,

@@ -13,17 +13,20 @@ import android.net.Uri
 import android.provider.Settings
 import android.util.Log
 import android.util.Rational
+import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -62,6 +65,8 @@ import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 import io.maru.manime.extensions.StremioStreamResult
 import io.maru.manime.extensions.SubtitleTrack
+import io.maru.manime.tv.NanamiDeviceFormFactor
+import io.maru.manime.tv.rememberDeviceFormFactor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -119,7 +124,8 @@ internal fun MoviesPlayback(
     onPreviousEpisode: (() -> Unit)? = null,
 ) {
     val activity = LocalContext.current.findMoviesActivity()
-    MovieLandscapeWindow(activity)
+    val isTv = rememberDeviceFormFactor() == NanamiDeviceFormFactor.TV
+    MovieLandscapeWindow(activity, isTv)
     MoviePlaybackSession(
         title = title,
         episode = episode,
@@ -128,6 +134,7 @@ internal fun MoviesPlayback(
         onBack = onBack,
         offlineFile = offlineFile,
         preferredQuality = preferredQuality,
+        isTv = isTv,
         onNextEpisode = onNextEpisode,
         onPreviousEpisode = onPreviousEpisode,
     )
@@ -143,6 +150,7 @@ private fun MoviePlaybackSession(
     onBack: () -> Unit,
     offlineFile: File?,
     preferredQuality: String,
+    isTv: Boolean,
     onNextEpisode: (() -> Unit)?,
     onPreviousEpisode: (() -> Unit)?,
 ) {
@@ -202,8 +210,6 @@ private fun MoviePlaybackSession(
     var ended by remember(streamId) { mutableStateOf(false) }
     var nextCountdown by remember(streamId) { mutableStateOf<Int?>(null) }
     var playIntent by remember(streamId) { mutableStateOf(true) }
-    var remotePlayback by remember { mutableStateOf(false) }
-    var remoteTransport by remember { mutableStateOf<MovieRemoteTransport?>(null) }
     var wasPlayingBeforeClip by remember(streamId) { mutableStateOf(false) }
     var showSettingsSheet by remember(streamId) { mutableStateOf(false) }
     var showVideoSourcesFirst by remember(streamId) { mutableStateOf(false) }
@@ -245,7 +251,6 @@ private fun MoviePlaybackSession(
     }
 
     fun captureProgress() {
-        if (remotePlayback) return
         val stateReady = hasRenderedFrame || player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_ENDED
         val duration = player.duration
         if (stateReady && duration > 0 && (player.currentPosition > 0 || resumePosition == 0L)) {
@@ -276,11 +281,7 @@ private fun MoviePlaybackSession(
     fun seekTo(position: Long) {
         if (!ui.seekable) return
         val value = position.coerceIn(0, ui.duration)
-        if (remotePlayback) {
-            remoteTransport?.seek?.invoke(value) ?: return
-        } else {
-            player.seekTo(value)
-        }
+        player.seekTo(value)
         resumePosition = value
         ui = ui.copy(position = value)
         ended = false
@@ -310,8 +311,8 @@ private fun MoviePlaybackSession(
     }
 
     // 4-Second Opening Content Advisory when first frame renders (identical to Nanami Anime!)
-    LaunchedEffect(hasRenderedFrame, remotePlayback) {
-        if ((hasRenderedFrame || remotePlayback) && !advisoryShownForStream) {
+    LaunchedEffect(hasRenderedFrame) {
+        if (hasRenderedFrame && !advisoryShownForStream) {
             advisoryShownForStream = true
             showOpeningAdvisory = true
             delay(4_200L)
@@ -319,9 +320,9 @@ private fun MoviePlaybackSession(
         }
     }
 
-    LaunchedEffect(isBufferingMidPlay, hasRenderedFrame, remotePlayback) {
+    LaunchedEffect(isBufferingMidPlay, hasRenderedFrame) {
         showRebuffering = false
-        if (isBufferingMidPlay && hasRenderedFrame && !remotePlayback) {
+        if (isBufferingMidPlay && hasRenderedFrame) {
             delay(250L)
             showRebuffering = true
         }
@@ -330,6 +331,7 @@ private fun MoviePlaybackSession(
     BackHandler(!inPip) {
         when {
             showSettingsSheet -> showSettingsSheet = false
+            isTv && controls -> controls = false
             locked -> {
                 locked = false
                 resetControls()
@@ -429,7 +431,7 @@ private fun MoviePlaybackSession(
         if (!useOffline && segmentOptions.isEmpty()) segmentOptions = findMovieSegments(title, episode)
     }
 
-    val activeSegment = if (ui.seekable && !remotePlayback) segmentOptions.firstOrNull { it.at(ui.position, ui.duration) } else null
+    val activeSegment = if (ui.seekable) segmentOptions.firstOrNull { it.at(ui.position, ui.duration) } else null
     LaunchedEffect(activeSegment, options.autoSkipIntro, ui.playing) {
         if (activeSegment?.type == MovieSegmentType.INTRO && options.autoSkipIntro && ui.playing && !autoSkipped) {
             autoSkipped = true
@@ -463,7 +465,7 @@ private fun MoviePlaybackSession(
         status = "Connecting to $unitLabel stream…"
         prebufferPercent = 5
         try {
-            withMoviesTorrent(context.cacheDir, source, episode, onBufferProgress = { buf ->
+            withMoviesTorrent(context.cacheDir, source, episode, enforceTvBudget = isTv, onBufferProgress = { buf ->
                 val speedLabel = if (buf.speedKbps >= 1024) {
                     String.format(Locale.US, "%.1f MB/s", buf.speedKbps / 1024.0)
                 } else {
@@ -528,7 +530,7 @@ private fun MoviePlaybackSession(
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                 .build()
         }
-        player.playWhenReady = playIntent && !remotePlayback && (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) || inPip)
+        player.playWhenReady = playIntent && (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) || inPip)
         player.prepare()
     }
 
@@ -558,18 +560,16 @@ private fun MoviePlaybackSession(
                     ensureTextOverride = null
                 }
             }
-            if (!remotePlayback) {
-                ui = MoviePlaybackUi(
-                    position = if (duration > 0) player.currentPosition.coerceIn(0, duration) else resumePosition,
-                    duration = duration,
-                    buffered = player.bufferedPosition.coerceAtLeast(0),
-                    playing = player.isPlaying,
-                    ready = hasRenderedFrame || player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_ENDED,
-                    seekable = player.isCurrentMediaItemSeekable && duration > 0,
-                    tracks = tracks,
-                )
-                if (++ticks % 8 == 0 && player.isPlaying) captureProgress()
-            }
+            ui = MoviePlaybackUi(
+                position = if (duration > 0) player.currentPosition.coerceIn(0, duration) else resumePosition,
+                duration = duration,
+                buffered = player.bufferedPosition.coerceAtLeast(0),
+                playing = player.isPlaying,
+                ready = hasRenderedFrame || player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_ENDED,
+                seekable = player.isCurrentMediaItemSeekable && duration > 0,
+                tracks = tracks,
+            )
+            if (++ticks % 8 == 0 && player.isPlaying) captureProgress()
             delay(200)
         }
     }
@@ -602,8 +602,7 @@ private fun MoviePlaybackSession(
         problem != null -> null
         failure != null && canAutoFallback -> "Trying another source…"
         !useOffline && sources == null && selected == null -> "Finding fastest video source…"
-        !hasRenderedFrame && !remotePlayback && !ui.ready -> status
-        !hasRenderedFrame && !remotePlayback -> status
+        !hasRenderedFrame -> status
         else -> null
     }
 
@@ -629,7 +628,70 @@ private fun MoviePlaybackSession(
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    fun togglePlayPause() {
+        playIntent = !player.playWhenReady || ended
+        if (ended) seekTo(0)
+        player.playWhenReady = playIntent
+        resetControls()
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .focusable()
+            .onPreviewKeyEvent { keyEvent ->
+                val native = keyEvent.nativeKeyEvent
+                if (native.action != KeyEvent.ACTION_DOWN) return@onPreviewKeyEvent false
+                when (native.keyCode) {
+                    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_SPACE -> {
+                        togglePlayPause()
+                        true
+                    }
+                    KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                        if (!player.playWhenReady || ended) togglePlayPause()
+                        true
+                    }
+                    KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                        if (player.playWhenReady) togglePlayPause()
+                        true
+                    }
+                    KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                        seekTo(ui.position + 10_000L)
+                        true
+                    }
+                    KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                        seekTo(ui.position - 10_000L)
+                        true
+                    }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        if (isTv && !controls && !showSettingsSheet && ui.seekable) {
+                            seekTo(ui.position - 10_000L)
+                            true
+                        } else false
+                    }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        if (isTv && !controls && !showSettingsSheet && ui.seekable) {
+                            seekTo(ui.position + 10_000L)
+                            true
+                        } else false
+                    }
+                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        if (isTv && !controls && !showSettingsSheet) {
+                            resetControls()
+                            true
+                        } else false
+                    }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                        if (isTv && !controls && !showSettingsSheet) {
+                            togglePlayPause()
+                            true
+                        } else false
+                    }
+                    else -> false
+                }
+            },
+    ) {
         // Bottom-most pointer shield so NO touch event inside MoviesPlayback can ever leak to screens behind it!
         Box(
             Modifier
@@ -707,24 +769,15 @@ private fun MoviePlaybackSession(
                 showVideoSourcesFirst = true
                 showSettingsSheet = true
             },
-            onLock = { locked = !locked; resetControls() },
-            onPip = if (supportsPip && ui.ready && activity != null && !remotePlayback) ({
+            onLock = if (isTv) null else ({ locked = !locked; resetControls() }),
+            onPip = if (!isTv && supportsPip && ui.ready && activity != null) ({
                 runCatching {
                     activity.enterPictureInPictureMode(
                         PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build()
                     )
                 }
             }) else null,
-            onTogglePlayback = {
-                if (remotePlayback) {
-                    remoteTransport?.toggle?.invoke()
-                } else {
-                    playIntent = !player.playWhenReady || ended
-                    if (ended) seekTo(0)
-                    player.playWhenReady = playIntent
-                }
-                resetControls()
-            },
+            onTogglePlayback = { togglePlayPause() },
             onSeek = ::seekTo,
             onPreviousEpisode = onPreviousEpisode?.let { { captureProgress(); it() } },
             onNextEpisode = onNextEpisode?.let { { captureProgress(); it() } },
@@ -768,33 +821,17 @@ private fun MoviePlaybackSession(
                     title = title,
                     episode = episode,
                     activeSource = selected.takeUnless { useOffline },
-                    offlineFile = offlineFile.takeIf { useOffline },
                     mediaUri = activeMedia?.uri,
                     dataSource = activeMedia?.factory,
                     position = ui.position,
                     duration = ui.duration,
-                    onRemotePlayback = { remotePlayback = true; player.pause() },
                     visible = visible,
-                    onRemoteEnded = { position ->
-                        remotePlayback = false
-                        remoteTransport = null
-                        if (position > 0 && player.isCurrentMediaItemSeekable) player.seekTo(position)
-                        if (playIntent) player.play()
-                    },
-                    onRemoteProgress = { position, duration, playing ->
-                        if (duration > 0) {
-                            resumePosition = position.coerceIn(0, duration)
-                            ui = ui.copy(position = resumePosition, duration = duration, playing = playing, ready = true, seekable = true)
-                            progressCallback(resumePosition, duration)
-                        }
-                    },
-                    onRemoteTransport = { remoteTransport = it },
                     onClipVisibilityChanged = { clipOpen ->
                         if (clipOpen) {
                             wasPlayingBeforeClip = player.playWhenReady
                             player.pause()
                         } else {
-                            if (wasPlayingBeforeClip && playIntent && !remotePlayback && !ended &&
+                            if (wasPlayingBeforeClip && playIntent && !ended &&
                                 lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
                             ) player.play()
                             wasPlayingBeforeClip = false
@@ -839,9 +876,9 @@ private fun MoviePlaybackSession(
 }
 
 @Composable
-private fun MovieLandscapeWindow(activity: Activity?) {
+private fun MovieLandscapeWindow(activity: Activity?, isTv: Boolean) {
     if (activity == null) return
-    DisposableEffect(activity) {
+    DisposableEffect(activity, isTv) {
         val window = activity.window
         val decor = window.decorView
         val controller = WindowCompat.getInsetsController(window, decor)
@@ -852,12 +889,12 @@ private fun MovieLandscapeWindow(activity: Activity?) {
         val originalBrightness = window.attributes.screenBrightness
         val originalBehavior = controller.systemBarsBehavior
         val keepAwake = window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0
-        if (!activity.isInMultiWindowMode) activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        if (!isTv && !activity.isInMultiWindowMode) activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         controller.hide(WindowInsetsCompat.Type.systemBars())
         onDispose {
-            activity.requestedOrientation = originalOrientation
+            if (!isTv) activity.requestedOrientation = originalOrientation
             window.attributes = window.attributes.apply { screenBrightness = originalBrightness }
             if (!keepAwake) window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             controller.systemBarsBehavior = originalBehavior

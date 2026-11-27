@@ -12,6 +12,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.util.Rational
+import android.view.KeyEvent
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -25,6 +26,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -45,6 +48,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -96,6 +100,8 @@ import io.maru.manime.extensions.sourceFamilyLabel
 import io.maru.manime.torrent.STREAM_READ_TIMEOUT_MS
 import io.maru.manime.torrent.TorrentStreamService
 import io.maru.manime.torrent.canPlayWithRating
+import io.maru.manime.tv.NanamiDeviceFormFactor
+import io.maru.manime.tv.rememberDeviceFormFactor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -127,17 +133,19 @@ fun PlayerScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    val castController = remember(context) { NanamiCastController(context) }
+    val isTv = rememberDeviceFormFactor() == NanamiDeviceFormFactor.TV
 
-    // Keep landscape orientation, immersive system bars, screen brightness, and Chromecast session
+    // Keep landscape orientation on phones/tablets and immersive system bars
     // mounted across episode transitions so Next/Previous never flashes portrait or corrupts orientation!
-    DisposableEffect(Unit) {
+    DisposableEffect(isTv) {
         val activity = context as? Activity
         val originalOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         val originalBrightness = activity?.window?.attributes?.screenBrightness
             ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
 
-        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        if (!isTv && activity?.isInMultiWindowMode != true) {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (activity != null) {
             WindowCompat.getInsetsController(activity.window, activity.window.decorView).apply {
@@ -145,16 +153,16 @@ fun PlayerScreen(
                 systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             }
         }
-        castController.startDiscovery()
 
         onDispose {
-            castController.stopDiscovery()
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             if (activity != null) {
                 val lp = activity.window.attributes
                 lp.screenBrightness = originalBrightness
                 activity.window.attributes = lp
-                activity.requestedOrientation = originalOrientation
+                if (!isTv) {
+                    activity.requestedOrientation = originalOrientation
+                }
                 WindowCompat.getInsetsController(activity.window, activity.window.decorView)
                     .show(WindowInsetsCompat.Type.systemBars())
             }
@@ -169,7 +177,7 @@ fun PlayerScreen(
             initialAudioMode = initialAudioMode,
             hasEnglishDub = hasEnglishDub,
             prefs = prefs,
-            castController = castController,
+            isTv = isTv,
             onEpisodeWatched = onEpisodeWatched,
             onSwitchEpisode = onSwitchEpisode,
             hasPrevEpisode = hasPrevEpisode,
@@ -190,7 +198,7 @@ private fun EpisodePlayerScreen(
     initialAudioMode: String,
     hasEnglishDub: Boolean,
     prefs: MAnimePrefs,
-    castController: NanamiCastController,
+    isTv: Boolean,
     onEpisodeWatched: (Int) -> Unit,
     onSwitchEpisode: (Int) -> Unit,
     hasPrevEpisode: Boolean,
@@ -240,7 +248,6 @@ private fun EpisodePlayerScreen(
     var selectExternalTrackOnLoad by remember { mutableStateOf(false) }
 
     val serviceStatus = TorrentStreamService.streamStatus.collectAsState()
-    val offlineCastUrl by TorrentStreamService.offlineCastUrl.collectAsState()
     val torrentConnection by remember {
         derivedStateOf {
             val status = serviceStatus.value
@@ -274,7 +281,6 @@ private fun EpisodePlayerScreen(
 
     var showFullSettingsPage by remember { mutableStateOf(false) }
     var showVideoSourcesFirst by remember { mutableStateOf(false) }
-    var showCastDialog by remember { mutableStateOf(false) }
 
     // Gallery MP4 snippet clipper state
     var showSnippetEditor by remember { mutableStateOf(false) }
@@ -309,6 +315,7 @@ private fun EpisodePlayerScreen(
     val rememberPosition by prefs.rememberPosition.collectAsState(initial = true)
     val savedPlaybackSpeed by prefs.playbackSpeed.collectAsState(initial = 1.0f)
     val autoSkipIntro by prefs.autoSkipIntro.collectAsState(initial = false)
+    val autoplayNextEpisode by prefs.autoplayNextEpisode.collectAsState(initial = true)
     val swipeGesturesEnabled by prefs.swipeGesturesEnabled.collectAsState(initial = true)
     val subtitleBlackFill by prefs.subtitleBlackFill.collectAsState(initial = true)
     val subtitleSize by prefs.subtitleSize.collectAsState(initial = "MEDIUM")
@@ -327,6 +334,7 @@ private fun EpisodePlayerScreen(
     val latestTrackWatchedPercent by rememberUpdatedState(trackWatchedPercent)
     val latestMedia by rememberUpdatedState(media)
     val latestSwipeEnabled by rememberUpdatedState(swipeGesturesEnabled)
+    val latestAutoplayNext by rememberUpdatedState(autoplayNextEpisode)
 
     val persistenceScope = remember(context) {
         (context as? ComponentActivity)?.lifecycleScope
@@ -390,12 +398,6 @@ private fun EpisodePlayerScreen(
     }
 
     fun refreshSeekabilityAndDuration() {
-        if (castController.isConnected) {
-            val castDur = castController.durationMs() ?: 0L
-            if (castDur > 0L) totalDuration.longValue = castDur
-            isSeekable = castDur > 0L
-            return
-        }
         val rawDur = exoPlayer.duration
         val safeDur = if (rawDur == C.TIME_UNSET || rawDur < 0L) 0L else rawDur
         if (safeDur > 0L) totalDuration.longValue = safeDur
@@ -456,50 +458,7 @@ private fun EpisodePlayerScreen(
         exoPlayer.setMediaSource(source, startMs)
         exoPlayer.playbackParameters = PlaybackParameters(playbackSpeed)
         exoPlayer.prepare()
-        exoPlayer.playWhenReady = if (castController.isConnected) false else playAfterSwitch
-    }
-
-    // Automatically push media to Chromecast whenever Cast connects or stream URL changes
-    val isCasting = castController.isConnected
-    LaunchedEffect(isCasting, currentLoadedUri, offlineCastUrl, selectedOpenSub) {
-        val uri = currentLoadedUri ?: return@LaunchedEffect
-        if (!isCasting) return@LaunchedEffect
-        exoPlayer.pause()
-        val castUrl = castController.resolveCastableUrl(uri, offlineCastUrl) ?: return@LaunchedEffect
-        val startPos = currentPosition.longValue.takeIf { it > 0L }
-            ?: exoPlayer.currentPosition.coerceAtLeast(0L)
-        val subUrl = selectedOpenSub?.url
-            ?: sourceSubtitles.firstOrNull { it.language.startsWith("en", true) }?.url
-        val loaded = castController.loadMediaIfNeeded(
-            castUrl = castUrl,
-            mimeType = currentLoadedMime,
-            animeTitle = media.title,
-            episodeNum = episodeNum,
-            episodeTitle = episodeTitle,
-            coverUrl = media.coverUrl,
-            subtitleUrl = subUrl,
-            startPositionMs = startPos
-        )
-        if (loaded) {
-            hasRenderedFrame = true
-            isPlayerBuffering = false
-            showControls = true
-        }
-    }
-
-    // When disconnecting from Chromecast, resume local playback seamlessly at the TV's position
-    var wasCasting by remember { mutableStateOf(false) }
-    LaunchedEffect(isCasting) {
-        if (isCasting) {
-            wasCasting = true
-        } else if (wasCasting) {
-            wasCasting = false
-            val resumeMs = currentPosition.longValue
-            if (exoPlayer.currentMediaItem != null) {
-                if (resumeMs > 0L) exoPlayer.seekTo(resumeMs)
-                exoPlayer.play()
-            }
-        }
+        exoPlayer.playWhenReady = playAfterSwitch
     }
 
     fun enterPip() {
@@ -521,7 +480,6 @@ private fun EpisodePlayerScreen(
             if (info.isInPictureInPictureMode) {
                 showControls = false
                 showFullSettingsPage = false
-                showCastDialog = false
             }
         }
         compActivity?.addOnPictureInPictureModeChangedListener(pipConsumer)
@@ -590,7 +548,7 @@ private fun EpisodePlayerScreen(
         activeSkipInterval = null
         playbackTracks = Tracks.EMPTY
         isPlayerBuffering = true
-        if (!castController.isConnected) hasRenderedFrame = false
+        hasRenderedFrame = false
         isSeekable = false
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
@@ -845,9 +803,9 @@ private fun EpisodePlayerScreen(
 
     val hasFallback = canTryAdultFallback || rankedStreams.any { it.playbackIdentity !in attemptedSources }
     val torrentReady = torrentConnection?.isReady == true
-    LaunchedEffect(playbackAttempt, hasRenderedFrame, hasFallback, torrentReady, isCasting) {
+    LaunchedEffect(playbackAttempt, hasRenderedFrame, hasFallback, torrentReady) {
         val source = selectedStream ?: return@LaunchedEffect
-        if (hasRenderedFrame || isCasting || resolveError != null || waitingForAlternative != null) {
+        if (hasRenderedFrame || resolveError != null || waitingForAlternative != null) {
             return@LaunchedEffect
         }
         val timeoutMs = when {
@@ -887,9 +845,7 @@ private fun EpisodePlayerScreen(
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
-            if (!castController.isConnected) {
-                wantsPlayback = exoPlayer.playWhenReady
-            }
+            wantsPlayback = exoPlayer.playWhenReady
             refreshSeekabilityAndDuration()
         }
 
@@ -898,9 +854,7 @@ private fun EpisodePlayerScreen(
         }
 
         override fun onPlaybackStateChanged(state: Int) {
-            if (!castController.isConnected) {
-                isPlayerBuffering = state == Player.STATE_BUFFERING || (state == Player.STATE_IDLE && resolveError == null)
-            }
+            isPlayerBuffering = state == Player.STATE_BUFFERING || (state == Player.STATE_IDLE && resolveError == null)
             if (state == Player.STATE_READY) {
                 refreshSeekabilityAndDuration()
                 val duration = totalDuration.longValue
@@ -913,7 +867,7 @@ private fun EpisodePlayerScreen(
                 }
             } else if (state == Player.STATE_ENDED) {
                 markWatched()
-                if (hasNextEpisode) {
+                if (hasNextEpisode && latestAutoplayNext) {
                     autoPlayCountdown = 5
                 }
             }
@@ -1007,10 +961,10 @@ private fun EpisodePlayerScreen(
 
         onDispose {
             val ended = exoPlayer.playbackState == Player.STATE_ENDED
-            val position = when {
-                castController.isConnected -> castController.currentPositionMs() ?: currentPosition.longValue
-                exoPlayer.currentMediaItem != null -> exoPlayer.currentPosition
-                else -> resumeAfterSwitch
+            val position = if (exoPlayer.currentMediaItem != null) {
+                exoPlayer.currentPosition
+            } else {
+                resumeAfterSwitch
             }
             val posSec = (position / 1000L).coerceAtLeast(0L)
             persistenceScope.launch {
@@ -1028,28 +982,16 @@ private fun EpisodePlayerScreen(
     }
 
     // Fast, smooth 150ms position & 80% watch scrobble loop
-    LaunchedEffect(exoPlayer, skipIntervals, autoSkipIntro, isCasting) {
+    LaunchedEffect(exoPlayer, skipIntervals, autoSkipIntro) {
         var lastSavedPosition = 0L
         while (true) {
-            if (castController.isConnected) {
-                val cPos = castController.currentPositionMs() ?: currentPosition.longValue
-                val cDur = castController.durationMs() ?: totalDuration.longValue
-                currentPosition.longValue = cPos.coerceAtLeast(0L)
-                bufferedPosition.longValue = cPos.coerceAtLeast(0L)
-                if (cDur > 0L) {
-                    totalDuration.longValue = cDur
-                    isSeekable = true
-                }
-                wantsPlayback = castController.isRemotePlaying()
-            } else {
-                val rawPos = exoPlayer.currentPosition.coerceAtLeast(0L)
-                val rawBuf = exoPlayer.bufferedPosition.coerceAtLeast(0L)
-                if (!isScrubbing) {
-                    currentPosition.longValue = rawPos
-                }
-                bufferedPosition.longValue = rawBuf
-                refreshSeekabilityAndDuration()
+            val rawPos = exoPlayer.currentPosition.coerceAtLeast(0L)
+            val rawBuf = exoPlayer.bufferedPosition.coerceAtLeast(0L)
+            if (!isScrubbing) {
+                currentPosition.longValue = rawPos
             }
+            bufferedPosition.longValue = rawBuf
+            refreshSeekabilityAndDuration()
 
             val position = currentPosition.longValue
             val duration = totalDuration.longValue
@@ -1058,7 +1000,7 @@ private fun EpisodePlayerScreen(
             val matchedSkip = skipIntervals.firstOrNull { posSec >= it.startTimeSeconds && posSec < it.endTimeSeconds - 1.0 }
             activeSkipInterval = matchedSkip
 
-            if (!castController.isConnected && matchedSkip != null && autoSkipIntro && exoPlayer.isPlaying &&
+            if (matchedSkip != null && autoSkipIntro && exoPlayer.isPlaying &&
                 matchedSkip.skipType.equals("op", ignoreCase = true)
             ) {
                 val target = (matchedSkip.endTimeSeconds * 1000).toLong()
@@ -1080,7 +1022,7 @@ private fun EpisodePlayerScreen(
                 lastSavedPosition = position
             }
 
-            delay(if ((showControls || isCasting) && hasRenderedFrame) 150 else 500)
+            delay(if (showControls && hasRenderedFrame) 150 else 500)
         }
     }
 
@@ -1116,23 +1058,23 @@ private fun EpisodePlayerScreen(
         }
     }
 
-    LaunchedEffect(showControls, wantsPlayback, showFullSettingsPage, showCastDialog, showSnippetEditor, hasRenderedFrame, controlsInteraction, isScrubbing, isCasting) {
-        if (showControls && wantsPlayback && hasRenderedFrame && !showFullSettingsPage && !showCastDialog && !showSnippetEditor && !isScrubbing && !isCasting) {
+    LaunchedEffect(showControls, wantsPlayback, showFullSettingsPage, showSnippetEditor, hasRenderedFrame, controlsInteraction, isScrubbing) {
+        if (showControls && wantsPlayback && hasRenderedFrame && !showFullSettingsPage && !showSnippetEditor && !isScrubbing) {
             delay(4000)
             showControls = false
         }
     }
 
-    LaunchedEffect(isPlayerBuffering, hasRenderedFrame, isCasting) {
+    LaunchedEffect(isPlayerBuffering, hasRenderedFrame) {
         showRebuffering = false
-        if (isPlayerBuffering && hasRenderedFrame && !isCasting) {
+        if (isPlayerBuffering && hasRenderedFrame) {
             delay(250)
             showRebuffering = true
         }
     }
 
-    LaunchedEffect(hasRenderedFrame, isCasting) {
-        if ((hasRenderedFrame || isCasting) && !hasShownOpeningAdvisory) {
+    LaunchedEffect(hasRenderedFrame) {
+        if (hasRenderedFrame && !hasShownOpeningAdvisory) {
             hasShownOpeningAdvisory = true
             showOpeningAdvisory = true
             delay(3800)
@@ -1264,13 +1206,13 @@ private fun EpisodePlayerScreen(
     BackHandler {
         when {
             showSnippetEditor -> dismissSnippetEditor()
-            showCastDialog -> showCastDialog = false
             showFullSettingsPage -> showFullSettingsPage = false
+            isTv && showControls -> showControls = false
             else -> onBack()
         }
     }
 
-    val canToggleChrome = (hasRenderedFrame || isCasting) && resolveError == null && !isInPipMode && !showFullSettingsPage && !showSnippetEditor
+    val canToggleChrome = hasRenderedFrame && resolveError == null && !isInPipMode && !showFullSettingsPage && !showSnippetEditor
     val controlsShowing = canToggleChrome && showControls && !isScreenLocked
     val episodeLabel = if (episodeTitle.equals("Episode $episodeNum", true) || episodeTitle.isBlank()) {
         "Episode $episodeNum"
@@ -1286,29 +1228,19 @@ private fun EpisodePlayerScreen(
 
     fun performSeekTo(targetMs: Long) {
         val clamped = if (totalDuration.longValue > 0L) targetMs.coerceIn(0L, totalDuration.longValue) else targetMs.coerceAtLeast(0L)
-        if (castController.isConnected) {
-            castController.seekTo(clamped)
-        } else {
-            exoPlayer.seekTo(clamped)
-        }
+        exoPlayer.seekTo(clamped)
         currentPosition.longValue = clamped
         controlsInteraction++
     }
 
     fun jumpBy(offsetMs: Long) {
         if (!isSeekable) return
-        val base = if (castController.isConnected) {
-            castController.currentPositionMs() ?: currentPosition.longValue
-        } else {
-            exoPlayer.currentPosition
-        }
+        val base = exoPlayer.currentPosition
         performSeekTo(base + offsetMs)
     }
 
     fun togglePlayPause() {
-        if (castController.isConnected) {
-            castController.togglePlayPause()
-        } else if (exoPlayer.playbackState == Player.STATE_ENDED) {
+        if (exoPlayer.playbackState == Player.STATE_ENDED) {
             autoPlayCountdown = null
             exoPlayer.seekToDefaultPosition()
             exoPlayer.play()
@@ -1380,7 +1312,74 @@ private fun EpisodePlayerScreen(
             .background(Color.Black)
             .clipToBounds()
             .onSizeChanged { viewportSize = it }
+            .focusable()
+            .onPreviewKeyEvent { keyEvent ->
+                val native = keyEvent.nativeKeyEvent
+                if (native.action != KeyEvent.ACTION_DOWN) return@onPreviewKeyEvent false
+                when (native.keyCode) {
+                    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_SPACE -> {
+                        togglePlayPause()
+                        true
+                    }
+                    KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                        if (!exoPlayer.playWhenReady || exoPlayer.playbackState == Player.STATE_ENDED) togglePlayPause()
+                        true
+                    }
+                    KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                        if (exoPlayer.playWhenReady) exoPlayer.pause()
+                        true
+                    }
+                    KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                        jumpBy(10_000L)
+                        true
+                    }
+                    KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                        jumpBy(-10_000L)
+                        true
+                    }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        if (isTv && !controlsShowing && !showFullSettingsPage && !showSnippetEditor && resolveError == null && isSeekable) {
+                            jumpBy(-10_000L)
+                            true
+                        } else false
+                    }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        if (isTv && !controlsShowing && !showFullSettingsPage && !showSnippetEditor && resolveError == null && isSeekable) {
+                            jumpBy(10_000L)
+                            true
+                        } else false
+                    }
+                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        if (isTv && !controlsShowing && !showFullSettingsPage && !showSnippetEditor && resolveError == null && canToggleChrome) {
+                            showControls = true
+                            controlsInteraction++
+                            true
+                        } else false
+                    }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                        if (isTv && !controlsShowing && !showFullSettingsPage && !showSnippetEditor && resolveError == null) {
+                            togglePlayPause()
+                            true
+                        } else false
+                    }
+                    else -> false
+                }
+            }
     ) {
+        // Bottom-most touch shield so pointer events never leak through to screens below the player
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            event.changes.forEach { it.consume() }
+                        }
+                    }
+                }
+        )
+
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
@@ -1408,55 +1407,15 @@ private fun EpisodePlayerScreen(
                 .padding(bottom = snippetVideoBottomInset)
         )
 
-        // Casting backdrop when streaming to Chromecast
-        if (isCasting && !isInPipMode) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xE808090C)),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.padding(24.dp)
-                ) {
-                    if (!media.coverUrl.isNullOrBlank()) {
-                        CrossfadeImage(
-                            model = media.coverUrl,
-                            contentDescription = media.title,
-                            modifier = Modifier
-                                .width(96.dp)
-                                .aspectRatio(2f / 3f)
-                                .clip(RoundedCornerShape(6.dp))
-                        )
-                    } else {
-                        Icon(Icons.Default.CastConnected, contentDescription = null, tint = CrunchyOrange, modifier = Modifier.size(48.dp))
-                    }
-                    Text(
-                        text = "Casting to ${castController.connectedDeviceName ?: "Chromecast"}",
-                        color = CrunchyOrange,
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 16.sp
-                    )
-                    Text(
-                        text = "${media.title} • $episodeLabel",
-                        color = Color.White,
-                        fontSize = 13.sp
-                    )
-                }
-            }
-        }
-
         // Dedicated Touch Gesture Surface: Single-tap Chrome toggle, Double-tap -10s/+10s/Play,
-        // and Left/Right Vertical Swipes for Brightness & Volume!
+        // and Left/Right Vertical Swipes for Brightness & Volume (phones & tablets)!
         if (canToggleChrome) {
             val edgeMarginPx = with(density) { 26.dp.toPx() }
             val topBottomMarginPx = with(density) { 42.dp.toPx() }
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(isScreenLocked, isSeekable, isCasting) {
+                    .pointerInput(isScreenLocked, isSeekable) {
                         detectTapGestures(
                             onTap = {
                                 showControls = !showControls
@@ -1488,8 +1447,8 @@ private fun EpisodePlayerScreen(
                             }
                         )
                     }
-                    .pointerInput(isScreenLocked, swipeGesturesEnabled, isCasting) {
-                        if (isScreenLocked || !latestSwipeEnabled || isCasting) return@pointerInput
+                    .pointerInput(isScreenLocked, swipeGesturesEnabled, isTv) {
+                        if (isScreenLocked || !latestSwipeEnabled || isTv) return@pointerInput
                         var dragIsBrightness = true
                         var dragFraction = 0.5f
                         var validGestureZone = false
@@ -1554,7 +1513,7 @@ private fun EpisodePlayerScreen(
         }
 
         AnimatedVisibility(
-            visible = !isInPipMode && !showFullSettingsPage && resolveError == null && !hasRenderedFrame && !isCasting,
+            visible = !isInPipMode && !showFullSettingsPage && resolveError == null && !hasRenderedFrame,
             enter = fadeIn(tween(180)),
             exit = fadeOut(tween(220))
         ) {
@@ -1571,7 +1530,7 @@ private fun EpisodePlayerScreen(
 
         // Smooth Animated Main Transport & Seekbar Chrome (never unmounts abruptly mid-scrub!)
         AnimatedVisibility(
-            visible = controlsShowing || (isCasting && !isInPipMode && !showFullSettingsPage && !isScreenLocked),
+            visible = controlsShowing,
             enter = fadeIn(tween(180)),
             exit = fadeOut(tween(180))
         ) {
@@ -1589,9 +1548,7 @@ private fun EpisodePlayerScreen(
                     title = media.title,
                     episode = episodeLabel,
                     onBack = onBack,
-                    isCasting = isCasting,
-                    hasCastRoutes = castController.routes.isNotEmpty(),
-                    onClipClick = if (!isCasting && isSeekable && currentLoadedUri != null && totalDuration.longValue > SNIPPET_MIN_DURATION_MS) {
+                    onClipClick = if (!isTv && isSeekable && currentLoadedUri != null && totalDuration.longValue > SNIPPET_MIN_DURATION_MS) {
                         {
                             exoPlayer.pause()
                             showControls = false
@@ -1610,18 +1567,13 @@ private fun EpisodePlayerScreen(
                             showSnippetEditor = true
                         }
                     } else null,
-                    onCastClick = {
-                        castController.refreshRoutes()
-                        showCastDialog = true
-                        controlsInteraction++
-                    },
-                    onLockClick = if (!isCasting) {
+                    onLockClick = if (!isTv) {
                         {
                             isScreenLocked = true
                             showControls = false
                         }
                     } else null,
-                    onPipClick = if (!isCasting && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    onPipClick = if (!isTv && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         { enterPip() }
                     } else null,
                     onSettings = { openPlaybackSettings() }
@@ -1889,7 +1841,7 @@ private fun EpisodePlayerScreen(
         }
 
         // YouTube-style Persistent Bottom Progress Bar (slim elapsed ratio line when controls are hidden)
-        if (persistentDurationLine && !isInPipMode && !showFullSettingsPage && !showSnippetEditor && (hasRenderedFrame || isCasting) && resolveError == null) {
+        if (persistentDurationLine && !isInPipMode && !showFullSettingsPage && !showSnippetEditor && hasRenderedFrame && resolveError == null) {
             PersistentMiniProgressBar(
                 position = currentPosition.longValue,
                 bufferedPosition = bufferedPosition.longValue,
@@ -2115,12 +2067,23 @@ private fun EpisodePlayerScreen(
                                         }
                                     }
 
+                                    if (!isTv) {
+                                        GlassFeatureRow(
+                                            label = "Swipe up/down for brightness & volume",
+                                            subtitle = "Left side adjusts brightness, right side adjusts volume",
+                                            checked = swipeGesturesEnabled,
+                                            onCheckedChange = { enabled ->
+                                                scope.launch { prefs.setSwipeGesturesEnabled(enabled) }
+                                            }
+                                        )
+                                    }
+
                                     GlassFeatureRow(
-                                        label = "Swipe up/down for brightness & volume",
-                                        subtitle = "Left side adjusts brightness, right side adjusts volume",
-                                        checked = swipeGesturesEnabled,
+                                        label = "Autoplay next episode",
+                                        subtitle = "Starts the next episode automatically after finishing",
+                                        checked = autoplayNextEpisode,
                                         onCheckedChange = { enabled ->
-                                            scope.launch { prefs.setSwipeGesturesEnabled(enabled) }
+                                            scope.launch { prefs.setAutoplayNextEpisode(enabled) }
                                         }
                                     )
 
@@ -2359,17 +2322,6 @@ private fun EpisodePlayerScreen(
                     }
                 }
             }
-        }
-
-        if (showCastDialog) {
-            CastDevicePickerDialog(
-                routes = castController.routes,
-                connectedDeviceName = castController.connectedDeviceName,
-                isConnecting = castController.isConnecting,
-                onSelectRoute = { castController.selectRoute(it) },
-                onDisconnect = { castController.disconnect() },
-                onDismiss = { showCastDialog = false }
-            )
         }
     }
 }

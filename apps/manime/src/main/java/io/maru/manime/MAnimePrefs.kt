@@ -82,6 +82,7 @@ class MAnimePrefs(private val context: Context) {
         val KEY_PREFERRED_AUDIO     = stringPreferencesKey("preferred_audio") // "SUB" | "DUB"
         val KEY_PREFERRED_QUALITY   = stringPreferencesKey("preferred_quality") // "1080p" | "720p" | "4K"
         val KEY_AUTO_SKIP_INTRO     = booleanPreferencesKey("auto_skip_intro")
+        val KEY_AUTOPLAY_NEXT_EP    = booleanPreferencesKey("autoplay_next_episode")
         val KEY_SWIPE_GESTURES      = booleanPreferencesKey("player_swipe_gestures")
         val KEY_SUBTITLE_BLACK_FILL = booleanPreferencesKey("subtitle_black_fill")
         val KEY_SUBTITLE_SIZE       = stringPreferencesKey("subtitle_size") // "SMALL" | "MEDIUM" | "LARGE" | "EXTRA_LARGE"
@@ -188,6 +189,7 @@ class MAnimePrefs(private val context: Context) {
     val preferredAudio: Flow<String> = context.dataStore.data.map { it[KEY_PREFERRED_AUDIO] ?: "SUB" }
     val preferredQuality: Flow<String> = context.dataStore.data.map { it[KEY_PREFERRED_QUALITY] ?: "1080p" }
     val autoSkipIntro: Flow<Boolean> = context.dataStore.data.map { it[KEY_AUTO_SKIP_INTRO] ?: false }
+    val autoplayNextEpisode: Flow<Boolean> = context.dataStore.data.map { it[KEY_AUTOPLAY_NEXT_EP] ?: true }
     val swipeGesturesEnabled: Flow<Boolean> = context.dataStore.data.map { it[KEY_SWIPE_GESTURES] ?: true }
     val subtitleBlackFill: Flow<Boolean> = context.dataStore.data.map { it[KEY_SUBTITLE_BLACK_FILL] ?: true }
     val subtitleSize: Flow<String> = context.dataStore.data.map { it[KEY_SUBTITLE_SIZE] ?: "MEDIUM" }
@@ -340,6 +342,7 @@ class MAnimePrefs(private val context: Context) {
     suspend fun setPreferredAudio(value: String) = context.dataStore.edit { it[KEY_PREFERRED_AUDIO] = value }
     suspend fun setPreferredQuality(value: String) = context.dataStore.edit { it[KEY_PREFERRED_QUALITY] = value }
     suspend fun setAutoSkipIntro(value: Boolean) = context.dataStore.edit { it[KEY_AUTO_SKIP_INTRO] = value }
+    suspend fun setAutoplayNextEpisode(value: Boolean) = context.dataStore.edit { it[KEY_AUTOPLAY_NEXT_EP] = value }
     suspend fun setSwipeGesturesEnabled(value: Boolean) = context.dataStore.edit { it[KEY_SWIPE_GESTURES] = value }
     suspend fun setSubtitleBlackFill(value: Boolean) = context.dataStore.edit { it[KEY_SUBTITLE_BLACK_FILL] = value }
     suspend fun setSubtitleSize(value: String) = context.dataStore.edit { it[KEY_SUBTITLE_SIZE] = value }

@@ -16,9 +16,14 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import io.maru.manime.MAnimePrefs
 import io.maru.manime.NanamiDiagnostics
+import io.maru.manime.cast.NanamiCastSubtitleHelper
 import io.maru.manime.extensions.StreamLink
 import io.maru.manime.extensions.StremioAddonClient
+import io.maru.manime.extensions.SubtitleTrack
 import io.maru.manime.readResponse
+import io.maru.manime.tv.computeTvStreamCacheLimitBytes
+import io.maru.manime.tv.enforceStreamCacheBudget
+import io.maru.manime.tv.isAndroidTv
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -73,7 +78,8 @@ data class OfflineDownloadCandidate(
     val audioType: String = "SUB",
     val quality: String = "1080p",
     val headers: Map<String, String> = emptyMap(),
-    val verifiedAdultEpisode: Boolean = false
+    val verifiedAdultEpisode: Boolean = false,
+    val subtitles: List<SubtitleTrack> = emptyList()
 )
 
 internal fun selectDownloadCandidates(
@@ -105,7 +111,8 @@ internal fun selectDownloadCandidates(
                 audioType = s.audioType,
                 quality = s.quality,
                 headers = s.headers,
-                verifiedAdultEpisode = s.verifiedAdultEpisode
+                verifiedAdultEpisode = s.verifiedAdultEpisode,
+                subtitles = s.subtitles
             )
             s.isTorrent && s.url.startsWith("magnet:", ignoreCase = true) && (s.seeders == null || s.seeders > 0) ->
                 OfflineDownloadCandidate(
@@ -113,7 +120,8 @@ internal fun selectDownloadCandidates(
                     isTorrent = true,
                     fileIdx = s.fileIdx,
                     audioType = s.audioType,
-                    quality = s.quality
+                    quality = s.quality,
+                    subtitles = s.subtitles
                 )
             else -> null
         }
@@ -133,6 +141,18 @@ internal fun encodeOfflineCandidates(candidates: List<OfflineDownloadCandidate>)
             put("quality", c.quality)
             put("headers", headersObj)
             if (c.verifiedAdultEpisode) put("verifiedAdultEpisode", true)
+            if (c.subtitles.isNotEmpty()) {
+                val subsArr = JSONArray()
+                for (sub in c.subtitles) {
+                    subsArr.put(
+                        JSONObject()
+                            .put("url", sub.url)
+                            .put("language", sub.language)
+                            .put("isDefault", sub.isDefault)
+                    )
+                }
+                put("subtitles", subsArr)
+            }
         })
     }
     return arr.toString()
@@ -156,6 +176,23 @@ internal fun decodeOfflineCandidates(rawJson: String?): List<OfflineDownloadCand
                         }
                     }
                 }
+                val subsArr = obj.optJSONArray("subtitles")
+                val subs = buildList {
+                    if (subsArr != null) {
+                        for (j in 0 until subsArr.length()) {
+                            val sObj = subsArr.optJSONObject(j) ?: continue
+                            val sUrl = sObj.optString("url", "").trim()
+                            if (sUrl.isEmpty()) continue
+                            add(
+                                SubtitleTrack(
+                                    url = sUrl,
+                                    language = sObj.optString("language", "en"),
+                                    isDefault = sObj.optBoolean("isDefault", false)
+                                )
+                            )
+                        }
+                    }
+                }
                 add(
                     OfflineDownloadCandidate(
                         url = url,
@@ -164,7 +201,8 @@ internal fun decodeOfflineCandidates(rawJson: String?): List<OfflineDownloadCand
                         audioType = obj.optString("audioType", "SUB"),
                         quality = obj.optString("quality", "1080p"),
                         headers = headers,
-                        verifiedAdultEpisode = obj.optBoolean("verifiedAdultEpisode")
+                        verifiedAdultEpisode = obj.optBoolean("verifiedAdultEpisode"),
+                        subtitles = subs
                     )
                 )
             }
@@ -380,6 +418,7 @@ class TorrentStreamService : Service() {
             candidates: List<OfflineDownloadCandidate> = emptyList(),
             isAdultContent: Boolean? = null
         ) {
+            if (isAndroidTv(context)) return
             val effectiveCandidates = candidates.ifEmpty {
                 listOf(
                     OfflineDownloadCandidate(
@@ -548,6 +587,10 @@ class TorrentStreamService : Service() {
                 }
             }
             ACTION_DOWNLOAD_OFFLINE -> {
+                if (isAndroidTv(applicationContext)) {
+                    stopIfIdle()
+                    return START_NOT_STICKY
+                }
                 val magnet = intent.getStringExtra(EXTRA_MAGNET) ?: return START_NOT_STICKY
                 val fileIdx = intent.getIntExtra(EXTRA_FILE_IDX, -1).takeIf { it >= 0 }
                 val mediaId = intent.getIntExtra(EXTRA_MEDIA_ID, 0)
@@ -775,7 +818,11 @@ class TorrentStreamService : Service() {
             var nativeSession: SessionManager? = null
             var stream: StreamSession? = null
             var phase = "session_start"
-            val saveDir = File(cacheDir, "live_stream_cache/$requestId")
+            val playbackRoot = File(cacheDir, "live_stream_cache")
+            if (isAndroidTv(applicationContext)) {
+                enforceStreamCacheBudget(playbackRoot, computeTvStreamCacheLimitBytes(cacheDir) / 2L)
+            }
+            val saveDir = File(playbackRoot, requestId)
             val startedAt = SystemClock.elapsedRealtime()
             try {
                 ensureActive()
@@ -1009,6 +1056,9 @@ class TorrentStreamService : Service() {
                         } finally {
                             copy.delete()
                         }
+                    }
+                    if (candidate.subtitles.isNotEmpty()) {
+                        runCatching { NanamiCastSubtitleHelper.saveDownloadedSubtitles(finalFile, candidate.subtitles) }
                     }
                 }
 

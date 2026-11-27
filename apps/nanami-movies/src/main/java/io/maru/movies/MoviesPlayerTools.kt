@@ -10,14 +10,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Cast
-import androidx.compose.material.icons.filled.CastConnected
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material3.*
@@ -40,19 +36,10 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
-import androidx.mediarouter.media.MediaRouteSelector
-import androidx.mediarouter.media.MediaRouter
 import com.google.android.gms.cast.CastMediaControlIntent
-import com.google.android.gms.cast.MediaInfo
-import com.google.android.gms.cast.MediaLoadRequestData
-import com.google.android.gms.cast.MediaMetadata
-import com.google.android.gms.cast.framework.CastContext
 import com.google.android.gms.cast.framework.CastOptions
-import com.google.android.gms.cast.framework.CastSession
 import com.google.android.gms.cast.framework.OptionsProvider
-import com.google.android.gms.cast.framework.SessionManagerListener
 import com.google.android.gms.cast.framework.SessionProvider
-import com.google.android.gms.common.images.WebImage
 import io.maru.manime.extensions.StremioStreamResult
 import io.maru.manime.player.SnippetExportState
 import io.maru.manime.player.SnippetExporter
@@ -60,14 +47,13 @@ import io.maru.manime.player.SnippetRange
 import io.maru.manime.player.applyDurationPreset
 import io.maru.manime.player.defaultSnippetRange
 import io.maru.manime.player.normalizeSnippetRange
+import io.maru.manime.tv.NanamiDeviceFormFactor
+import io.maru.manime.tv.rememberDeviceFormFactor
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
-import java.io.File
 
+/** Registered in AndroidManifest.xml so Google Cast SDK powers Downloads-only casting. */
 class MoviesCastOptionsProvider : OptionsProvider {
     override fun getCastOptions(context: Context): CastOptions = CastOptions.Builder()
         .setReceiverApplicationId(CastMediaControlIntent.DEFAULT_MEDIA_RECEIVER_APPLICATION_ID).build()
@@ -75,123 +61,34 @@ class MoviesCastOptionsProvider : OptionsProvider {
     override fun getAdditionalSessionProviders(context: Context): List<SessionProvider>? = null
 }
 
-internal data class MovieRemoteTransport(val seek: (Long) -> Unit, val toggle: () -> Unit)
-
+/**
+ * In-player quick tools. Chromecast is intentionally excluded here because casting is
+ * exclusive to Downloaded Content inside My List -> Downloads.
+ */
 @OptIn(UnstableApi::class)
 @Composable
 internal fun MoviesPlayerTools(
     title: MovieTitle,
     episode: MovieEpisode?,
     activeSource: StremioStreamResult?,
-    offlineFile: File?,
     mediaUri: Uri?,
     dataSource: DataSource.Factory?,
     position: Long,
     duration: Long,
-    onRemotePlayback: () -> Unit,
     modifier: Modifier = Modifier,
     visible: Boolean = true,
-    onRemoteEnded: (Long) -> Unit = {},
-    onRemoteProgress: ((Long, Long, Boolean) -> Unit)? = null,
-    onRemoteTransport: ((MovieRemoteTransport?) -> Unit)? = null,
     onClipVisibilityChanged: ((Boolean) -> Unit)? = null,
 ) {
-    val context = LocalContext.current
-    var showCast by remember { mutableStateOf(false) }
-    var showClip by remember { mutableStateOf(false) }
-    val device = remember(context) { MoviesCastDevice(context.applicationContext) }
-    val opened by rememberUpdatedState(onRemotePlayback)
-    val ended by rememberUpdatedState(onRemoteEnded)
-    val progress by rememberUpdatedState(onRemoteProgress)
-    val transport by rememberUpdatedState(onRemoteTransport)
-    val clipVisibility by rememberUpdatedState(onClipVisibilityChanged)
-    val startPosition by rememberUpdatedState(position)
-    var requested by remember { mutableStateOf(false) }
-    var castAttempt by remember { mutableIntStateOf(0) }
-    var sent by remember { mutableStateOf(false) }
-    var remotePosition by remember { mutableLongStateOf(0L) }
-    var castMessage by remember { mutableStateOf<String?>(null) }
+    val isTv = rememberDeviceFormFactor() == NanamiDeviceFormFactor.TV
+    if (isTv) return
 
-    DisposableEffect(device) {
-        device.attach()
-        onDispose { device.detach(endSession = requested) }
-    }
-    DisposableEffect(device, showCast) {
-        if (showCast) device.scan()
-        onDispose { device.stopScan() }
-    }
-    val session = device.session
-    LaunchedEffect(session, mediaUri, dataSource, requested, castAttempt) {
-        val client = session?.remoteMediaClient
-        if (client == null || !requested) {
-            if (sent) {
-                sent = false
-                ended(remotePosition)
-            }
-            return@LaunchedEffect
-        }
-        if (mediaUri == null || dataSource == null) {
-            castMessage = "Waiting for the selected source…"
-            return@LaunchedEffect
-        }
-        var relay: MoviesMediaRelay? = null
-        try {
-            castMessage = "Loading on ${session.castDevice?.friendlyName ?: "your TV"}…"
-            val direct = mediaUri.scheme == "https" && activeSource?.headers.orEmpty().isEmpty() && offlineFile == null
-            val url = if (direct) mediaUri.toString() else MoviesMediaRelay.start(context, dataSource, mediaUri, lan = true)
-                .also { relay = it }.url
-            val metadata = MediaMetadata(if (episode == null) MediaMetadata.MEDIA_TYPE_MOVIE else MediaMetadata.MEDIA_TYPE_TV_SHOW)
-            metadata.putString(MediaMetadata.KEY_TITLE, episode?.title ?: title.title)
-            if (episode != null) {
-                metadata.putString(MediaMetadata.KEY_SERIES_TITLE, title.title)
-                metadata.putInt(MediaMetadata.KEY_SEASON_NUMBER, episode.season)
-                metadata.putInt(MediaMetadata.KEY_EPISODE_NUMBER, episode.episode)
-            }
-            title.poster?.let { metadata.addImage(WebImage(Uri.parse(it))) }
-            val mime = relay?.mime ?: MoviesMediaRelay.mediaMime(mediaUri.lastPathSegment.orEmpty().substringAfterLast('.'))
-            val info = MediaInfo.Builder(url).setStreamType(MediaInfo.STREAM_TYPE_BUFFERED).setContentType(mime).setMetadata(metadata).build()
-            val result = CompletableDeferred<Boolean>()
-            client.load(
-                MediaLoadRequestData.Builder()
-                    .setMediaInfo(info)
-                    .setAutoplay(true)
-                    .setCurrentTime(startPosition.coerceAtLeast(0))
-                    .build()
-            ).setResultCallback { result.complete(it.status.isSuccess) }
-            check(withTimeoutOrNull(25_000) { result.await() } == true) { "The receiver couldn't play this source. Try another source." }
-            sent = true
-            castMessage = null
-            transport?.invoke(
-                MovieRemoteTransport(
-                    seek = { client.seek(it.coerceAtLeast(0)) },
-                    toggle = { if (client.isPlaying) client.pause() else client.play() },
-                )
-            )
-            opened()
-            while (true) {
-                remotePosition = client.approximateStreamPosition.coerceAtLeast(0)
-                val total = client.streamDuration
-                if (total > 0) progress?.invoke(remotePosition, total, client.isPlaying)
-                delay(1_000)
-            }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Exception) {
-            castMessage = error.message ?: "Casting could not start."
-            if (sent) {
-                sent = false
-                ended(remotePosition)
-            }
-        } finally {
-            transport?.invoke(null)
-            relay?.close()
-        }
-    }
+    var showClip by remember { mutableStateOf(false) }
+    val clipVisibility by rememberUpdatedState(onClipVisibilityChanged)
 
     if (visible) {
         Row(modifier, verticalAlignment = Alignment.CenterVertically) {
             IconButton(
-                enabled = mediaUri != null && dataSource != null && duration > 0 && !sent,
+                enabled = mediaUri != null && dataSource != null && duration > 0,
                 onClick = { showClip = true },
             ) {
                 Icon(
@@ -200,70 +97,7 @@ internal fun MoviesPlayerTools(
                     tint = Color.White.copy(alpha = if (duration > 0) 1f else 0.4f),
                 )
             }
-            IconButton(onClick = { showCast = true }) {
-                Icon(
-                    imageVector = if (sent) Icons.Default.CastConnected else Icons.Default.Cast,
-                    contentDescription = "Cast",
-                    tint = if (sent) NetflixRed else Color.White,
-                )
-            }
         }
-    }
-
-    if (showCast) {
-        AlertDialog(
-            onDismissRequest = { showCast = false },
-            containerColor = NetflixSurface,
-            title = { Text("Cast to a TV", color = Color.White, fontWeight = FontWeight.ExtraBold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val connected = device.session?.remoteMediaClient
-                    if (connected != null) {
-                        Text(device.session?.castDevice?.friendlyName ?: "Connected TV", color = NetflixMatchGreen, fontWeight = FontWeight.Bold)
-                        castMessage?.let { Text(it, color = NetflixTextMuted, fontSize = 12.5.sp) }
-                        if (sent) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                NetflixChip("-10s", false) { connected.seek((remotePosition - 10_000).coerceAtLeast(0)) }
-                                NetflixChip("Play / Pause", true) { if (connected.isPlaying) connected.pause() else connected.play() }
-                                NetflixChip("+10s", false) { connected.seek(remotePosition + 10_000) }
-                            }
-                        } else {
-                            Button(
-                                onClick = { requested = true; castAttempt++ },
-                                colors = ButtonDefaults.buttonColors(containerColor = NetflixRed, contentColor = Color.White),
-                            ) { Text("Cast This Title", fontWeight = FontWeight.Bold) }
-                        }
-                        TextButton(onClick = { requested = false; device.disconnect() }) {
-                            Text("Disconnect", color = NetflixRed)
-                        }
-                    } else if (device.routes.isEmpty()) {
-                        Text("Searching for Chromecast & Google Cast receivers on your Wi-Fi…", color = NetflixTextMuted, fontSize = 13.sp)
-                    } else {
-                        LazyColumn(Modifier.heightIn(max = 190.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(device.routes, key = { it.id }) { route ->
-                                Surface(
-                                    onClick = { requested = true; castMessage = null; route.select() },
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = NetflixCardBg,
-                                    border = BorderStroke(1.dp, NetflixBorder),
-                                    modifier = Modifier.fillMaxWidth(),
-                                ) {
-                                    Text(
-                                        text = route.name,
-                                        color = Color.White,
-                                        fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showCast = false }) { Text("Done", color = Color.White, fontWeight = FontWeight.Bold) }
-            },
-        )
     }
 
     if (showClip && mediaUri != null && dataSource != null && duration > 0) {
@@ -281,59 +115,6 @@ internal fun MoviesPlayerTools(
             duration = duration,
             onClose = { showClip = false },
         )
-    }
-}
-
-private class MoviesCastDevice(context: Context) {
-    private val manager = runCatching { CastContext.getSharedInstance(context).sessionManager }.getOrNull()
-    private val router = MediaRouter.getInstance(context)
-    private val selector = MediaRouteSelector.Builder().addControlCategory(
-        CastMediaControlIntent.categoryForCast(CastMediaControlIntent.DEFAULT_MEDIA_RECEIVER_APPLICATION_ID),
-    ).build()
-    var session by mutableStateOf<CastSession?>(null)
-        private set
-    var routes by mutableStateOf<List<MediaRouter.RouteInfo>>(emptyList())
-        private set
-
-    private val routesListener = object : MediaRouter.Callback() {
-        override fun onRouteAdded(router: MediaRouter, route: MediaRouter.RouteInfo) = refresh()
-        override fun onRouteChanged(router: MediaRouter, route: MediaRouter.RouteInfo) = refresh()
-        override fun onRouteRemoved(router: MediaRouter, route: MediaRouter.RouteInfo) = refresh()
-    }
-    private val sessionListener = object : SessionManagerListener<CastSession> {
-        override fun onSessionStarting(value: CastSession) = Unit
-        override fun onSessionStarted(value: CastSession, id: String) { session = value }
-        override fun onSessionStartFailed(value: CastSession, error: Int) { session = null }
-        override fun onSessionEnding(value: CastSession) = Unit
-        override fun onSessionEnded(value: CastSession, error: Int) { session = null }
-        override fun onSessionResuming(value: CastSession, id: String) = Unit
-        override fun onSessionResumed(value: CastSession, suspended: Boolean) { session = value }
-        override fun onSessionResumeFailed(value: CastSession, error: Int) { session = null }
-        override fun onSessionSuspended(value: CastSession, reason: Int) { session = null }
-    }
-
-    private fun refresh() {
-        routes = router.routes.filter { !it.isDefault && it.isEnabled && it.matchesSelector(selector) }
-    }
-
-    fun attach() {
-        manager?.addSessionManagerListener(sessionListener, CastSession::class.java)
-        session = manager?.currentCastSession?.takeIf { it.isConnected }
-    }
-
-    fun scan() {
-        router.addCallback(selector, routesListener, MediaRouter.CALLBACK_FLAG_REQUEST_DISCOVERY or MediaRouter.CALLBACK_FLAG_PERFORM_ACTIVE_SCAN)
-        refresh()
-    }
-
-    fun stopScan() = router.removeCallback(routesListener)
-
-    fun disconnect() { manager?.endCurrentSession(true) }
-
-    fun detach(endSession: Boolean) {
-        stopScan()
-        manager?.removeSessionManagerListener(sessionListener, CastSession::class.java)
-        if (endSession) disconnect()
     }
 }
 
@@ -461,7 +242,6 @@ private fun MoviesClipStudioOverlay(
                         )
                     }
 
-                    // Duration Presets + Fine Nudge Controls (matching Nanami Anime's Clip Studio!)
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),

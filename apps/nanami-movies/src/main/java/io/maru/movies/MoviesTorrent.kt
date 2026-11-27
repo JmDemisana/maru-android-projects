@@ -14,6 +14,8 @@ import io.maru.manime.torrent.STREAM_READ_TIMEOUT_MS
 import io.maru.manime.torrent.awaitVerifiedRange
 import io.maru.manime.torrent.bytesInCurrentPiece
 import io.maru.manime.torrent.verifiedFileRange
+import io.maru.manime.tv.computeTvStreamCacheLimitBytes
+import io.maru.manime.tv.enforceStreamCacheBudget
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -68,11 +70,16 @@ internal suspend fun withMoviesTorrent(
     cacheDir: File,
     source: StremioStreamResult,
     episode: MovieEpisode?,
+    enforceTvBudget: Boolean = false,
     onBufferProgress: suspend (MoviePrebufferStatus) -> Unit,
     play: suspend (Uri, DataSource.Factory) -> Unit
 ) = withContext(Dispatchers.IO) {
     val magnet = requireNotNull(source.magnetUri()) { "This source could not be opened." }
-    val saveDir = File(cacheDir, "movies-playback/${UUID.randomUUID()}")
+    val playbackRoot = File(cacheDir, "movies-playback")
+    if (enforceTvBudget) {
+        enforceStreamCacheBudget(playbackRoot, computeTvStreamCacheLimitBytes(cacheDir) / 2L)
+    }
+    val saveDir = File(playbackRoot, UUID.randomUUID().toString())
     val session = SessionManager()
     var stream: VerifiedMovieFile? = null
     try {

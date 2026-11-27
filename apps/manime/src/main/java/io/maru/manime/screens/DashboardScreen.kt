@@ -39,6 +39,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.maru.manime.*
+import io.maru.manime.tv.nanamiFocusHighlight
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -216,6 +217,7 @@ fun DashboardScreen(
 
                                     Button(
                                         onClick = { onAnimeClick(hero) },
+                                        modifier = Modifier.nanamiFocusHighlight(Color.White, cornerRadius = 4.dp),
                                         colors = ButtonDefaults.buttonColors(
                                             containerColor = CrunchyOrange,
                                             contentColor = Color.Black

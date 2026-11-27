@@ -5,6 +5,7 @@ import android.content.Intent
 import android.util.AtomicFile
 import android.util.Log
 import androidx.core.content.ContextCompat
+import io.maru.manime.cast.NanamiCastSubtitleHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -128,6 +129,7 @@ internal object MoviesDownloadVault {
             loadLocked(context)
             val entry = entries.value.firstOrNull { it.key == item.key } ?: return@synchronized
             val file = destination(context, entry)
+            file?.let { NanamiCastSubtitleHelper.deleteSidecarForVideo(it) }
             if (file != null && file.exists() && !file.delete()) throw MovieDownloadException("Couldn't delete the saved file.")
             publishLocked(context, entries.value.filterNot { it.key == item.key })
         }

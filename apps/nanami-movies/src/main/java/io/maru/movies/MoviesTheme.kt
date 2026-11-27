@@ -46,6 +46,7 @@ import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import coil.request.ImageRequest
 import io.maru.manime.extensions.StremioAddonClient
+import io.maru.manime.tv.nanamiFocusHighlight
 import java.util.Locale
 
 // Authentic Netflix Cinema OLED Pitch Black & Tudum Crimson Palette
@@ -128,6 +129,7 @@ internal fun Modifier.pressableClick(
         label = "movies_press_scale",
     )
     this
+        .nanamiFocusHighlight(NetflixRed, cornerRadius = 6.dp, focusedScale = 1.03f)
         .graphicsLayer {
             scaleX = scale
             scaleY = scale

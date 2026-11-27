@@ -50,6 +50,17 @@ import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import io.maru.manime.auth.NanamiQrAuthDialog
+import io.maru.manime.cast.DownloadedCastMedia
+import io.maru.manime.cast.DownloadedCastRemoteDialog
+import io.maru.manime.cast.DownloadedNowCastingBar
+import io.maru.manime.cast.NanamiCastUiTheme
+import io.maru.manime.cast.rememberNanamiDownloadedCastController
+import io.maru.manime.disguise.AppDisguiseManager
+import io.maru.manime.tv.NanamiDeviceFormFactor
+import io.maru.manime.tv.isAndroidTv
+import io.maru.manime.tv.nanamiFocusHighlight
+import io.maru.manime.tv.rememberDeviceFormFactor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -119,11 +130,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppDisguiseManager.syncTaskDescription(
+            activity = this,
+            defaultLabel = "Nanami Movies",
+            disguiseLabel = "Netflix",
+        )
         dispatchIncomingAuth(intent?.data)
         addOnNewIntentListener { newIntent ->
             dispatchIncomingAuth(newIntent?.data)
         }
-        if (!isInMultiWindowMode && resources.configuration.smallestScreenWidthDp in 1..599) {
+        if (!isAndroidTv(this) && !isInMultiWindowMode && resources.configuration.smallestScreenWidthDp in 1..599) {
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
         enableEdgeToEdge(
@@ -166,6 +182,9 @@ private fun MoviesApp(
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val routeStateHolder = rememberSaveableStateHolder()
+    val formFactor = rememberDeviceFormFactor()
+    val isTv = formFactor == NanamiDeviceFormFactor.TV
+    val useSideRail = formFactor != NanamiDeviceFormFactor.PHONE
     val vault = MoviesDownloadVault
     val downloads by vault.items.collectAsState()
 
@@ -179,6 +198,7 @@ private fun MoviesApp(
     if (playback != null) lastPlayback = playback
 
     var showSimklAuthDialog by remember { mutableStateOf(false) }
+    var showSimklQrDialog by remember { mutableStateOf(false) }
     var completingSimklCallback by remember { mutableStateOf(false) }
     var showTopAccountMenu by remember { mutableStateOf(false) }
 
@@ -243,6 +263,10 @@ private fun MoviesApp(
     }
 
     fun openSimklWebAuth(@Suppress("UNUSED_PARAMETER") clearCookies: Boolean = false) {
+        if (isTv) {
+            showSimklQrDialog = true
+            return
+        }
         scope.launch {
             runCatching {
                 val session = simkl.createPkceSession(forAppDeepLink = true)
@@ -513,225 +537,325 @@ private fun MoviesApp(
         (history + remoteHistory).distinctBy(WatchProgress::key).sortedByDescending(WatchProgress::updated)
     }
 
+    val castTargets = remember { mutableStateMapOf<String, Pair<MovieTitle, MovieEpisode?>>() }
+    val latestReportProgress by rememberUpdatedState(reportProgress)
+    val latestDoNotTrackMature by rememberUpdatedState(doNotTrackMature)
+    val latestAccountKey by rememberUpdatedState(accountKey)
+    val castController = rememberNanamiDownloadedCastController(
+        context = activity,
+        appTitle = "Nanami Movies",
+        onProgress = { media, posMs, durMs ->
+            val target = castTargets[media.key] ?: return@rememberNanamiDownloadedCastController
+            val (castTitle, castEpisode) = target
+            if (!latestReportProgress || (latestDoNotTrackMature && castTitle.isMature)) return@rememberNanamiDownloadedCastController
+            val progress = library.record(castTitle.ref, castEpisode, posMs, durMs, MoviesPreferences.completion(activity))
+            if (progress?.completed == true) {
+                latestAccountKey?.let { key ->
+                    if (library.queueWatch(key, progress, true)) {
+                        pendingSyncCount = computePendingCount(key)
+                        syncSignal.trySend(Unit)
+                    }
+                }
+            }
+        },
+    )
+    val castTheme = remember {
+        NanamiCastUiTheme(
+            appTitle = "Nanami Movies",
+            accentColor = NetflixRed,
+            accentOnColor = Color.White,
+            surfaceColor = NetflixSurface,
+            cardColor = NetflixCardBg,
+            borderColor = NetflixBorder,
+            textMutedColor = NetflixTextMuted,
+            activeStatusColor = NetflixMatchGreen,
+        )
+    }
+
     Box(modifier = Modifier.fillMaxSize().background(NetflixBlack)) {
-        Scaffold(
-            containerColor = NetflixBlack,
-            snackbarHost = { SnackbarHost(snackbar) },
-            contentWindowInsets = if (showNavigationChrome) ScaffoldDefaults.contentWindowInsets else WindowInsets(0, 0, 0, 0),
-            topBar = {
-                if (showNavigationChrome) {
-                    TopAppBar(
-                        title = {
-                            if (selectedTab == MoviesNavTab.HOME) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                ) {
-                                    Image(
-                                        painter = painterResource(id = R.drawable.ic_nanami_movies_logo),
-                                        contentDescription = "Nanami Movies",
-                                        modifier = Modifier.size(34.dp),
-                                    )
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(
-                                            text = "nanami",
-                                            fontWeight = FontWeight.ExtraBold,
-                                            fontSize = 19.sp,
-                                            color = NetflixRed,
-                                        )
-                                        Text(
-                                            text = "movies",
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 19.sp,
-                                            color = Color.White,
-                                        )
-                                    }
-                                }
-                            } else {
-                                Text(
-                                    text = selectedTab.title,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 21.sp,
-                                    color = Color.White,
+        Row(modifier = Modifier.fillMaxSize()) {
+            if (useSideRail && showNavigationChrome) {
+                NavigationRail(
+                    containerColor = Color(0xFF0A0A0D),
+                    contentColor = Color.White,
+                    header = {
+                        Image(
+                            painter = painterResource(id = R.drawable.ic_nanami_movies_logo),
+                            contentDescription = "Nanami Movies",
+                            modifier = Modifier
+                                .padding(top = 12.dp, bottom = 8.dp)
+                                .size(38.dp),
+                        )
+                    },
+                ) {
+                    Spacer(Modifier.height(8.dp))
+                    MoviesNavTab.entries.forEach { navItem ->
+                        val isSelected = selectedTab == navItem
+                        NavigationRailItem(
+                            selected = isSelected,
+                            onClick = { selectedTab = navItem },
+                            modifier = Modifier.nanamiFocusHighlight(NetflixRed, cornerRadius = 10.dp),
+                            icon = {
+                                Icon(
+                                    imageVector = navItem.icon,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(23.dp),
                                 )
-                            }
-                        },
-                        actions = {
-                            if (savedSimklAccounts.isNotEmpty()) {
-                                Box {
+                            },
+                            label = {
+                                Text(
+                                    text = navItem.title,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+                                )
+                            },
+                            colors = NavigationRailItemDefaults.colors(
+                                selectedIconColor = NetflixRed,
+                                selectedTextColor = NetflixRed,
+                                indicatorColor = NetflixRed.copy(alpha = 0.16f),
+                                unselectedIconColor = Color(0xFFD5D7DF),
+                                unselectedTextColor = Color(0xFFD5D7DF),
+                            ),
+                        )
+                    }
+                }
+                VerticalDivider(color = Color(0xFF1A1A22), thickness = 1.dp)
+            }
+
+            Scaffold(
+                modifier = Modifier.weight(1f).fillMaxHeight(),
+                containerColor = NetflixBlack,
+                snackbarHost = { SnackbarHost(snackbar) },
+                contentWindowInsets = if (showNavigationChrome) ScaffoldDefaults.contentWindowInsets else WindowInsets(0, 0, 0, 0),
+                topBar = {
+                    if (showNavigationChrome) {
+                        TopAppBar(
+                            title = {
+                                if (selectedTab == MoviesNavTab.HOME) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    ) {
+                                        if (!useSideRail) {
+                                            Image(
+                                                painter = painterResource(id = R.drawable.ic_nanami_movies_logo),
+                                                contentDescription = "Nanami Movies",
+                                                modifier = Modifier.size(34.dp),
+                                            )
+                                        }
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = "nanami",
+                                                fontWeight = FontWeight.ExtraBold,
+                                                fontSize = 19.sp,
+                                                color = NetflixRed,
+                                            )
+                                            Text(
+                                                text = "movies",
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 19.sp,
+                                                color = Color.White,
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    Text(
+                                        text = selectedTab.title,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 21.sp,
+                                        color = Color.White,
+                                    )
+                                }
+                            },
+                            actions = {
+                                if (savedSimklAccounts.isNotEmpty()) {
+                                    Box {
+                                        Surface(
+                                            onClick = { showTopAccountMenu = true },
+                                            shape = RoundedCornerShape(18.dp),
+                                            color = NetflixCardBg,
+                                            border = BorderStroke(1.dp, if (accountKey != null) NetflixRed else NetflixBorder),
+                                            modifier = Modifier
+                                                .padding(end = 8.dp)
+                                                .nanamiFocusHighlight(NetflixRed, cornerRadius = 18.dp),
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            ) {
+                                                if (activeSimklAccount?.avatarUrl != null && accountKey != null) {
+                                                    CrossfadeArtwork(
+                                                        model = activeSimklAccount?.avatarUrl,
+                                                        contentDescription = activeSimklAccount?.label,
+                                                        modifier = Modifier
+                                                            .size(20.dp)
+                                                            .clip(CircleShape),
+                                                    )
+                                                } else {
+                                                    Icon(
+                                                        Icons.Default.PersonOutline,
+                                                        contentDescription = null,
+                                                        tint = NetflixRed,
+                                                        modifier = Modifier.size(18.dp),
+                                                    )
+                                                }
+                                                Text(
+                                                    text = if (accountKey != null) {
+                                                        activeSimklAccount?.username ?: activeSimklAccount?.label?.removePrefix("@") ?: "SIMKL"
+                                                    } else "Guest",
+                                                    color = Color.White,
+                                                    fontSize = 11.5.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                )
+                                                if (savedSimklAccounts.size > 1) {
+                                                    Icon(
+                                                        Icons.Default.ArrowDropDown,
+                                                        contentDescription = null,
+                                                        tint = NetflixTextMuted,
+                                                        modifier = Modifier.size(16.dp),
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        DropdownMenu(
+                                            expanded = showTopAccountMenu,
+                                            onDismissRequest = { showTopAccountMenu = false },
+                                            containerColor = NetflixSurface,
+                                        ) {
+                                            savedSimklAccounts.forEach { acc ->
+                                                val isCurrent = accountKey == acc.id
+                                                DropdownMenuItem(
+                                                    text = {
+                                                        Text(
+                                                            text = if (isCurrent) "${acc.label} (Active)" else acc.label,
+                                                            color = if (isCurrent) NetflixRed else Color.White,
+                                                            fontWeight = if (isCurrent) FontWeight.ExtraBold else FontWeight.Medium,
+                                                        )
+                                                    },
+                                                    onClick = {
+                                                        showTopAccountMenu = false
+                                                        if (!isCurrent) {
+                                                            scope.launch {
+                                                                runCatching { simkl.selectAccount(acc.id) }
+                                                                refreshAccountModels()
+                                                            }
+                                                        }
+                                                    },
+                                                )
+                                            }
+                                            HorizontalDivider(color = NetflixBorder)
+                                            DropdownMenuItem(
+                                                text = { Text("+ Add SIMKL Account", color = NetflixRed, fontWeight = FontWeight.Bold) },
+                                                onClick = {
+                                                    showTopAccountMenu = false
+                                                    openSimklWebAuth(clearCookies = true)
+                                                },
+                                            )
+                                            if (accountKey != null) {
+                                                DropdownMenuItem(
+                                                    text = { Text("Switch to Guest Mode", color = NetflixTextMuted) },
+                                                    onClick = {
+                                                        showTopAccountMenu = false
+                                                        scope.launch {
+                                                            runCatching { simkl.selectAccount(null) }
+                                                            refreshAccountModels()
+                                                        }
+                                                    },
+                                                )
+                                            }
+                                        }
+                                    }
+                                } else if (selectedTab == MoviesNavTab.HOME) {
                                     Surface(
-                                        onClick = { showTopAccountMenu = true },
+                                        onClick = { openSimklWebAuth(false) },
                                         shape = RoundedCornerShape(18.dp),
                                         color = NetflixCardBg,
-                                        border = BorderStroke(1.dp, if (accountKey != null) NetflixRed else NetflixBorder),
-                                        modifier = Modifier.padding(end = 8.dp),
+                                        border = BorderStroke(1.dp, NetflixBorder),
+                                        modifier = Modifier
+                                            .padding(end = 10.dp)
+                                            .nanamiFocusHighlight(NetflixRed, cornerRadius = 18.dp),
                                     ) {
                                         Row(
                                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                                             verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(5.dp),
                                         ) {
-                                            if (activeSimklAccount?.avatarUrl != null && accountKey != null) {
-                                                CrossfadeArtwork(
-                                                    model = activeSimklAccount?.avatarUrl,
-                                                    contentDescription = activeSimklAccount?.label,
-                                                    modifier = Modifier
-                                                        .size(20.dp)
-                                                        .clip(CircleShape),
-                                                )
-                                            } else {
-                                                Icon(
-                                                    Icons.Default.PersonOutline,
-                                                    contentDescription = null,
-                                                    tint = NetflixRed,
-                                                    modifier = Modifier.size(18.dp),
-                                                )
-                                            }
+                                            Icon(
+                                                Icons.Default.PersonOutline,
+                                                contentDescription = null,
+                                                tint = NetflixRed,
+                                                modifier = Modifier.size(16.dp),
+                                            )
                                             Text(
-                                                text = if (accountKey != null) {
-                                                    activeSimklAccount?.username ?: activeSimklAccount?.label?.removePrefix("@") ?: "SIMKL"
-                                                } else "Guest",
+                                                text = if (isTv) "QR Sign In" else "Sign In",
                                                 color = Color.White,
                                                 fontSize = 11.5.sp,
                                                 fontWeight = FontWeight.Bold,
                                             )
-                                            if (savedSimklAccounts.size > 1) {
-                                                Icon(
-                                                    Icons.Default.ArrowDropDown,
-                                                    contentDescription = null,
-                                                    tint = NetflixTextMuted,
-                                                    modifier = Modifier.size(16.dp),
-                                                )
-                                            }
-                                        }
-                                    }
-
-                                    DropdownMenu(
-                                        expanded = showTopAccountMenu,
-                                        onDismissRequest = { showTopAccountMenu = false },
-                                        containerColor = NetflixSurface,
-                                    ) {
-                                        savedSimklAccounts.forEach { acc ->
-                                            val isCurrent = accountKey == acc.id
-                                            DropdownMenuItem(
-                                                text = {
-                                                    Text(
-                                                        text = if (isCurrent) "${acc.label} (Active)" else acc.label,
-                                                        color = if (isCurrent) NetflixRed else Color.White,
-                                                        fontWeight = if (isCurrent) FontWeight.ExtraBold else FontWeight.Medium,
-                                                    )
-                                                },
-                                                onClick = {
-                                                    showTopAccountMenu = false
-                                                    if (!isCurrent) {
-                                                        scope.launch {
-                                                            runCatching { simkl.selectAccount(acc.id) }
-                                                            refreshAccountModels()
-                                                        }
-                                                    }
-                                                },
-                                            )
-                                        }
-                                        HorizontalDivider(color = NetflixBorder)
-                                        DropdownMenuItem(
-                                            text = { Text("+ Add SIMKL Account", color = NetflixRed, fontWeight = FontWeight.Bold) },
-                                            onClick = {
-                                                showTopAccountMenu = false
-                                                openSimklWebAuth(clearCookies = true)
-                                            },
-                                        )
-                                        if (accountKey != null) {
-                                            DropdownMenuItem(
-                                                text = { Text("Switch to Guest Mode", color = NetflixTextMuted) },
-                                                onClick = {
-                                                    showTopAccountMenu = false
-                                                    scope.launch {
-                                                        runCatching { simkl.selectAccount(null) }
-                                                        refreshAccountModels()
-                                                    }
-                                                },
-                                            )
                                         }
                                     }
                                 }
-                            } else if (selectedTab == MoviesNavTab.HOME) {
-                                Surface(
-                                    onClick = { openSimklWebAuth(false) },
-                                    shape = RoundedCornerShape(18.dp),
-                                    color = NetflixCardBg,
-                                    border = BorderStroke(1.dp, NetflixBorder),
-                                    modifier = Modifier.padding(end = 10.dp),
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                    ) {
-                                        Icon(
-                                            Icons.Default.PersonOutline,
-                                            contentDescription = null,
-                                            tint = NetflixRed,
-                                            modifier = Modifier.size(16.dp),
-                                        )
-                                        Text(
-                                            text = "Sign In",
-                                            color = Color.White,
-                                            fontSize = 11.5.sp,
-                                            fontWeight = FontWeight.Bold,
-                                        )
-                                    }
-                                }
-                            }
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = NetflixBlack,
-                            titleContentColor = Color.White,
-                        ),
-                    )
-                }
-            },
-            bottomBar = {
-                if (showNavigationChrome) {
-                    Column {
-                        HorizontalDivider(color = Color(0xFF1A1A22), thickness = 1.dp)
-                        NavigationBar(
-                            containerColor = Color(0xFF0A0A0D),
-                            contentColor = Color.White,
-                            tonalElevation = 0.dp,
-                        ) {
-                            MoviesNavTab.entries.forEach { navItem ->
-                                val isSelected = selectedTab == navItem
-                                NavigationBarItem(
-                                    selected = isSelected,
-                                    onClick = { selectedTab = navItem },
-                                    icon = {
-                                        Icon(
-                                            imageVector = navItem.icon,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(23.dp),
-                                        )
-                                    },
-                                    label = {
-                                        Text(
-                                            text = navItem.title,
-                                            fontSize = 11.sp,
-                                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
-                                        )
-                                    },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = NetflixRed,
-                                        selectedTextColor = NetflixRed,
-                                        indicatorColor = NetflixRed.copy(alpha = 0.16f),
-                                        unselectedIconColor = Color(0xFFD5D7DF),
-                                        unselectedTextColor = Color(0xFFD5D7DF),
-                                    ),
+                            },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = NetflixBlack,
+                                titleContentColor = Color.White,
+                            ),
+                        )
+                    }
+                },
+                bottomBar = {
+                    if (showNavigationChrome) {
+                        Column {
+                            if (!isTv) {
+                                DownloadedNowCastingBar(
+                                    controller = castController,
+                                    theme = castTheme,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                                 )
+                            }
+                            if (!useSideRail) {
+                                HorizontalDivider(color = Color(0xFF1A1A22), thickness = 1.dp)
+                                NavigationBar(
+                                    containerColor = Color(0xFF0A0A0D),
+                                    contentColor = Color.White,
+                                    tonalElevation = 0.dp,
+                                ) {
+                                    MoviesNavTab.entries.forEach { navItem ->
+                                        val isSelected = selectedTab == navItem
+                                        NavigationBarItem(
+                                            selected = isSelected,
+                                            onClick = { selectedTab = navItem },
+                                            icon = {
+                                                Icon(
+                                                    imageVector = navItem.icon,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(23.dp),
+                                                )
+                                            },
+                                            label = {
+                                                Text(
+                                                    text = navItem.title,
+                                                    fontSize = 11.sp,
+                                                    fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+                                                )
+                                            },
+                                            colors = NavigationBarItemDefaults.colors(
+                                                selectedIconColor = NetflixRed,
+                                                selectedTextColor = NetflixRed,
+                                                indicatorColor = NetflixRed.copy(alpha = 0.16f),
+                                                unselectedIconColor = Color(0xFFD5D7DF),
+                                                unselectedTextColor = Color(0xFFD5D7DF),
+                                            ),
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            },
-        ) { paddingValues ->
+                },
+            ) { paddingValues ->
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -820,6 +944,35 @@ private fun MoviesApp(
                                         else openDetail(item)
                                     },
                                     playOffline = { item, episode, file -> if (playback == null) startPlayback(item, episode, file) },
+                                    onCastOffline = { item ->
+                                        val file = vault.completedFile(activity, item)
+                                        if (file == null) {
+                                            scope.launch {
+                                                vault.markMissing(activity, item)
+                                                snackbar.showSnackbar("Saved file missing; tap Retry to download again.")
+                                            }
+                                        } else {
+                                            castTargets[item.key] = item.title to item.episode
+                                            val startPos = if (rememberPosition) {
+                                                library.progress(item.title.ref, item.episode)?.takeIf { it.canResume }?.position ?: 0L
+                                            } else 0L
+                                            castController.requestCast(
+                                                DownloadedCastMedia(
+                                                    key = item.key,
+                                                    title = item.episode?.let { "S${it.season}:E${it.episode} • ${it.title}" } ?: item.title.title,
+                                                    seriesTitle = if (item.episode != null) item.title.title else null,
+                                                    subtitle = if (item.episode != null) item.title.title else "Downloaded Movie",
+                                                    seasonNumber = item.episode?.season,
+                                                    episodeNumber = item.episode?.episode,
+                                                    artworkUrl = item.episode?.thumbnail ?: item.title.poster ?: item.title.backdrop,
+                                                    file = file,
+                                                    startPositionMs = startPos,
+                                                    isMovie = item.title.kind == MovieKind.MOVIE,
+                                                ),
+                                            )
+                                        }
+                                    },
+                                    activeCastKey = (castController.activeMedia ?: castController.pendingMedia)?.key,
                                 )
                                 MoviesNavTab.SEARCH -> MoviesSearchScreen(
                                     catalog = catalog,
@@ -842,6 +995,7 @@ private fun MoviesApp(
                                     syncMessage = syncMessage,
                                     onAccountChanged = ::refreshAccountModels,
                                     onOpenWebAuth = ::openSimklWebAuth,
+                                    onOpenQrAuth = { showSimklQrDialog = true },
                                     onSync = { syncSignal.trySend(Unit) },
                                     hideMature = hideMature,
                                     onHideMature = { hideMature = it; MoviesPreferences.setHideMature(activity, it) },
@@ -859,6 +1013,43 @@ private fun MoviesApp(
                     }
                 }
             }
+            }
+        }
+
+        if (!isTv) {
+            DownloadedCastRemoteDialog(
+                controller = castController,
+                theme = castTheme,
+                onDismiss = { castController.isRemoteSheetOpen = false },
+            )
+        }
+
+        if (showSimklQrDialog) {
+            NanamiQrAuthDialog(
+                providerId = "simkl",
+                providerLabel = "SIMKL",
+                accentColor = NetflixRed,
+                accentOnColor = Color.White,
+                surfaceColor = NetflixSurface,
+                borderColor = NetflixBorder,
+                mutedTextColor = NetflixTextMuted,
+                onTokenReceived = { token ->
+                    showSimklQrDialog = false
+                    scope.launch {
+                        try {
+                            val account = simkl.connectWithToken(token)
+                            refreshAccountModels()
+                            syncSignal.trySend(Unit)
+                            Toast.makeText(activity, "Connected to SIMKL as ${account.label}", Toast.LENGTH_SHORT).show()
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Toast.makeText(activity, e.message ?: "Couldn't complete SIMKL QR sign-in.", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                },
+                onDismiss = { showSimklQrDialog = false },
+            )
         }
 
         // Smooth Fullscreen Player Overlay (preserves underlying scroll state & animates cleanly!)

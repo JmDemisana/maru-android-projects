@@ -73,6 +73,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel)
     implementation(libs.androidx.lifecycle.service)
     implementation(libs.coil.compose)
+    implementation("androidx.browser:browser:1.8.0")
+    implementation("com.google.zxing:core:3.5.3")
 
     // Network & serialization
     implementation(libs.bundles.network)
