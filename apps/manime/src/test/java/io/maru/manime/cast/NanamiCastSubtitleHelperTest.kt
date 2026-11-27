@@ -66,7 +66,7 @@ class NanamiCastSubtitleHelperTest {
         assertEquals(1, extracted.size)
         val track = extracted.single()
         assertEquals("eng", track.language)
-        assertEquals("English (English Signs)", track.label)
+        assertEquals("English Signs", track.label)
         assertTrue(track.vttContent.startsWith("WEBVTT"))
         assertTrue(track.vttContent.contains("00:00:01.000 --> 00:00:03.500"))
         assertTrue(track.vttContent.contains("Welcome back!"))
